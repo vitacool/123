@@ -393,6 +393,9 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
     }
     const resolveAsset = (clip: Clip): SourceInfo | null =>
       state.assets.find((asset) => asset.url === clip.sourceUrl) ?? currentSource
+    // 素材已从素材库移除：该片段不绘制，画布背景留着（主轨 / 叠加轨 / 转场都适用）。
+    const isMissing = (clip: Clip): boolean =>
+      !state.assets.some((asset) => asset.url === clip.sourceUrl)
 
     const paintSource = (
       clip: Clip,
@@ -402,6 +405,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
       alphaOverride?: number,
     ) => {
       if (!source || sourceWidth <= 0 || sourceHeight <= 0) return
+      if (isMissing(clip)) return
       const clipSource = resolveAsset(clip)
       if (!clipSource) return
       const patch = state.previewPatch
@@ -465,6 +469,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
 
     /** 取某个片段可用于绘制的画面源（视频元素 / 已解码图片）。 */
     const sourceFor = (clip: Clip): { source: CanvasImageSource; w: number; h: number } | null => {
+      if (isMissing(clip)) return null
       if (clip.type === 'image') {
         const image = imageRefs.current.get(clip.sourceUrl)
         if (!image || !image.complete) return null

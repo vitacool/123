@@ -319,12 +319,18 @@ describe('multi-source export plan', () => {
     expect(plan.graph).toContain('pad=1280:720:438:0:black')
   })
 
-  it('falls back to the primary source when only one source is provided', () => {
+  // 语义变更（意图如此）：素材缺失的片段不再静默用主素材顶替，而是输出画布背景。
+  // 原先这里断言「回落到主素材并用 split=2 复用同一输入」，那会把别的素材画到这一段上，
+  // 与素材库删除素材后的「素材已移除」语义冲突。
+  it('renders a missing asset as canvas background instead of reusing the primary source', () => {
     const plan = buildExportPlan(multiSourceProject(), SOURCE, true)
+    // 只剩一个可用输入，第二段（素材不在 sources 里）走背景分支
     expect(plan.inputs).toHaveLength(1)
     expect(plan.inputs[0].url).toBe(SOURCE.url)
-    expect(plan.graph).toContain('[0:v]split=2')
     expect(plan.graph).not.toContain('[1:v]')
+    expect(plan.graph).toContain('color=c=0x000000')
+    // 两段仍然各占一个时间片段，用 concat 拼回来
+    expect(plan.graph).toContain('concat=n=2:v=1:a=0[outv]')
   })
 
   it('keeps per-asset branches when the timeline has gaps', () => {

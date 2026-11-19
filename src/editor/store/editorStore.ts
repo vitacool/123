@@ -41,6 +41,7 @@ import {
   createPasteVisualAttributesCommand,
   createPasteAudioAttributesCommand,
   createMoveOverlayTrackCommand,
+  createRemoveAssetClipsCommand,
   createSplitOverlayClipCommand,
   createSplitTextClipCommand,
   createTrimAudioClipCommand,
@@ -101,6 +102,8 @@ import {
   TRANSITION_MIN_DURATION,
 } from '../core/transition'
 import { isSameColor, normalizeColor, type ColorAdjustments } from '../core/color'
+import { isAssetReferenced, unusedAssets } from '../core/assets'
+import { deleteMediaBlob } from '../services/draftStore'
 import {
   captureAudioAttrs,
   captureVisualAttrs,
@@ -340,6 +343,15 @@ export interface EditorState {
     playhead: number
   }) => void
   addAssets: (assets: MediaAsset[]) => void
+  /**
+   * 从素材库删除一个素材。
+   * - removeClips=true：同时删除所有引用它的片段（1 步撤销）。
+   * - removeClips=false：片段保留，但会显示为「素材已移除」。
+   * Blob 会从 IndexedDB 删除（不可撤销），objectURL 仅在不再被引用时回收。
+   */
+  removeAsset: (assetId: string, options: { removeClips: boolean }) => void
+  /** 一次性清理所有未被任何片段引用的素材。 */
+  cleanupUnusedAssets: () => void
   addAssetToTimeline: (
     assetId: string,
     targetTrackId: string | null,
@@ -759,6 +771,68 @@ export function createEditorStore() {
           incoming.length === 1 ? `已导入素材「${incoming[0].name}」` : `已导入 ${incoming.length} 个素材`,
           'success',
         )
+      },
+
+      removeAsset: (assetId, options) => {
+        const state = get()
+        const asset = state.assets.find((item) => item.id === assetId)
+        if (!asset) return
+        const referenced = isAssetReferenced(state.project, asset)
+
+        // 先删片段（1 步撤销），再删素材本身（素材不在撤销历史里）。
+        if (options.removeClips && referenced) {
+          run(createRemoveAssetClipsCommand({ url: asset.url, assetId: asset.id }))
+        }
+
+        // Blob 从 IndexedDB 删除：不可撤销。
+        void deleteMediaBlob(assetId).catch(() => undefined)
+
+        // objectURL 只在「不再被任何片段使用」时回收；
+        // 仍在使用的 URL 交给 VideoEditor 卸载时的统一回收（importedUrlsRef）。
+        const stillUsedByClips = !options.removeClips && referenced
+        if (!stillUsedByClips && asset.url.startsWith('blob:')) {
+          try {
+            URL.revokeObjectURL(asset.url)
+          } catch {
+            // 已经失效的 URL 忽略。
+          }
+        }
+
+        const current = get()
+        const assets = current.assets.filter((item) => item.id !== assetId)
+        const nextSource =
+          current.source?.url === asset.url
+            ? assets.find((item) => item.kind !== 'audio') ?? null
+            : current.source
+        set({ assets, source: nextSource })
+        current.notify(`已删除素材「${asset.name}」`, 'info')
+      },
+
+      cleanupUnusedAssets: () => {
+        const state = get()
+        const unused = unusedAssets(state.project, state.assets)
+        if (unused.length === 0) {
+          state.notify('没有未使用的素材', 'info')
+          return
+        }
+        const unusedIds = new Set(unused.map((asset) => asset.id))
+        for (const asset of unused) {
+          void deleteMediaBlob(asset.id).catch(() => undefined)
+          if (asset.url.startsWith('blob:')) {
+            try {
+              URL.revokeObjectURL(asset.url)
+            } catch {
+              // 已经失效的 URL 忽略。
+            }
+          }
+        }
+        const assets = state.assets.filter((asset) => !unusedIds.has(asset.id))
+        const source =
+          state.source && unused.some((asset) => asset.url === state.source?.url)
+            ? assets.find((asset) => asset.kind !== 'audio') ?? null
+            : state.source
+        set({ assets, source })
+        state.notify(`已清理 ${unused.length} 个未使用素材`, 'success')
       },
 
       addAssetToTimeline: (assetId, targetTrackId, targetStart) => {

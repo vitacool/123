@@ -75,6 +75,14 @@ export async function loadMediaBlob(id: string): Promise<Blob | undefined> {
   return withStore<Blob | undefined>(MEDIA_STORE, 'readonly', (store) => store.get(id))
 }
 
+/**
+ * 从 IndexedDB 的 media store 删除某个素材的 Blob。
+ * 素材被从素材库移除时调用；这一步不可撤销（撤销只恢复时间轴状态）。
+ */
+export async function deleteMediaBlob(id: string): Promise<void> {
+  await withStore(MEDIA_STORE, 'readwrite', (store) => store.delete(id))
+}
+
 export async function clearDraft(): Promise<void> {
   const database = await openDatabase()
   await new Promise<void>((resolve, reject) => {

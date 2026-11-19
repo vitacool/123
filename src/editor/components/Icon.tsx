@@ -45,6 +45,7 @@ export type IconName =
   | 'power'
   | 'lock'
   | 'text'
+  | 'unlink'
 
 interface IconProps extends SVGProps<SVGSVGElement> {
   name: IconName
@@ -313,6 +314,14 @@ const paths: Record<IconName, ReactNode> = {
     <>
       <rect x="5" y="10" width="14" height="10" rx="2" />
       <path d="M8 10V7.2a4 4 0 0 1 8 0V10" />
+    </>
+  ),
+  unlink: (
+    <>
+      <path d="M9.5 14.5 6.2 17.8a2.9 2.9 0 0 1-4.1-4.1l3.3-3.3" />
+      <path d="M14.5 9.5l3.3-3.3a2.9 2.9 0 0 1 4.1 4.1l-3.3 3.3" />
+      <path d="M9.8 6.6 11 5.4a3.4 3.4 0 0 1 4.8 4.8l-1.2 1.2" />
+      <path d="M14.2 17.4 13 18.6a3.4 3.4 0 0 1-4.8-4.8l1.2-1.2" />
     </>
   ),
   text: (

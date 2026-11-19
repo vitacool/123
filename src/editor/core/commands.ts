@@ -33,6 +33,7 @@ import {
   applyColorToAllClips,
   applyAttributePatch,
   moveOverlayTrackInProject,
+  removeClipsForAsset,
   splitOverlayClipAt,
   splitProjectAt,
   trimOverlayClipAt,
@@ -77,6 +78,7 @@ import type {
   TrackState,
 } from './types'
 import type { TransitionAllOptions } from './operations'
+import type { RemoveAssetClipsOptions } from './operations'
 import type { ColorAdjustments } from './color'
 import type { AudioAttrs, VisualAttrs } from './attributeClipboard'
 import { normalizeTransitionType, transitionLabel } from './transition'
@@ -172,6 +174,21 @@ export function createSetColorAllCommand(color: ColorAdjustments): EditorCommand
     label: '调色应用到全部片段',
     execute(project) {
       return applyColorToAllClips(project, color).project
+    },
+  }
+}
+
+/**
+ * 删除素材时一并删除所有引用它的片段（1 次命令 = 1 步撤销）。
+ * 没有片段引用时返回原 project。
+ */
+export function createRemoveAssetClipsCommand(
+  options: RemoveAssetClipsOptions,
+): EditorCommand {
+  return {
+    label: '删除素材及关联片段',
+    execute(project) {
+      return removeClipsForAsset(project, options)
     },
   }
 }

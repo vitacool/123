@@ -5261,3 +5261,137 @@
   opacity: 0.32;
   cursor: default;
 }
+
+/* ===== 素材缺失占位（素材被从素材库移除，但时间轴仍保留片段） ===== */
+.clip-bar.is-missing {
+  background: repeating-linear-gradient(
+    135deg,
+    #eceae3,
+    #eceae3 6px,
+    #e4e1d8 6px,
+    #e4e1d8 12px
+  );
+  border-style: dashed;
+  border-color: var(--fc-line-strong);
+}
+
+/* 缺失态只显示占位，隐藏原有的画面/文案 */
+.clip-bar.is-missing .clip-filmstrip,
+.clip-bar.is-missing .clip-thumb,
+.clip-bar.is-missing .freeze-texture,
+.clip-bar.is-missing .clip-copy {
+  display: none;
+}
+
+.clip-missing {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 6px;
+  color: var(--fc-muted);
+  font-size: var(--fc-text-xs);
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
+.clip-missing-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ===== 素材卡片：外层包裹 + 右上角删除按钮 ===== */
+.media-card-wrap {
+  position: relative;
+}
+
+.media-card-wrap .media-card {
+  width: 100%;
+}
+
+.media-card-delete {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid rgba(181, 76, 55, 0.28);
+  border-radius: var(--fc-radius-sm);
+  background: rgba(255, 253, 248, 0.94);
+  color: #a4452f;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+/* 同一时刻只显示一张卡片的删除按钮：hover 或键盘 focus 时才浮现 */
+.media-card-wrap:hover .media-card-delete,
+.media-card-wrap:focus-within .media-card-delete {
+  opacity: 1;
+}
+
+.media-card-delete:hover {
+  background: rgba(181, 76, 55, 0.12);
+}
+
+/* ===== 删除素材确认浮层 ===== */
+.media-confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 140;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(28, 26, 22, 0.32);
+}
+
+.media-confirm {
+  width: min(420px, calc(100vw - 32px));
+  padding: 18px;
+  border: 1px solid var(--fc-line);
+  border-radius: var(--fc-radius-lg);
+  background: #faf7f0;
+  box-shadow: 0 24px 80px rgba(25, 23, 19, 0.28);
+}
+
+.media-confirm h3 {
+  margin: 0 0 8px;
+  font-size: var(--fc-text-lg);
+}
+
+.media-confirm p {
+  margin: 0 0 6px;
+  color: var(--fc-ink-soft);
+  font-size: var(--fc-text-sm);
+  line-height: 1.6;
+}
+
+.media-confirm .media-confirm-hint {
+  margin: 0 0 14px;
+  color: var(--fc-muted);
+  font-size: var(--fc-text-xs);
+}
+
+.media-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.media-confirm-actions .is-danger {
+  border-color: rgba(181, 76, 55, 0.3);
+  color: #a4452f;
+}
+
+.media-confirm-actions .is-danger:hover {
+  background: rgba(181, 76, 55, 0.1);
+}

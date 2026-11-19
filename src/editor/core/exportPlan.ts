@@ -101,6 +101,42 @@ function createResolver(sources: SourceInfo[]): (clip: Clip) => SourceInfo {
   return (clip) => byUrl.get(clip.sourceUrl) ?? fallback
 }
 
+/**
+ * 片段引用的素材是否已经不在导出源里（素材被从素材库移除）。
+ * 这类片段不参与解码，直接输出画布背景，避免用别的素材顶替。
+ */
+function isClipSourceMissing(sources: SourceInfo[], clip: Clip): boolean {
+  return !sources.some((source) => source.url === clip.sourceUrl)
+}
+
+/** 素材缺失片段的占位分支：纯画布背景，时长与片段一致。 */
+function missingClipBackgroundLine(
+  clip: Clip,
+  project: Project,
+  width: number,
+  height: number,
+  fps: number,
+): string {
+  const duration = clamp(clipTimelineDuration(clip), 0.02, 3600)
+  const background = clipBackground(clip, project)
+  return `color=c=${backgroundFfmpegColor(background)}:s=${width}x${height}:r=${fps}:d=${num(duration)},format=yuv420p,setsar=1`
+}
+
+/**
+ * 按输入序号分组，跳过 -1（素材缺失的片段没有输入）。
+ * 与 groupIndexes 的区别：保留片段在工程里的原始下标。
+ */
+function groupUsableInputs(inputs: readonly number[]): Map<number, number[]> {
+  const groups = new Map<number, number[]>()
+  inputs.forEach((input, index) => {
+    if (input < 0) return
+    const list = groups.get(input)
+    if (list) list.push(index)
+    else groups.set(input, [index])
+  })
+  return groups
+}
+
 interface InputRegistry {
   inputs: ExportInput[]
   indexByUrl: Map<string, number>
@@ -132,16 +168,6 @@ function registerInput(
 }
 
 /** Group original indexes by the input they belong to, preserving order. */
-function groupIndexes(values: number[]): Map<number, number[]> {
-  const groups = new Map<number, number[]>()
-  values.forEach((value, index) => {
-    const list = groups.get(value)
-    if (list) list.push(index)
-    else groups.set(value, [index])
-  })
-  return groups
-}
-
 /**
  * Emit one `split` per input that feeds more than one branch. Single-use
  * streams are addressed directly, so the graph stays compact.
@@ -414,17 +440,24 @@ function buildContiguousExportPlan(
   const resolve = createResolver(sources)
   const mainVisible = isMainVideoVisible(project)
   const clipInputs = project.clips.map((clip) =>
-    registerInput(registry, resolve(clip), sourceHasAudio),
+    isClipSourceMissing(sources, clip)
+      ? -1
+      : registerInput(registry, resolve(clip), sourceHasAudio),
   )
   const lines: string[] = []
 
   const videoBranches = mainVisible
-    ? splitBranches(lines, groupIndexes(clipInputs), 'v', 'vsrc')
+    ? splitBranches(lines, groupUsableInputs(clipInputs), 'v', 'vsrc')
     : new Map<number, string>()
 
   project.clips.forEach((clip, index) => {
     const output = clipCount > 1 ? `[v${index}]` : '[outv]'
     const clipDuration = clamp(clipTimelineDuration(clip), 0.02, 3600)
+    // 素材已从素材库移除：输出画布背景，不消费任何输入。
+    if (clipInputs[index] < 0) {
+      lines.push(`${missingClipBackgroundLine(clip, project, width, height, fps)}${output}`)
+      return
+    }
     if (!mainVisible) {
       lines.push(
         `color=c=black:s=${width}x${height}:r=${fps}:d=${num(clipDuration)},format=yuv420p,setsar=1${output}`,
@@ -506,6 +539,7 @@ function buildContiguousExportPlan(
     // 否则音视频分支数不一致，成片会提前结束或音画不同步。
     if (clip.type !== 'video') return
     const input = clipInputs[index]
+    if (input < 0) return
     if (!registry.inputs[input].hasAudio) return
     const list = audioGroups.get(input)
     if (list) list.push(index)
@@ -604,9 +638,12 @@ function buildGappedExportPlan(
   const videoGroups = new Map<number, number[]>()
   units.forEach((unit, unitIndex) => {
     if (unit.kind !== 'clip') return
-    const input = registerInput(registry, resolve(unit.clip), sourceHasAudio)
+    // 素材已从素材库移除：不注册输入，后面直接输出画布背景。
+    const input = isClipSourceMissing(sources, unit.clip)
+      ? -1
+      : registerInput(registry, resolve(unit.clip), sourceHasAudio)
     unitInputs.set(unitIndex, input)
-    if (!mainVisible) return
+    if (input < 0 || !mainVisible) return
     const list = videoGroups.get(input)
     if (list) list.push(unitIndex)
     else videoGroups.set(input, [unitIndex])
@@ -623,6 +660,11 @@ function buildGappedExportPlan(
       lines.push(
         `color=c=black:s=${width}x${height}:r=${fps}:d=${num(unit.duration)},format=yuv420p,setsar=1${videoLabel(index)}`,
       )
+      return
+    }
+    // 素材已从素材库移除：该段输出画布背景。
+    if (unitInputs.get(index) === -1) {
+      lines.push(`${missingClipBackgroundLine(unit.clip, project, width, height, fps)}${videoLabel(index)}`)
       return
     }
     if (!mainVisible) {
@@ -654,7 +696,7 @@ function buildGappedExportPlan(
   units.forEach((unit, unitIndex) => {
     if (unit.kind !== 'clip' || unit.clip.type !== 'video') return
     const input = unitInputs.get(unitIndex)
-    if (input === undefined || !registry.inputs[input].hasAudio) return
+    if (input === undefined || input < 0 || !registry.inputs[input].hasAudio) return
     const list = audioGroups.get(input)
     if (list) list.push(unitIndex)
     else audioGroups.set(input, [unitIndex])
@@ -762,6 +804,8 @@ function buildOverlayExportPlan(
     if (!isOverlayVideoVisible(track)) continue
     for (const segment of getTimeline(track.clips)) {
       if (segment.duration <= 0.001) continue
+      // 素材被移除的叠加片段不参与合成（叠加层没有「画布背景」的概念，直接跳过）。
+      if (isClipSourceMissing(sources, segment.clip)) continue
       const source = resolve(segment.clip)
       units.push({
         clip: segment.clip,

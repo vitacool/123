@@ -29,6 +29,7 @@ import type {
   OverlayTrack,
   Project,
   SourceInfo,
+  TextClip,
   TrackState,
   TransitionType,
 } from './types'
@@ -1014,6 +1015,68 @@ export function moveOverlayTrackInProject(
   const [moved] = next.splice(index, 1)
   next.splice(targetIndex, 0, moved)
   return { ...project, overlayTracks: next }
+}
+
+/** 素材删除时需要一并删掉的片段（主轨 + 叠加轨 + 音频轨 + 字幕 link）。 */
+export interface RemoveAssetClipsOptions {
+  /** 素材的 url（片段通过 clip.sourceUrl 引用它）。 */
+  url: string
+  /** 素材 id（字幕片段的 link.assetId 引用它）。 */
+  assetId: string
+}
+
+/**
+ * 删除所有引用某个素材的片段（一次调用 = 1 步撤销）。
+ * 没有任何片段引用时返回原 project（不产生历史）。
+ */
+export function removeClipsForAsset(
+  project: Project,
+  options: RemoveAssetClipsOptions,
+): Project {
+  const { url, assetId } = options
+  let removed = 0
+  const keepClip = (clip: Clip): boolean => {
+    if (clip.sourceUrl === url) {
+      removed += 1
+      return false
+    }
+    return true
+  }
+  const keepLinkedText = (clip: TextClip): boolean => {
+    if (clip.link?.assetId === assetId || clip.link?.sourceUrl === url) {
+      removed += 1
+      return false
+    }
+    return true
+  }
+  const overlayTracks = (project.overlayTracks ?? []).map((track) => ({
+    ...track,
+    clips: track.clips.filter(keepClip),
+  }))
+  const audioTracks = (project.audioTracks ?? []).map((track) => ({
+    ...track,
+    clips: track.clips.filter((clip) => {
+      if (clip.sourceUrl === url) {
+        removed += 1
+        return false
+      }
+      return true
+    }),
+  }))
+  const textTracks = (project.textTracks ?? []).map((track) => ({
+    ...track,
+    clips: track.clips.filter(keepLinkedText),
+  }))
+  // 主轨必须在这里过滤：上面的 removed 计数只覆盖了叠加/音频/字幕轨。
+  const clips = project.clips.filter(keepClip)
+  if (removed === 0) return project
+  return {
+    ...project,
+    clips,
+    ...(project.overlayTracks ? { overlayTracks } : {}),
+    ...(project.audioTracks ? { audioTracks } : {}),
+    ...(project.textTracks ? { textTracks } : {}),
+  }
 }
 
 /** 属性粘贴的结果：project 变化 + 实际写入 / 被跳过的片段数。 */

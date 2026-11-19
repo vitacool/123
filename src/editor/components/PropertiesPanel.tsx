@@ -254,6 +254,7 @@ function MultiSelectionPanel({ ids }: { ids: string[] }) {
 
 export function PropertiesPanel() {
   const project = useEditorStore((state) => state.project)
+  const assets = useEditorStore((state) => state.assets)
   const selectedClipId = useEditorStore((state) => state.selectedClipId)
   const selectedIds = useEditorStore((state) => state.selectedIds)
   const cropSession = useEditorStore((state) => state.cropSession)
@@ -361,7 +362,9 @@ export function PropertiesPanel() {
   const duration = clipTimelineDuration(clip)
   const freezeDuration = duration
   const isCropping = Boolean(cropSession)
-  const disabled = isCropping
+  // 素材已被从素材库移除：画面属性（旋转/裁剪/调色…）都失去意义，但删除与移动仍可用。
+  const missingAsset = !assets.some((asset) => asset.url === clip.sourceUrl)
+  const disabled = isCropping || missingAsset
   // 转场作用在「本片段 → 下一片段」交界，叠加轨只在同一轨道内相邻。
   const nextTransitionClip = location.track
     ? (location.track.clips[location.track.clips.findIndex((item) => item.id === clip.id) + 1] ?? null)
@@ -459,6 +462,17 @@ export function PropertiesPanel() {
         </div>
 
         {/* 只读的时间信息不再占一个 section，压缩成头部 chips。 */}
+        {missingAsset && (
+          <section className="panel-section">
+            <div className="section-title">
+              <span>素材已移除</span>
+            </div>
+            <p className="control-note">
+              该片段的素材已从素材库删除，预览与导出都按画布背景处理；画面属性暂不可编辑，
+              仍可移动或删除这个片段。重新导入同一文件后可恢复编辑。
+            </p>
+          </section>
+        )}
         <div className="summary-chips">
           <span className="summary-chip">
             时长 <strong>{duration.toFixed(2)}s</strong>
@@ -956,7 +970,7 @@ export function PropertiesPanel() {
           <button
             type="button"
             className="button delete-clip"
-            disabled={disabled}
+            disabled={isCropping}
             onClick={deleteSelectedClip}
           >
             <Icon name="trash" size={16} />

@@ -1,0 +1,264 @@
+import { describe, expect, it } from 'vitest'
+import {
+  assetUrlSet,
+  countAssetReferences,
+  isAssetReferenced,
+  isClipAssetMissing,
+  unusedAssets,
+} from '../src/editor/core/assets'
+import { createRemoveAssetClipsCommand } from '../src/editor/core/commands'
+import { buildExportPlan } from '../src/editor/core/exportPlan'
+import { createInitialProject, removeClipsForAsset } from '../src/editor/core/operations'
+import { createEditorStore } from '../src/editor/store/editorStore'
+import type {
+  AudioClip,
+  AudioTrack,
+  Clip,
+  MediaAsset,
+  OverlayTrack,
+  Project,
+  SourceInfo,
+  TextClip,
+  TextTrack,
+} from '../src/editor/core/types'
+
+const source = (url: string, name = url): SourceInfo => ({
+  url,
+  name,
+  size: 1024,
+  duration: 10,
+  width: 640,
+  height: 360,
+})
+
+const asset = (id: string, url: string): MediaAsset => ({ ...source(url), id, kind: 'video' })
+
+const clip = (id: string, url: string, extra: Partial<Clip> = {}): Clip => ({
+  id,
+  sourceUrl: url,
+  sourceStart: 0,
+  sourceEnd: 4,
+  type: 'video',
+  rotation: 0,
+  flipH: false,
+  flipV: false,
+  crop: { x: 0, y: 0, w: 1, h: 1 },
+  scale: 1,
+  position: { x: 0, y: 0 },
+  gapBefore: 0,
+  ...extra,
+})
+
+const overlayTrack = (id: string, clips: Clip[]): OverlayTrack => ({
+  id,
+  name: id,
+  muted: false,
+  hidden: false,
+  enabled: true,
+  locked: false,
+  solo: false,
+  clips,
+})
+
+const audioClip = (id: string, url: string): AudioClip => ({
+  id,
+  sourceUrl: url,
+  sourceStart: 0,
+  sourceEnd: 4,
+  start: 0,
+  volume: 1,
+  fadeIn: 0,
+  fadeOut: 0,
+})
+
+const audioTrack = (id: string, clips: AudioClip[]): AudioTrack => ({
+  id,
+  name: id,
+  muted: false,
+  hidden: false,
+  enabled: true,
+  locked: false,
+  solo: false,
+  volume: 1,
+  clips,
+})
+
+const textClip = (id: string, assetId: string): TextClip =>
+  ({
+    id,
+    text: '字幕',
+    start: 0,
+    end: 2,
+    link: { assetId },
+  }) as unknown as TextClip
+
+const textTrack = (id: string, clips: TextClip[]): TextTrack => ({
+  id,
+  name: id,
+  kind: 'caption',
+  muted: false,
+  hidden: false,
+  enabled: true,
+  locked: false,
+  solo: false,
+  clips,
+})
+
+/** 工程：主轨 2 段（都用 A），叠加轨 1 段（A），音频轨 1 段（B），字幕 1 条（link A）。 */
+function projectWithReferences(): Project {
+  const base = createInitialProject({ url: 'u1', duration: 10 }, 'main-1')
+  return {
+    ...base,
+    clips: [
+      clip('main-1', 'u1', { sourceEnd: 4 }),
+      { ...clip('main-2', 'u1', { sourceStart: 4, sourceEnd: 8 }), gapBefore: 0 },
+    ],
+    overlayTracks: [overlayTrack('ov1', [clip('ov-clip', 'u1')])],
+    audioTracks: [audioTrack('au1', [audioClip('au-clip', 'u2')])],
+    textTracks: [textTrack('tx1', [textClip('tx-clip', 'asset-a')])],
+  }
+}
+
+describe('素材引用关系（core/assets）', () => {
+  it('统计引用数：主轨 + 叠加轨 + 音频轨 + 字幕 link', () => {
+    const project = projectWithReferences()
+    expect(countAssetReferences(project, { id: 'asset-a', url: 'u1' })).toBe(4)
+    expect(countAssetReferences(project, { id: 'asset-b', url: 'u2' })).toBe(1)
+    expect(countAssetReferences(project, { id: 'asset-c', url: 'u3' })).toBe(0)
+    expect(isAssetReferenced(project, { id: 'asset-c', url: 'u3' })).toBe(false)
+  })
+
+  it('unusedAssets 只返回完全没有引用的素材', () => {
+    const project = projectWithReferences()
+    const assets = [asset('a', 'u1'), asset('b', 'u2'), asset('c', 'u3')]
+    expect(unusedAssets(project, assets).map((item) => item.id)).toEqual(['c'])
+  })
+
+  it('isClipAssetMissing 按 url 判断', () => {
+    const urls = assetUrlSet([asset('a', 'u1')])
+    expect(isClipAssetMissing(urls, { sourceUrl: 'u1' })).toBe(false)
+    expect(isClipAssetMissing(urls, { sourceUrl: 'u9' })).toBe(true)
+  })
+})
+
+describe('删除素材关联片段（operations / commands）', () => {
+  it('一次删除主轨 + 叠加轨 + 音频轨 + 字幕里所有引用该素材的片段', () => {
+    const project = projectWithReferences()
+    const next = removeClipsForAsset(project, { url: 'u1', assetId: 'asset-a' })
+
+    expect(next.clips).toHaveLength(0)
+    expect(next.overlayTracks![0].clips).toHaveLength(0)
+    // 音频轨引用的是 u2，不动
+    expect(next.audioTracks![0].clips).toHaveLength(1)
+    // 字幕 link 指向 asset-a，删掉
+    expect(next.textTracks![0].clips).toHaveLength(0)
+  })
+
+  it('没有片段引用时返回原 project（不产生历史）', () => {
+    const project = projectWithReferences()
+    const untouched = removeClipsForAsset(project, { url: 'u9', assetId: 'asset-z' })
+    expect(untouched).toBe(project)
+    expect(createRemoveAssetClipsCommand({ url: 'u9', assetId: 'asset-z' }).execute(project)).toBe(project)
+  })
+})
+
+describe('导出：素材缺失的片段输出画布背景', () => {
+  const sources = [source('u1'), source('u2')]
+
+  it('缺失素材的片段生成 color 分支，不再复用别的输入', () => {
+    const base = createInitialProject({ url: 'u1', duration: 10 }, 'keep')
+    const project: Project = {
+      ...base,
+      clips: [clip('keep', 'u1'), clip('gone', 'u3')],
+    }
+    const plan = buildExportPlan(project, sources, true)
+    // 只有 u1 一个输入
+    expect(plan.inputs.map((item) => item.url)).toEqual(['u1'])
+    // 第二段为纯色背景
+    expect(plan.graph).toContain('color=c=0x000000:s=640x360')
+    expect(plan.graph).toContain('concat=n=2:v=1:a=0[outv]')
+  })
+
+  it('素材缺失的叠加片段不参与合成', () => {
+    const base = createInitialProject({ url: 'u1', duration: 10 }, 'keep')
+    const project: Project = {
+      ...base,
+      clips: [clip('keep', 'u1')],
+      overlayTracks: [overlayTrack('ov1', [clip('ov-gone', 'u3')])],
+    }
+    const plan = buildExportPlan(project, sources, true)
+    expect(plan.graph).not.toContain('[ov0]')
+    expect(plan.inputs.map((item) => item.url)).toEqual(['u1'])
+  })
+})
+
+describe('store：removeAsset / cleanupUnusedAssets', () => {
+  const makeStore = () => {
+    const store = createEditorStore()
+    store.getState().loadSource(source('u1'))
+    return store
+  }
+
+  it('未被引用的素材直接删除，assets 收缩、source 保留', () => {
+    const store = makeStore()
+    store.getState().addAssets([{ ...asset('extra', 'u2'), name: 'extra.mp4' }])
+    expect(store.getState().assets).toHaveLength(2)
+
+    store.getState().removeAsset('extra', { removeClips: false })
+    const state = store.getState()
+    expect(state.assets.map((item) => item.id)).toEqual([state.assets[0].id])
+    expect(state.assets).toHaveLength(1)
+    expect(state.source?.url).toBe('u1')
+    expect(state.toast?.message).toContain('已删除素材')
+  })
+
+  it('删除当前 source 时自动切到下一个素材', () => {
+    const store = makeStore()
+    const mainAssetId = store.getState().assets[0].id
+    store.getState().addAssets([asset('second', 'u2')])
+    store.getState().removeAsset(mainAssetId, { removeClips: false })
+    expect(store.getState().source?.url).toBe('u2')
+  })
+
+  it('removeClips=true：片段一起删除，Ctrl+Z 一次恢复片段（素材已不在库里）', () => {
+    const store = makeStore()
+    const assetId = store.getState().assets[0].id
+    store.getState().setPlayhead(4)
+    store.getState().splitAtPlayhead()
+    expect(store.getState().project.clips).toHaveLength(2)
+
+    store.getState().removeAsset(assetId, { removeClips: true })
+    expect(store.getState().project.clips).toHaveLength(0)
+    expect(store.getState().assets).toHaveLength(0)
+
+    store.getState().undo()
+    // 片段回来了，但素材不在库里 → 走「素材缺失」呈现
+    expect(store.getState().project.clips).toHaveLength(2)
+    expect(store.getState().assets).toHaveLength(0)
+  })
+
+  it('removeClips=false：片段保留（引用一个已不在 assets 里的 url）', () => {
+    const store = makeStore()
+    const assetId = store.getState().assets[0].id
+    store.getState().removeAsset(assetId, { removeClips: false })
+    expect(store.getState().project.clips).toHaveLength(1)
+    expect(store.getState().assets).toHaveLength(0)
+    // 片段引用的 url 已无对应素材 → 缺失
+    expect(isClipAssetMissing(assetUrlSet(store.getState().assets), store.getState().project.clips[0])).toBe(true)
+  })
+
+  it('cleanupUnusedAssets 删除闲置素材并报告数量', () => {
+    const store = makeStore()
+    store.getState().addAssets([asset('x', 'u2'), asset('y', 'u3')])
+    expect(store.getState().assets).toHaveLength(3)
+
+    store.getState().cleanupUnusedAssets()
+    expect(store.getState().assets).toHaveLength(1)
+    expect(store.getState().toast?.message).toContain('已清理 2 个未使用素材')
+
+    // 没有闲置素材时再点一次：提示且不变化
+    store.getState().cleanupUnusedAssets()
+    expect(store.getState().assets).toHaveLength(1)
+    expect(store.getState().toast?.message).toContain('没有未使用的素材')
+  })
+})

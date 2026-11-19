@@ -183,6 +183,8 @@ export function Timeline({ onPickFile }: TimelineProps) {
   const total = useMemo(() => getProjectEnd(previewProject), [previewProject])
   const segments = useMemo(() => getTimeline(previewProject.clips), [previewProject.clips])
   const overlayTracks = project.overlayTracks ?? []
+  /** 素材库现有素材的 url 集合：用于判断片段的素材是否已被移除。 */
+  const assetUrls = useMemo(() => new Set(assets.map((asset) => asset.url)), [assets])
   const assetByUrl = useMemo(
     () => new Map(assets.map((asset) => [asset.url, asset])),
     [assets],
@@ -1489,7 +1491,9 @@ export function Timeline({ onPickFile }: TimelineProps) {
                           key={clip.id}
                           className={`clip-bar is-overlay ${isFreeze ? 'is-freeze' : 'is-video'}${
                             isSelected ? ' is-selected' : ''
-                          }${isDragging ? ' is-dragging is-drag-source' : ''}`}
+                          }${isDragging ? ' is-dragging is-drag-source' : ''}${
+                            assetUrls.has(clip.sourceUrl) ? '' : ' is-missing'
+                          }`}
                           data-clip-id={clip.id}
                           data-track-id={track.id}
                           style={{ left: PAD + segment.start * pps + 1, width }}
@@ -1500,6 +1504,12 @@ export function Timeline({ onPickFile }: TimelineProps) {
                           onContextMenu={(event) => openClipMenu(event, 'video', clip.id)}
                           aria-label={`叠加片段 ${segment.index + 1}，${segment.duration.toFixed(1)} 秒`}
                         >
+                          {!assetUrls.has(clip.sourceUrl) && (
+                            <span className="clip-missing" title="素材已从缓存移除，需重新导入">
+                              <Icon name="unlink" size={12} />
+                              <span className="clip-missing-label">素材已移除</span>
+                            </span>
+                          )}
                           {!isFreeze && asset && (
                             <ClipFilmstrip clip={clip} asset={asset} width={width} />
                           )}
@@ -1637,7 +1647,9 @@ export function Timeline({ onPickFile }: TimelineProps) {
                   key={clip.id}
                   className={`clip-bar ${isFreeze ? 'is-freeze' : 'is-video'}${
                     isSelected ? ' is-selected' : ''
-                  }${isDragging ? ' is-dragging is-drag-source' : ''}`}
+                  }${isDragging ? ' is-dragging is-drag-source' : ''}${
+                    assetUrls.has(clip.sourceUrl) ? '' : ' is-missing'
+                  }`}
                   data-clip-id={clip.id}
                   data-track-id="base"
                   style={{ left: PAD + renderStart * pps + 1, width }}
@@ -1650,6 +1662,12 @@ export function Timeline({ onPickFile }: TimelineProps) {
                     segment.index + 1
                   }，${renderDuration.toFixed(1)} 秒`}
                 >
+                  {!assetUrls.has(clip.sourceUrl) && (
+                    <span className="clip-missing" title="素材已从缓存移除，需重新导入">
+                      <Icon name="unlink" size={12} />
+                      <span className="clip-missing-label">素材已移除</span>
+                    </span>
+                  )}
                   {!isFreeze && asset && (
                     <ClipFilmstrip clip={clip} asset={asset} width={width} />
                   )}
