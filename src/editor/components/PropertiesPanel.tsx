@@ -1,6 +1,6 @@
 import { formatClock } from '../core/format'
 import { clipFreezeFrame, clipTimelineDuration } from '../core/clipTime'
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { FREEZE_DEFAULT_DURATION, FREEZE_MAX_DURATION, FREEZE_MIN_DURATION } from '../core/constants'
 import { clipVolume } from '../core/clipAudio'
 import { clipOpacity } from '../core/blend'
@@ -16,6 +16,10 @@ import { ClipAudioSection } from './ClipAudioSection'
 import { canChangeClipSpeed, clipSpeedValue } from '../core/speed'
 import { clipTransitionOut } from '../core/transition'
 import { clipColor } from '../core/color'
+import {
+  getAttributeClipboardSnapshot,
+  subscribeAttributeClipboard,
+} from '../core/attributeClipboard'
 import { NoSelectionPanel } from './NoSelectionPanel'
 import { ClipCompositingSection } from './ClipCompositingSection'
 import { ClipTransitionSection } from './ClipTransitionSection'
@@ -87,6 +91,20 @@ function MultiSelectionPanel({ ids }: { ids: string[] }) {
   const project = useEditorStore((state) => state.project)
   const deleteSelectedClip = useEditorStore((state) => state.deleteSelectedClip)
   const selectClip = useEditorStore((state) => state.selectClip)
+  const copyVisualAttributes = useEditorStore((state) => state.copyVisualAttributes)
+  const pasteVisualAttributes = useEditorStore((state) => state.pasteVisualAttributes)
+  const copyAudioAttributes = useEditorStore((state) => state.copyAudioAttributes)
+  const pasteAudioAttributes = useEditorStore((state) => state.pasteAudioAttributes)
+  const attributeClipboard = useSyncExternalStore(
+    subscribeAttributeClipboard,
+    getAttributeClipboardSnapshot,
+  )
+  const canPasteVisual = Boolean(
+    attributeClipboard.visual && Object.keys(attributeClipboard.visual).length > 0,
+  )
+  const canPasteAudio = Boolean(
+    attributeClipboard.audio && Object.keys(attributeClipboard.audio).length > 0,
+  )
 
   const clips = ids
     .map((id) => findClipLocation(project, id)?.clip ?? null)
@@ -171,6 +189,56 @@ function MultiSelectionPanel({ ids }: { ids: string[] }) {
           </p>
         </section>
 
+        <section className="panel-section attribute-actions">
+          <div className="section-title">
+            <span>粘贴属性</span>
+            <span className="section-hint">作用于全部选中项</span>
+          </div>
+          <div className="inline-actions">
+            <button
+              type="button"
+              className="button mini"
+              disabled={!canPasteVisual}
+              onClick={() => pasteVisualAttributes(ids)}
+              title={canPasteVisual ? '粘贴到选中的全部片段（1 步撤销）' : '先复制一个片段的属性'}
+            >
+              粘贴画面属性
+            </button>
+            <button
+              type="button"
+              className="button mini"
+              disabled={!canPasteAudio}
+              onClick={() => pasteAudioAttributes(ids)}
+              title={canPasteAudio ? '粘贴到选中的全部片段（1 步撤销）' : '先复制一个片段的属性'}
+            >
+              粘贴音频属性
+            </button>
+          </div>
+          <div className="inline-actions">
+            <button
+              type="button"
+              className="button mini ghost-mini"
+              disabled={clips.length === 0}
+              onClick={() => copyVisualAttributes(ids[0])}
+              title="以最先选中的片段为源复制画面属性"
+            >
+              复制首项画面属性
+            </button>
+            <button
+              type="button"
+              className="button mini ghost-mini"
+              disabled={clips.length === 0}
+              onClick={() => copyAudioAttributes(ids[0])}
+              title="以最先选中的片段为源复制音频属性"
+            >
+              复制首项音频属性
+            </button>
+          </div>
+          <p className="control-note">
+            先把属性复制到剪贴板，再点粘贴即可批量套用到选中的片段。
+          </p>
+        </section>
+
         <section className="panel-section panel-danger">
           <button type="button" className="button delete-clip" onClick={deleteSelectedClip}>
             <Icon name="trash" size={16} />
@@ -215,6 +283,22 @@ export function PropertiesPanel() {
   const colorClipboard = useEditorStore((state) => state.colorClipboard)
   const copyClipColor = useEditorStore((state) => state.copyClipColor)
   const pasteClipColor = useEditorStore((state) => state.pasteClipColor)
+  const copyVisualAttributes = useEditorStore((state) => state.copyVisualAttributes)
+  const pasteVisualAttributes = useEditorStore((state) => state.pasteVisualAttributes)
+  const copyAudioAttributes = useEditorStore((state) => state.copyAudioAttributes)
+  const pasteAudioAttributes = useEditorStore((state) => state.pasteAudioAttributes)
+
+  // 属性剪贴板是模块级单例，用 useSyncExternalStore 让粘贴按钮的禁用态跟随变化。
+  const attributeClipboard = useSyncExternalStore(
+    subscribeAttributeClipboard,
+    getAttributeClipboardSnapshot,
+  )
+  const canPasteVisual = Boolean(
+    attributeClipboard.visual && Object.keys(attributeClipboard.visual).length > 0,
+  )
+  const canPasteAudio = Boolean(
+    attributeClipboard.audio && Object.keys(attributeClipboard.audio).length > 0,
+  )
   const applyClipDefaults = useEditorStore((state) => state.applyClipDefaults)
 
   const location = findClipLocation(project, selectedClipId)
@@ -331,6 +415,9 @@ export function PropertiesPanel() {
     [clip.flipH ? '水平' : '', clip.flipV ? '垂直' : ''].filter(Boolean).join(' + ') || '未启用'
 
   const clipNumber = segment ? segment.index + 1 : 0
+
+  // 粘贴作用于「当前选中的所有片段」；单选时就是当前片段。
+  const pasteTargets = selectedIds.length > 0 ? selectedIds : [clip.id]
 
   return (
     <aside className={`properties-panel${isCropping ? ' is-cropping' : ''}`} aria-label="片段属性">
@@ -701,6 +788,31 @@ export function PropertiesPanel() {
           </PanelSection>
         )}
 
+        {tab === 'picture' && (
+          <section className="panel-section attribute-actions">
+            <div className="inline-actions">
+              <button
+                type="button"
+                className="button mini"
+                disabled={disabled}
+                onClick={() => copyVisualAttributes(clip.id)}
+                title="把该片段的旋转 / 镜像 / 裁剪 / 缩放 / 位置 / 不透明度 / 混合模式复制到属性剪贴板"
+              >
+                复制画面属性
+              </button>
+              <button
+                type="button"
+                className="button mini"
+                disabled={disabled || !canPasteVisual}
+                onClick={() => pasteVisualAttributes(pasteTargets)}
+                title={canPasteVisual ? '粘贴到当前选中的片段' : '先复制一个片段的属性'}
+              >
+                粘贴画面属性
+              </button>
+            </div>
+          </section>
+        )}
+
         {tab === 'audio' &&
           (clip.type === 'freeze' ? (
             <section className="panel-section">
@@ -728,6 +840,31 @@ export function PropertiesPanel() {
               />
             </PanelSection>
           ))}
+
+        {tab === 'audio' && clip.type !== 'freeze' && (
+          <section className="panel-section attribute-actions">
+            <div className="inline-actions">
+              <button
+                type="button"
+                className="button mini"
+                disabled={disabled}
+                onClick={() => copyAudioAttributes(clip.id)}
+                title="把该片段的音量 / 淡入 / 淡出复制到属性剪贴板"
+              >
+                复制音频属性
+              </button>
+              <button
+                type="button"
+                className="button mini"
+                disabled={disabled || !canPasteAudio}
+                onClick={() => pasteAudioAttributes(pasteTargets)}
+                title={canPasteAudio ? '粘贴到当前选中的片段' : '先复制一个片段的属性'}
+              >
+                粘贴音频属性
+              </button>
+            </div>
+          </section>
+        )}
 
         {tab === 'speed' && canChangeClipSpeed(clip) && (
           <PanelSection

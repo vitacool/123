@@ -2,7 +2,7 @@ import { CLIP_EDGE_EPSILON, FREEZE_DEFAULT_DURATION, FREEZE_MAX_DURATION, FREEZE
 import { aspectValue, createDefaultExportQuality } from './aspect'
 import { createId } from './ids'
 import { IMAGE_DEFAULT_DURATION, IMAGE_MAX_DURATION, IMAGE_MIN_DURATION } from './image'
-import { DEFAULT_TRACK_STATE } from './tracks'
+import { DEFAULT_TRACK_STATE, isMainLocked, isOverlayLocked } from './tracks'
 import {
   clipFreezeFrame,
   clipSourceSpan,
@@ -988,6 +988,57 @@ export function setAspectRatioInProject(project: Project, aspectRatio: AspectRat
 
 export function setExportQualityInProject(project: Project, quality: ExportQuality): Project {
   return { ...project, exportQuality: { ...quality } }
+}
+
+/** 属性粘贴的结果：project 变化 + 实际写入 / 被跳过的片段数。 */
+export interface AttributePatchResult {
+  project: Project
+  applied: number
+  /** 目标片段不存在或位于锁定轨道，被跳过。 */
+  skipped: number
+}
+
+/**
+ * 把一组属性 patch 写到若干片段上（主轨 + 叠加轨均可）。
+ *
+ * - 只覆盖 patch 里出现的字段，未包含的字段保持原值（靠 `{ ...clip, ...patch }`）。
+ * - 多个目标片段在同一次调用内完成，因此是 1 个命令 = 1 步撤销。
+ * - 目标片段不存在 / 位于锁定轨道时逐个跳过；全部被跳过（或 patch 为空）时
+ *   返回原 project（引用不变，因此不产生撤销历史）。
+ */
+export function applyAttributePatch(
+  project: Project,
+  ids: readonly string[],
+  patch: Partial<Clip>,
+): AttributePatchResult {
+  if (ids.length === 0 || Object.keys(patch).length === 0) {
+    return { project, applied: 0, skipped: 0 }
+  }
+  let next = project
+  let applied = 0
+  let skipped = 0
+  const seen = new Set<string>()
+  for (const id of ids) {
+    if (seen.has(id)) continue
+    seen.add(id)
+    const location = findClipLocation(project, id)
+    if (!location) {
+      skipped += 1
+      continue
+    }
+    if (location.track ? isOverlayLocked(location.track) : isMainLocked(project)) {
+      skipped += 1
+      continue
+    }
+    const updated = updateClipInProject(next, id, patch)
+    if (!updated) {
+      skipped += 1
+      continue
+    }
+    next = updated
+    applied += 1
+  }
+  return { project: applied > 0 ? next : project, applied, skipped }
 }
 
 /** 「应用到全部片段」的调色：主轨 + 叠加轨的所有画面片段。 */

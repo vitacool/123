@@ -31,6 +31,7 @@ import {
   setExportQualityInProject,
   applyTransitionToAllJunctions,
   applyColorToAllClips,
+  applyAttributePatch,
   splitOverlayClipAt,
   splitProjectAt,
   trimOverlayClipAt,
@@ -76,6 +77,7 @@ import type {
 } from './types'
 import type { TransitionAllOptions } from './operations'
 import type { ColorAdjustments } from './color'
+import type { AudioAttrs, VisualAttrs } from './attributeClipboard'
 import { normalizeTransitionType, transitionLabel } from './transition'
 import { relinkCaptions } from './captionLink'
 import { normalizeBackground, withClipBackground } from './background'
@@ -169,6 +171,35 @@ export function createSetColorAllCommand(color: ColorAdjustments): EditorCommand
     label: '调色应用到全部片段',
     execute(project) {
       return applyColorToAllClips(project, color).project
+    },
+  }
+}
+
+/**
+ * 粘贴画面属性：把剪贴板里的视觉属性覆盖到一组片段（1 次命令 = 1 步撤销）。
+ * 只覆盖 attrs 中出现的字段；无目标可写时返回原 project。
+ */
+export function createPasteVisualAttributesCommand(
+  ids: readonly string[],
+  attrs: VisualAttrs,
+): EditorCommand {
+  return {
+    label: '粘贴画面属性',
+    execute(project) {
+      return applyAttributePatch(project, ids, attrs as Partial<Clip>).project
+    },
+  }
+}
+
+/** 粘贴音频属性：音量 / 淡入 / 淡出（1 次命令 = 1 步撤销）。 */
+export function createPasteAudioAttributesCommand(
+  ids: readonly string[],
+  attrs: AudioAttrs,
+): EditorCommand {
+  return {
+    label: '粘贴音频属性',
+    execute(project) {
+      return applyAttributePatch(project, ids, attrs as Partial<Clip>).project
     },
   }
 }

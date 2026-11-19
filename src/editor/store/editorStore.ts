@@ -38,6 +38,8 @@ import {
   createSplitCommand,
   createSetTransitionAllCommand,
   createSetColorAllCommand,
+  createPasteVisualAttributesCommand,
+  createPasteAudioAttributesCommand,
   createSplitOverlayClipCommand,
   createSplitTextClipCommand,
   createTrimAudioClipCommand,
@@ -69,6 +71,7 @@ import {
   createInitialProject,
   applyTransitionToAllJunctions,
   applyColorToAllClips,
+  applyAttributePatch,
   normalizeAngle,
 } from '../core/operations'
 import { createId } from '../core/ids'
@@ -97,6 +100,14 @@ import {
   TRANSITION_MIN_DURATION,
 } from '../core/transition'
 import { isSameColor, normalizeColor, type ColorAdjustments } from '../core/color'
+import {
+  captureAudioAttrs,
+  captureVisualAttrs,
+  getAudio as getAudioAttrs,
+  getVisual as getVisualAttrs,
+  setAudio as setAudioAttrs,
+  setVisual as setVisualAttrs,
+} from '../core/attributeClipboard'
 import {
   blendModeLabel,
   clipBlendMode,
@@ -286,6 +297,14 @@ export interface EditorState {
   closeGapBefore: (clipId: string) => void
   /** 把一组属性重置为默认值（一个命令，1 步撤销）。 */
   applyClipDefaults: (clipId: string, patch: Partial<Clip>, label: string) => void
+  /** 复制画面属性到模块级属性剪贴板（不进撤销栈）。 */
+  copyVisualAttributes: (clipId: string) => void
+  /** 把画面属性粘贴到一组片段（一个命令，多选时 1 步撤销）。 */
+  pasteVisualAttributes: (ids: string[]) => void
+  /** 复制音频属性（音量 / 淡入淡出）到模块级属性剪贴板。 */
+  copyAudioAttributes: (clipId: string) => void
+  /** 把音频属性粘贴到一组片段（一个命令）。 */
+  pasteAudioAttributes: (ids: string[]) => void
   /** 设置工程级画布背景（一个命令）。 */
   setCanvasBackground: (background: CanvasBackground) => void
   /** 给指定片段设置背景覆盖（一个命令）。 */
@@ -475,6 +494,13 @@ const selectedClip = (project: Project, id: string | null): Clip | null => {
     ? isOverlayLocked(location.track)
     : isMainLocked(project)
   return locked ? null : location.clip
+}
+
+/** 粘贴目标：显式传入的 ids 优先，其次多选，最后当前单选。 */
+const resolvePasteTargets = (state: EditorState, ids: readonly string[]): string[] => {
+  if (ids.length > 0) return [...ids]
+  if (state.selectedIds.length > 0) return [...state.selectedIds]
+  return state.selectedClipId ? [state.selectedClipId] : []
 }
 
 const clampMainTrackStart = (project: Project): Project => {
@@ -1258,6 +1284,74 @@ export function createEditorStore() {
         if (!location) return
         if (location.track ? isOverlayLocked(location.track) : isMainLocked(state.project)) return
         run(createUpdateAnyClipCommand(clipId, patch, label))
+      },
+
+      copyVisualAttributes: (clipId) => {
+        const state = get()
+        const location = findClipLocation(state.project, clipId)
+        if (!location) {
+          state.notify('没有可复制的片段', 'warning')
+          return
+        }
+        // 复制是只读操作，锁定轨道上的片段也允许复制。
+        setVisualAttrs(captureVisualAttrs(location.clip))
+        state.notify('已复制画面属性', 'info')
+      },
+
+      pasteVisualAttributes: (ids) => {
+        const state = get()
+        const attrs = getVisualAttrs()
+        if (!attrs || Object.keys(attrs).length === 0) {
+          state.notify('剪贴板为空', 'warning')
+          return
+        }
+        const targets = resolvePasteTargets(state, ids)
+        if (targets.length === 0) {
+          state.notify('没有可粘贴的片段', 'warning')
+          return
+        }
+        // 先干跑一次拿统计（命令本身是纯函数）。
+        const preview = applyAttributePatch(state.project, targets, attrs as Partial<Clip>)
+        if (preview.applied === 0) {
+          state.notify('目标片段在锁定轨道上，未粘贴', 'warning')
+          return
+        }
+        if (run(createPasteVisualAttributesCommand(targets, attrs))) {
+          state.notify(`已粘贴到 ${preview.applied} 个片段`, 'success')
+        }
+      },
+
+      copyAudioAttributes: (clipId) => {
+        const state = get()
+        const location = findClipLocation(state.project, clipId)
+        if (!location) {
+          state.notify('没有可复制的片段', 'warning')
+          return
+        }
+        setAudioAttrs(captureAudioAttrs(location.clip))
+        state.notify('已复制音频属性', 'info')
+      },
+
+      pasteAudioAttributes: (ids) => {
+        const state = get()
+        const attrs = getAudioAttrs()
+        if (!attrs || Object.keys(attrs).length === 0) {
+          state.notify('剪贴板为空', 'warning')
+          return
+        }
+        const targets = resolvePasteTargets(state, ids)
+        if (targets.length === 0) {
+          state.notify('没有可粘贴的片段', 'warning')
+          return
+        }
+        const preview = applyAttributePatch(state.project, targets, attrs as Partial<Clip>)
+        if (preview.applied === 0) {
+          state.notify('目标片段在锁定轨道上，未粘贴', 'warning')
+          return
+        }
+        if (run(createPasteAudioAttributesCommand(targets, attrs))) {
+          state.notify(`已粘贴到 ${preview.applied} 个片段`, 'success')
+        }
       },
 
       applyTransitionToAll: (type, duration) => {
