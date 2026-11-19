@@ -1,96 +1,195 @@
-import type { Clip, TransitionType } from '../core/types'
+import { Icon } from './Icon'
+import { CommitNumber } from './Toast'
+import { CommitSlider } from './CommitSlider'
 import {
-  clampTransitionDuration,
+  clipTransitionOut,
   maxTransitionDuration,
   TRANSITION_MAX_DURATION,
   TRANSITION_MIN_DURATION,
   TRANSITION_TYPES,
+  transitionLabel,
 } from '../core/transition'
-import { CommitNumber } from './Toast'
+import type { Clip, TransitionType } from '../core/types'
 
 interface ClipTransitionSectionProps {
   clip: Clip
-  /** 下一个片段（没有则为 null，此时无法加转场）。 */
+  /** 同一轨道上的下一个片段（没有则为 null）。 */
   next: Clip | null
-  onChange: (type: TransitionType | null, duration: number) => void
-  /** 由父级 PanelSection 提供标题与重置，组件只渲染内容。 */
-  bare?: boolean
+  /** 主轨锁定 / 正在裁剪时整体禁用。 */
+  disabled?: boolean
+  onSet: (type: TransitionType, duration: number) => void
+  onClear: () => void
+  /** 闭合「本片段 → 下一片段」之间的空隙（把 next.gapBefore 归零）。 */
+  onCloseGap: () => void
+  /** 把当前类型/时长应用到所有可用交界（一个命令）。 */
+  onApplyAll: () => void
+  /** 工程里是否存在可尝试的交界（至少两段）。 */
+  canApplyAll: boolean
+  /** 整体不可用的原因（例如叠加轨片段：转场只作用于主轨）。 */
+  unavailableReason?: string
 }
 
+const round = (value: number, digits = 1): number => Number(value.toFixed(digits))
+
 /**
- * 「转场」区：作用于本片段与下一片段的交界。
- * 时长上限 = min(2s, 两侧较短片段的一半)；两段之间有间隙时不可用。
+ * 「转场」tab：状态条 + 5 种类型的可视化网格 + 时长 + 批量操作。
+ * 状态条负责把「为什么不能设置」讲清楚，不能设置时所有控件置灰。
  */
-export function ClipTransitionSection({ clip, next, onChange, bare }: ClipTransitionSectionProps) {
-  const current = clip.transitionOut ?? null
+export function ClipTransitionSection({
+  clip,
+  next,
+  disabled,
+  onSet,
+  onClear,
+  onCloseGap,
+  onApplyAll,
+  canApplyAll,
+  unavailableReason,
+}: ClipTransitionSectionProps) {
+  const current = clipTransitionOut(clip)
+  const isLast = !next
   const gap = Math.max(0, next?.gapBefore ?? 0)
+  const hasGap = !isLast && gap > 0.0001
+  const nextIsFreeze = next?.type === 'freeze'
   const limit = next ? maxTransitionDuration(clip, next) : 0
-  const blocked = !next || gap > 0.0001 || limit < TRANSITION_MIN_DURATION
+  const limitTooSmall = !isLast && !nextIsFreeze && limit < TRANSITION_MIN_DURATION
+
+  // 上限 = min(2s, 相邻较短片段的一半)；没有相邻片段时退回 2s 供 UI 展示。
+  const maxDuration = Math.max(
+    TRANSITION_MIN_DURATION,
+    Math.min(TRANSITION_MAX_DURATION, limit > 0 ? limit : TRANSITION_MAX_DURATION),
+  )
   const duration = current
-    ? Math.min(clampTransitionDuration(current.duration), limit || TRANSITION_MAX_DURATION)
-    : Math.min(0.4, limit || TRANSITION_MAX_DURATION)
-  const maxFade = Math.max(TRANSITION_MIN_DURATION, Math.round(limit * 10) / 10)
+    ? Math.min(current.duration, maxDuration)
+    : Math.min(0.4, maxDuration)
+
+  const blocked =
+    Boolean(disabled) ||
+    Boolean(unavailableReason) ||
+    isLast ||
+    hasGap ||
+    nextIsFreeze ||
+    limitTooSmall
+  const limitLimited = !nextIsFreeze && limit >= TRANSITION_MIN_DURATION
+    && limit < TRANSITION_MAX_DURATION - 1e-6
+
+  const status = unavailableReason
+    ? { tone: 'is-blocked' as const, text: unavailableReason }
+    : isLast
+      ? { tone: 'is-muted' as const, text: '已是最后一个片段' }
+      : hasGap
+        ? { tone: 'is-blocked' as const, text: '与下一片段之间有空隙，转场不生效' }
+        : nextIsFreeze
+          ? { tone: 'is-blocked' as const, text: '下一片段是定格片段，不支持转场' }
+          : limitTooSmall
+            ? { tone: 'is-blocked' as const, text: '两侧片段太短，放不下转场' }
+            : {
+                tone: 'is-ok' as const,
+                text: current
+                  ? `与下一片段相接 · ${transitionLabel(current.type)} ${round(duration)}s`
+                  : '与下一片段相接',
+              }
 
   return (
-    <section className={`panel-section${bare ? ' is-bare' : ''}`}>
-      {!bare && (
-        <div className="section-title">
-          <span>转场（与下一片段）</span>
-          <span className="section-hint">0.1 – 2s</span>
-        </div>
+    <div className="transition-tab">
+      <div className={`transition-status ${status.tone}`} role="status">
+        <span className="transition-status-text">
+          <Icon name={status.tone === 'is-ok' ? 'check' : 'warning'} size={13} />
+          <span>{status.text}</span>
+        </span>
+        {hasGap && !disabled && (
+          <button
+            type="button"
+            className="button mini transition-gap-fix"
+            onClick={onCloseGap}
+            title="把下一片段的 gapBefore 归零（可撤销）"
+          >
+            闭合空隙
+          </button>
+        )}
+      </div>
+      {isLast && (
+        <p className="control-note">
+          转场作用在两个片段的交界，请选中前一个片段。
+        </p>
       )}
 
-      <label className="select-field">
-        <select
-          value={current?.type ?? 'none'}
-          aria-label="转场类型"
-          disabled={blocked && !current}
-          onChange={(event) => {
-            const value = event.target.value
-            if (value === 'none') onChange(null, duration)
-            else onChange(value as TransitionType, duration)
-          }}
-        >
-          <option value="none">无转场</option>
-          {TRANSITION_TYPES.map((item) => (
-            <option key={item.value} value={item.value}>
-              {item.label}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <div className="position-grid">
-        <label>
-          <span>时长</span>
-          <CommitNumber
-            value={Math.round(duration * 10) / 10}
-            min={TRANSITION_MIN_DURATION}
-            max={maxFade}
-            step={0.1}
-            unit="s"
-            ariaLabel="转场时长"
-            onCommit={(value) => {
-              if (!current) return
-              onChange(current.type, value)
-            }}
-          />
-        </label>
+      <div className="transition-grid" role="radiogroup" aria-label="转场类型">
+        {TRANSITION_TYPES.map((item) => {
+          const active = current?.type === item.value
+          return (
+            <button
+              key={item.value}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              className={`transition-card${active ? ' is-active' : ''}`}
+              disabled={blocked}
+              title={item.label}
+              onClick={() => onSet(item.value, duration)}
+            >
+              <span
+                className={`transition-thumb is-${item.value}`}
+                aria-hidden="true"
+              />
+              <span className="transition-card-label">{item.label}</span>
+            </button>
+          )
+        })}
       </div>
 
-      {blocked ? (
+      <div className="control-with-field transition-duration">
+        <CommitSlider
+          value={duration}
+          min={TRANSITION_MIN_DURATION}
+          max={maxDuration}
+          step={0.1}
+          ariaLabel="转场时长"
+          disabled={blocked || !current}
+          // 转场时长不影响片段几何/宽度，拖动时只需要数值回显，不需要预览补丁。
+          onPreview={() => undefined}
+          onCommit={(value) => onSet(current?.type ?? 'fade', value)}
+          format={(value) => `${value.toFixed(1)}s`}
+        />
+        <CommitNumber
+          value={round(duration)}
+          min={TRANSITION_MIN_DURATION}
+          max={maxDuration}
+          step={0.1}
+          unit="s"
+          ariaLabel="转场时长（秒）"
+          disabled={blocked || !current}
+          onCommit={(value) => onSet(current?.type ?? 'fade', value)}
+        />
+      </div>
+      {limitLimited && (
         <p className="control-note">
-          {!next
-            ? '本片段之后没有相邻片段，无法添加转场。'
-            : gap > 0.0001
-              ? '两段之间存在空隙（gapBefore），请先移除空隙。'
-              : '两侧片段太短，放不下转场。'}
-        </p>
-      ) : (
-        <p className="control-note">
-          最长 {maxFade}s（不超过两侧较短片段的一半）。转场会让两段重叠，成片总时长相应缩短。
+          最长 {maxDuration.toFixed(1)}s（受相邻片段长度限制）
         </p>
       )}
-    </section>
+      {!current && !blocked && (
+        <p className="control-note">选择一种转场后即可调整时长。</p>
+      )}
+
+      <div className="inline-actions transition-actions">
+        <button
+          type="button"
+          className="button mini"
+          disabled={Boolean(disabled) || !current}
+          onClick={onClear}
+        >
+          清除转场
+        </button>
+        <button
+          type="button"
+          className="button mini"
+          disabled={Boolean(disabled) || !canApplyAll}
+          onClick={onApplyAll}
+          title="把当前类型与时长应用到主轨所有可用交界（跳过空隙 / 定格 / 末尾）"
+        >
+          应用到所有交界
+        </button>
+      </div>
+    </div>
   )
 }

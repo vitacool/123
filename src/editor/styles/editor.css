@@ -4982,3 +4982,193 @@
   justify-content: center;
   margin-top: 14px;
 }
+
+/* ===== 属性面板：6 个 tab 在 306px 内平铺，不换行 ===== */
+.properties-tabs.is-compact {
+  gap: 3px;
+  padding: 8px 10px 0;
+}
+
+.properties-tabs.is-compact .properties-tab {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 6px 2px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ===== 转场 tab ===== */
+.transition-section {
+  border-bottom: 0;
+}
+
+.transition-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 7px 9px;
+  border: 1px solid var(--fc-line);
+  border-radius: var(--fc-radius-sm);
+  background: var(--fc-panel-deep);
+  font-size: var(--fc-text-xs);
+  line-height: 1.5;
+}
+
+.transition-status-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--fc-muted);
+}
+
+.transition-status.is-ok {
+  border-color: rgba(111, 143, 122, 0.32);
+  background: var(--fc-sage-soft);
+}
+
+.transition-status.is-ok .transition-status-text {
+  color: #51715c;
+}
+
+.transition-status.is-blocked {
+  border-color: rgba(215, 164, 71, 0.4);
+  background: rgba(215, 164, 71, 0.1);
+}
+
+.transition-status.is-blocked .transition-status-text {
+  color: #866326;
+}
+
+.transition-status.is-muted .transition-status-text {
+  color: var(--fc-muted);
+}
+
+.transition-gap-fix {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.transition-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.transition-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 5px;
+  border: 1px solid var(--fc-line);
+  border-radius: var(--fc-radius-md);
+  background: #fffdf8;
+  color: var(--fc-muted);
+  cursor: pointer;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.transition-card:hover:not(:disabled) {
+  border-color: var(--fc-line-strong);
+}
+
+.transition-card.is-active {
+  border-color: var(--fc-accent);
+  box-shadow: inset 0 0 0 1px var(--fc-accent);
+  color: var(--fc-accent-deep);
+}
+
+.transition-card:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.transition-card-label {
+  font-size: var(--fc-text-xs);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 纯 CSS 缩略示意（不引入图片） */
+.transition-thumb {
+  position: relative;
+  display: block;
+  height: 34px;
+  overflow: hidden;
+  border-radius: var(--fc-radius-sm);
+  background: var(--fc-panel-deep);
+}
+
+.transition-thumb::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  border: 1px solid rgba(92, 77, 54, 0.12);
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+/* fade：两条半透明色块叠加 */
+.transition-thumb.is-fade {
+  background:
+    linear-gradient(90deg, rgba(228, 87, 61, 0.62) 0 52%, transparent 52%),
+    linear-gradient(90deg, transparent 0 48%, rgba(111, 143, 122, 0.62) 48%);
+}
+
+/* fadeblack：两侧画面中间夹黑场 */
+.transition-thumb.is-fadeblack {
+  background:
+    linear-gradient(90deg, rgba(228, 87, 61, 0.5) 0 38%, transparent 38%),
+    linear-gradient(90deg, transparent 0 62%, rgba(111, 143, 122, 0.5) 62%),
+    linear-gradient(90deg, transparent 0 38%, #1b1a17 38% 62%, transparent 62%);
+}
+
+/* wipeleft：左半边色块 + 斜切边 */
+.transition-thumb.is-wipeleft {
+  background:
+    linear-gradient(100deg, rgba(228, 87, 61, 0.68) 0 46%, transparent 46%),
+    var(--fc-panel-deep);
+}
+
+/* slideleft：两块画面错位滑动 */
+.transition-thumb.is-slideleft {
+  background:
+    linear-gradient(90deg, rgba(228, 87, 61, 0.55) 0 42%, transparent 42%),
+    linear-gradient(90deg, transparent 0 58%, rgba(111, 143, 122, 0.55) 58%);
+}
+
+.transition-thumb.is-slideleft::before {
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  left: 46%;
+  width: 6px;
+  content: "";
+  background: rgba(31, 30, 27, 0.22);
+  transform: rotate(8deg);
+}
+
+/* circleopen：从圆心展开的圆 */
+.transition-thumb.is-circleopen {
+  background:
+    radial-gradient(circle at 50% 50%, var(--fc-panel-deep) 0 34%, rgba(228, 87, 61, 0.7) 35% 42%, transparent 43%),
+    rgba(111, 143, 122, 0.35);
+}
+
+.transition-duration {
+  margin-top: 10px;
+}
+
+.transition-actions {
+  margin-top: 10px;
+}
+
+.transition-actions .button {
+  flex: 1 1 auto;
+}

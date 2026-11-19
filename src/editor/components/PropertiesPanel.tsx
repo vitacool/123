@@ -14,6 +14,7 @@ import { CommitSlider } from './CommitSlider'
 import { AudioPropertiesPanel } from './AudioPropertiesPanel'
 import { ClipAudioSection } from './ClipAudioSection'
 import { canChangeClipSpeed, clipSpeedValue } from '../core/speed'
+import { clipTransitionOut } from '../core/transition'
 import { NoSelectionPanel } from './NoSelectionPanel'
 import { ClipCompositingSection } from './ClipCompositingSection'
 import { ClipTransitionSection } from './ClipTransitionSection'
@@ -25,12 +26,13 @@ import { PanelSection } from './PanelSection'
 
 const round = (value: number, digits = 2): number => Number(value.toFixed(digits))
 
-type PanelTab = 'picture' | 'audio' | 'speed' | 'compositing'
+type PanelTab = 'picture' | 'audio' | 'speed' | 'transition' | 'compositing'
 
 const PANEL_TABS: readonly { id: PanelTab; label: string }[] = [
   { id: 'picture', label: '画面' },
   { id: 'audio', label: '音频' },
   { id: 'speed', label: '变速' },
+  { id: 'transition', label: '转场' },
   { id: 'compositing', label: '合成' },
 ]
 
@@ -42,7 +44,6 @@ const SECTION_DEFAULTS: Record<string, Partial<Clip>> = {
   crop: { crop: { x: 0, y: 0, w: 1, h: 1 } },
   compositing: { opacity: 1, blendMode: 'normal' },
   speed: { speed: 1, keepPitch: true },
-  transition: { transitionOut: undefined },
   audio: { volume: 1, fadeIn: 0, fadeOut: 0 },
 }
 
@@ -205,6 +206,8 @@ export function PropertiesPanel() {
   const setClipOpacity = useEditorStore((state) => state.setClipOpacity)
   const setClipBlendMode = useEditorStore((state) => state.setClipBlendMode)
   const setTransition = useEditorStore((state) => state.setTransition)
+  const applyTransitionToAll = useEditorStore((state) => state.applyTransitionToAll)
+  const closeGapBefore = useEditorStore((state) => state.closeGapBefore)
   const applyClipDefaults = useEditorStore((state) => state.applyClipDefaults)
 
   const location = findClipLocation(project, selectedClipId)
@@ -378,7 +381,7 @@ export function PropertiesPanel() {
           </span>
         </div>
 
-        <div className="properties-tabs" role="tablist" aria-label="片段属性分类">
+        <div className="properties-tabs is-compact" role="tablist" aria-label="片段属性分类">
           {PANEL_TABS.map((item) => (
             <button
               key={item.id}
@@ -699,47 +702,57 @@ export function PropertiesPanel() {
             </PanelSection>
           ))}
 
-        {tab === 'speed' && (
-          <>
-            {canChangeClipSpeed(clip) && (
-              <PanelSection
-                title="变速"
-                hint={`${Number(clipSpeedValue(clip).toFixed(2))}x`}
-                collapsed={isCollapsed('speed')}
-                onToggle={() => toggleSection('speed')}
-                onReset={() => resetSection('speed', '变速')}
-                resetDisabled={disabled}
-              >
-                <ClipSpeedSection
-                  clip={clip}
-                  bare
-                  onPreview={(value) =>
-                    setPreviewPatch({ clipId: clip.id, patch: { speed: value } })
-                  }
-                  onChange={(speed, keepPitch) => {
-                    // 提交会走命令并触发 sync()，那里会自动清掉 previewPatch。
-                    setClipSpeed(clip.id, speed, keepPitch)
-                  }}
-                />
-              </PanelSection>
-            )}
+        {tab === 'speed' && canChangeClipSpeed(clip) && (
+          <PanelSection
+            title="变速"
+            hint={`${Number(clipSpeedValue(clip).toFixed(2))}x`}
+            collapsed={isCollapsed('speed')}
+            onToggle={() => toggleSection('speed')}
+            onReset={() => resetSection('speed', '变速')}
+            resetDisabled={disabled}
+          >
+            <ClipSpeedSection
+              clip={clip}
+              bare
+              onPreview={(value) =>
+                setPreviewPatch({ clipId: clip.id, patch: { speed: value } })
+              }
+              onChange={(speed, keepPitch) => {
+                // 提交会走命令并触发 sync()，那里会自动清掉 previewPatch。
+                setClipSpeed(clip.id, speed, keepPitch)
+              }}
+            />
+          </PanelSection>
+        )}
 
-            <PanelSection
-              title="转场"
-              hint="0.1 – 2s"
-              collapsed={isCollapsed('transition')}
-              onToggle={() => toggleSection('transition')}
-              onReset={() => resetSection('transition', '转场')}
-              resetDisabled={disabled}
-            >
-              <ClipTransitionSection
-                clip={clip}
-                next={nextTransitionClip}
-                bare
-                onChange={(type, value) => setTransition(clip.id, type, value)}
-              />
-            </PanelSection>
-          </>
+        {tab === 'speed' && !canChangeClipSpeed(clip) && (
+          <section className="panel-section">
+            <p className="control-note">定格片段不支持变速。</p>
+          </section>
+        )}
+
+        {tab === 'transition' && (
+          <section className="panel-section transition-section">
+            <ClipTransitionSection
+              clip={clip}
+              next={nextTransitionClip}
+              disabled={disabled}
+              onSet={(type, duration) => setTransition(clip.id, type, duration)}
+              onClear={() => setTransition(clip.id, null)}
+              onCloseGap={() => {
+                if (nextTransitionClip) closeGapBefore(nextTransitionClip.id)
+              }}
+              onApplyAll={() => {
+                const template = clipTransitionOut(clip)
+                applyTransitionToAll(
+                  template?.type ?? 'fade',
+                  template?.duration ?? 0.4,
+                )
+              }}
+              canApplyAll={project.clips.length > 1 && !isOverlay}
+              unavailableReason={isOverlay ? '转场只作用于主轨片段' : undefined}
+            />
+          </section>
         )}
 
         {tab === 'compositing' && (

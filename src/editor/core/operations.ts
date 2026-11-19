@@ -10,6 +10,14 @@ import {
   clipTimelineDuration,
 } from './clipTime'
 import { findClipLocation, findSegmentById, getProjectDuration, getTimeline, clamp } from './timeline'
+import {
+  clampTransitionDuration,
+  clipTransitionOut,
+  maxTransitionDuration,
+  normalizeTransitionType,
+  TRANSITION_EPSILON,
+  TRANSITION_MIN_DURATION,
+} from './transition'
 import type {
   AspectRatioPreset,
   Clip,
@@ -21,6 +29,7 @@ import type {
   Project,
   SourceInfo,
   TrackState,
+  TransitionType,
 } from './types'
 
 export const FULL_CROP: CropRect = { x: 0, y: 0, w: 1, h: 1 }
@@ -985,4 +994,76 @@ export function getContentAspectRatio(
   source: Pick<SourceInfo, 'width' | 'height'>,
 ): number {
   return aspectValue(aspect, source)
+}
+
+/** 「应用到所有交界」的入参。 */
+export interface TransitionAllOptions {
+  type: TransitionType
+  duration: number
+}
+
+export interface TransitionAllResult {
+  project: Project
+  /** 成功写入转场的交界数。 */
+  applied: number
+  /** 被跳过的交界数（空隙 / 定型片段 / 两侧太短 / 末段没有下一段）。 */
+  skipped: number
+}
+
+/**
+ * 把同一种转场写入主轨所有可生效的交界（相邻两段之间）。
+ *
+ * 规则与单处设置(`setTransition`)保持一致：只作用于主轨、跳过有间隙的交界、
+ * 跳过任一侧是定格的交界、每处时长按各自相邻片段重新夹取（上限 2s 且不超过较短片段一半）。
+ * 单次遍历；没有任何交界可以应用时返回原 project，从而不产生撤销历史。
+ */
+export function applyTransitionToAllJunctions(
+  project: Project,
+  options: TransitionAllOptions,
+): TransitionAllResult {
+  const type = normalizeTransitionType(options.type)
+  const wanted = clampTransitionDuration(options.duration)
+  const clips = project.clips
+  if (clips.length < 2) return { project, applied: 0, skipped: 0 }
+
+  let applied = 0
+  let skipped = 0
+  let changed = false
+
+  const nextClips = clips.map((clip, index) => {
+    const next = clips[index + 1]
+    if (!next) return clip // 末段没有交界，既不计入 applied 也不计入 skipped
+
+    const gap = Math.max(0, next.gapBefore ?? 0)
+    const limit = maxTransitionDuration(clip, next)
+    const unusable =
+      gap > TRANSITION_EPSILON ||
+      clip.type === 'freeze' ||
+      next.type === 'freeze' ||
+      limit < TRANSITION_MIN_DURATION
+
+    if (unusable) {
+      skipped += 1
+      return clip
+    }
+
+    const duration = Math.min(wanted, limit)
+    applied += 1
+    const existing = clipTransitionOut(clip)
+    if (
+      existing &&
+      existing.type === type &&
+      Math.abs(existing.duration - duration) < 1e-6
+    ) {
+      return clip
+    }
+    changed = true
+    return { ...clip, transitionOut: { type, duration } }
+  })
+
+  return {
+    project: changed ? { ...project, clips: nextClips } : project,
+    applied,
+    skipped,
+  }
 }

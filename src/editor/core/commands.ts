@@ -29,6 +29,7 @@ import {
   resizeOverlayClipEdge,
   setAspectRatioInProject,
   setExportQualityInProject,
+  applyTransitionToAllJunctions,
   splitOverlayClipAt,
   splitProjectAt,
   trimOverlayClipAt,
@@ -72,6 +73,8 @@ import type {
   TextTrack,
   TrackState,
 } from './types'
+import type { TransitionAllOptions } from './operations'
+import { normalizeTransitionType, transitionLabel } from './transition'
 import { relinkCaptions } from './captionLink'
 import { normalizeBackground, withClipBackground } from './background'
 import type { CanvasBackground } from './types'
@@ -136,6 +139,21 @@ export function createUpdateAnyClipCommand(
         }
       }
       return project
+    },
+  }
+}
+
+/**
+ * 把同一种转场应用到主轨所有可生效的交界（1 次命令 = 1 步撤销）。
+ * 没有任何交界可应用时命令返回原 project，因此不会写入历史。
+ */
+export function createSetTransitionAllCommand(
+  options: TransitionAllOptions,
+): EditorCommand {
+  return {
+    label: `转场 ${transitionLabel(normalizeTransitionType(options.type))} 应用到所有交界`,
+    execute(project) {
+      return applyTransitionToAllJunctions(project, options).project
     },
   }
 }

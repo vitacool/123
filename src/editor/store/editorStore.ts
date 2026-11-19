@@ -36,6 +36,7 @@ import {
   createSetExportQualityCommand,
   createSplitAudioClipCommand,
   createSplitCommand,
+  createSetTransitionAllCommand,
   createSplitOverlayClipCommand,
   createSplitTextClipCommand,
   createTrimAudioClipCommand,
@@ -66,6 +67,7 @@ import {
   clampCrop,
   createEmptyProject,
   createInitialProject,
+  applyTransitionToAllJunctions,
   normalizeAngle,
 } from '../core/operations'
 import { createId } from '../core/ids'
@@ -268,6 +270,10 @@ export interface EditorState {
   setClipBlendMode: (clipId: string, mode: BlendMode) => void
   /** 设置/清除片段尾部转场（一个命令）。 */
   setTransition: (clipId: string, type: TransitionType | null, duration?: number) => void
+  /** 把同一种转场应用到主轨所有可用交界（一个命令，跳过空隙/定格/太短的交界）。 */
+  applyTransitionToAll: (type: TransitionType, duration: number) => void
+  /** 闭合该片段与上一段之间的空隙：gapBefore 归零（一个命令）。 */
+  closeGapBefore: (clipId: string) => void
   /** 把一组属性重置为默认值（一个命令，1 步撤销）。 */
   applyClipDefaults: (clipId: string, patch: Partial<Clip>, label: string) => void
   /** 设置工程级画布背景（一个命令）。 */
@@ -1190,6 +1196,36 @@ export function createEditorStore() {
         if (!location) return
         if (location.track ? isOverlayLocked(location.track) : isMainLocked(state.project)) return
         run(createUpdateAnyClipCommand(clipId, patch, label))
+      },
+
+      applyTransitionToAll: (type, duration) => {
+        const state = get()
+        if (isMainLocked(state.project)) {
+          state.notify('主轨已锁定，请先解锁', 'warning')
+          return
+        }
+        // 先干跑一次拿到统计（命令本身是纯函数，重复计算成本可忽略）。
+        const preview = applyTransitionToAllJunctions(state.project, { type, duration })
+        if (preview.applied === 0) {
+          state.notify('没有可应用转场的交界（空隙 / 定格 / 片段太短）', 'warning')
+          return
+        }
+        if (run(createSetTransitionAllCommand({ type, duration }))) {
+          state.notify(`已应用 ${preview.applied} 处，跳过 ${preview.skipped} 处`, 'success')
+        }
+      },
+
+      closeGapBefore: (clipId) => {
+        const state = get()
+        const index = state.project.clips.findIndex((clip) => clip.id === clipId)
+        if (index < 0) return
+        if (isMainLocked(state.project)) {
+          state.notify('主轨已锁定，请先解锁', 'warning')
+          return
+        }
+        const clip = state.project.clips[index]
+        if (Math.max(0, clip.gapBefore ?? 0) <= 0.0001) return
+        run(createUpdateAnyClipCommand(clipId, { gapBefore: 0 }, '闭合空隙'))
       },
 
       setPlayhead: (time, snapThreshold = 0) => {
