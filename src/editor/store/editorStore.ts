@@ -48,7 +48,6 @@ import {
   createUpdateAudioClipCommand,
   createUpdateAudioTrackCommand,
   createUpdateAnyClipCommand,
-  createUpdateClipCommand,
   createUpdateMainTrackCommand,
   createUpdateMarkerCommand,
   createUpdateOverlayTrackCommand,
@@ -2288,7 +2287,7 @@ export function createEditorStore() {
         const clip = selectedClip(state.project, state.selectedClipId)
         if (!clip) return
         const angle = normalizeAngle(clip.rotation + delta)
-        run(createUpdateClipCommand(clip.id, { rotation: angle }, '旋转画面'))
+        run(createUpdateAnyClipCommand(clip.id, { rotation: angle }, '旋转画面'))
       },
 
       setRotation: (angle) => {
@@ -2298,28 +2297,28 @@ export function createEditorStore() {
         // 角度是环形的：-180 再逆时针 90° 应是 90，而不是被 clamp 卡在 -180。
         const next = normalizeAngle(Number.isFinite(angle) ? angle : 0)
         if (Math.abs(next - clip.rotation) < 0.001) return
-        run(createUpdateClipCommand(clip.id, { rotation: next }, '调整旋转角度'))
+        run(createUpdateAnyClipCommand(clip.id, { rotation: next }, '调整旋转角度'))
       },
 
       resetRotation: () => {
         const state = get()
         const clip = selectedClip(state.project, state.selectedClipId)
         if (!clip || clip.rotation === 0) return
-        run(createUpdateClipCommand(clip.id, { rotation: 0 }, '重置旋转'))
+        run(createUpdateAnyClipCommand(clip.id, { rotation: 0 }, '重置旋转'))
       },
 
       toggleFlipH: () => {
         const state = get()
         const clip = selectedClip(state.project, state.selectedClipId)
         if (!clip) return
-        run(createUpdateClipCommand(clip.id, { flipH: !clip.flipH }, '水平镜像'))
+        run(createUpdateAnyClipCommand(clip.id, { flipH: !clip.flipH }, '水平镜像'))
       },
 
       toggleFlipV: () => {
         const state = get()
         const clip = selectedClip(state.project, state.selectedClipId)
         if (!clip) return
-        run(createUpdateClipCommand(clip.id, { flipV: !clip.flipV }, '垂直镜像'))
+        run(createUpdateAnyClipCommand(clip.id, { flipV: !clip.flipV }, '垂直镜像'))
       },
 
       setScale: (scale) => {
@@ -2328,20 +2327,22 @@ export function createEditorStore() {
         if (!clip) return
         const next = clamp(scale, SCALE_MIN, SCALE_MAX)
         if (Math.abs(next - clip.scale) < 0.001) return
-        run(createUpdateClipCommand(clip.id, { scale: next }, '调整画面缩放'))
+        run(createUpdateAnyClipCommand(clip.id, { scale: next }, '调整画面缩放'))
       },
 
       fitSelected: () => {
         const state = get()
         const clip = selectedClip(state.project, state.selectedClipId)
         if (!clip || Math.abs(clip.scale - 1) < 0.001) return
-        run(createUpdateClipCommand(clip.id, { scale: 1 }, '画面适应'))
+        run(createUpdateAnyClipCommand(clip.id, { scale: 1 }, '画面适应'))
       },
 
       fillSelected: () => {
         const state = get()
         const clip = selectedClip(state.project, state.selectedClipId)
-        const source = state.source
+        // 叠加片段的素材可能不同于主素材：优先用片段自己的资产算填充比例。
+        const source =
+          state.assets.find((asset) => asset.url === clip?.sourceUrl) ?? state.source
         if (!clip || !source) return
         const scale = fillScaleFor(
           clip,
@@ -2349,7 +2350,7 @@ export function createEditorStore() {
           aspectValue(state.project.aspectRatio, source),
         )
         if (Math.abs(scale - clip.scale) < 0.001) return
-        run(createUpdateClipCommand(clip.id, { scale }, '画面填充'))
+        run(createUpdateAnyClipCommand(clip.id, { scale }, '画面填充'))
       },
 
       setPosition: (x, y) => {
@@ -2361,14 +2362,14 @@ export function createEditorStore() {
         if (Math.abs(nextX - clip.position.x) < 0.0005 && Math.abs(nextY - clip.position.y) < 0.0005) {
           return
         }
-        run(createUpdateClipCommand(clip.id, { position: { x: nextX, y: nextY } }, '移动画面'))
+        run(createUpdateAnyClipCommand(clip.id, { position: { x: nextX, y: nextY } }, '移动画面'))
       },
 
       resetPosition: () => {
         const state = get()
         const clip = selectedClip(state.project, state.selectedClipId)
         if (!clip || (clip.position.x === 0 && clip.position.y === 0)) return
-        run(createUpdateClipCommand(clip.id, { position: { x: 0, y: 0 } }, '重置画面位置'))
+        run(createUpdateAnyClipCommand(clip.id, { position: { x: 0, y: 0 } }, '重置画面位置'))
       },
 
       beginCrop: () => {
