@@ -5172,3 +5172,54 @@
 .transition-actions .button {
   flex: 1 1 auto;
 }
+
+/* ===== 调节 tab ===== */
+.color-section {
+  border-bottom: 0;
+}
+
+.color-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.color-row {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.color-label {
+  color: var(--fc-muted);
+  font-size: var(--fc-text-xs);
+  white-space: nowrap;
+}
+
+.color-row .commit-slider {
+  min-width: 0;
+}
+
+.color-row .commit-number input {
+  width: 54px;
+}
+
+/* 色温：滑块轨道用「冷蓝 → 暖橙」2px 提示条 */
+.color-row.is-temperature input[type='range'] {
+  height: 14px;
+}
+
+.color-row.is-temperature input[type='range']::-webkit-slider-runnable-track {
+  height: 2px;
+  border-radius: 99px;
+  background: linear-gradient(90deg, #5b9bd5 0%, #cbb9a0 50%, #e08b3c 100%);
+}
+
+.color-actions {
+  margin-top: 2px;
+}
+
+.color-actions .button {
+  flex: 1 1 auto;
+}

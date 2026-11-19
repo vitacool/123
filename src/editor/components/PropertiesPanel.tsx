@@ -15,9 +15,11 @@ import { AudioPropertiesPanel } from './AudioPropertiesPanel'
 import { ClipAudioSection } from './ClipAudioSection'
 import { canChangeClipSpeed, clipSpeedValue } from '../core/speed'
 import { clipTransitionOut } from '../core/transition'
+import { clipColor } from '../core/color'
 import { NoSelectionPanel } from './NoSelectionPanel'
 import { ClipCompositingSection } from './ClipCompositingSection'
 import { ClipTransitionSection } from './ClipTransitionSection'
+import { ClipColorSection } from './ClipColorSection'
 import { ClipSpeedSection } from './ClipSpeedSection'
 import { TextPropertiesPanel } from './TextPropertiesPanel'
 import { CaptionListPanel } from './CaptionListPanel'
@@ -26,13 +28,14 @@ import { PanelSection } from './PanelSection'
 
 const round = (value: number, digits = 2): number => Number(value.toFixed(digits))
 
-type PanelTab = 'picture' | 'audio' | 'speed' | 'transition' | 'compositing'
+type PanelTab = 'picture' | 'audio' | 'speed' | 'transition' | 'color' | 'compositing'
 
 const PANEL_TABS: readonly { id: PanelTab; label: string }[] = [
   { id: 'picture', label: '画面' },
   { id: 'audio', label: '音频' },
   { id: 'speed', label: '变速' },
   { id: 'transition', label: '转场' },
+  { id: 'color', label: '调节' },
   { id: 'compositing', label: '合成' },
 ]
 
@@ -208,6 +211,11 @@ export function PropertiesPanel() {
   const setTransition = useEditorStore((state) => state.setTransition)
   const applyTransitionToAll = useEditorStore((state) => state.applyTransitionToAll)
   const closeGapBefore = useEditorStore((state) => state.closeGapBefore)
+  const setClipColor = useEditorStore((state) => state.setClipColor)
+  const applyColorToAll = useEditorStore((state) => state.applyColorToAll)
+  const colorClipboard = useEditorStore((state) => state.colorClipboard)
+  const copyClipColor = useEditorStore((state) => state.copyClipColor)
+  const pasteClipColor = useEditorStore((state) => state.pasteClipColor)
   const applyClipDefaults = useEditorStore((state) => state.applyClipDefaults)
 
   const location = findClipLocation(project, selectedClipId)
@@ -751,6 +759,39 @@ export function PropertiesPanel() {
               }}
               canApplyAll={project.clips.length > 1 && !isOverlay}
               unavailableReason={isOverlay ? '转场只作用于主轨片段' : undefined}
+            />
+          </section>
+        )}
+
+        {tab === 'color' && (
+          <section className="panel-section color-section">
+            <ClipColorSection
+              clip={clip}
+              disabled={disabled}
+              clipboard={colorClipboard}
+              onPreview={(color) => preview({ color })}
+              onChange={(color) => {
+                setClipColor(clip.id, color)
+                clearPreview()
+              }}
+              onReset={() => {
+                setClipColor(clip.id, {
+                  brightness: 0,
+                  contrast: 0,
+                  saturation: 0,
+                  temperature: 0,
+                })
+                clearPreview()
+              }}
+              onApplyAll={() => {
+                applyColorToAll(clipColor(clip))
+                clearPreview()
+              }}
+              onCopy={() => copyClipColor(clip.id)}
+              onPaste={() => {
+                pasteClipColor(clip.id)
+                clearPreview()
+              }}
             />
           </section>
         )}

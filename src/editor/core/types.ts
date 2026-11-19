@@ -101,6 +101,16 @@ export interface Clip {
   transitionOut?: ClipTransition
   /** 片段级背景覆盖；缺省沿用工程级 canvasBackground。 */
   background?: CanvasBackground
+  /**
+   * 调色参数：四项各 -100…100，缺省 0（旧草稿读取时统一归一化为 0）。
+   * 预览用 Canvas filter/叠加层，导出用 FFmpeg eq/colorbalance。
+   */
+  color?: {
+    brightness?: number
+    contrast?: number
+    saturation?: number
+    temperature?: number
+  }
 }
 
 export interface Marker {

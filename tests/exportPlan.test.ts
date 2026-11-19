@@ -381,3 +381,82 @@ describe('multi-source export plan', () => {
     expect(args).toContain('input1.webm')
   })
 })
+describe('调色滤镜（eq / colorbalance）', () => {
+  const chainOf = (graph: string, label: string): string =>
+    graph.split(';').find((part) => part.includes(label)) ?? ''
+
+  it('四项全 0 时不生成 eq / colorbalance 滤镜', () => {
+    const base = createInitialProject({ url: SOURCE.url, duration: 10 }, 'clip-a')
+    const neutral: Project = {
+      ...base,
+      clips: base.clips.map((clip) => ({
+        ...clip,
+        color: { brightness: 0, contrast: 0, saturation: 0, temperature: 0 },
+      })),
+    }
+    const plan = buildExportPlan(neutral, [SOURCE], true)
+    expect(plan.graph).not.toContain('eq=')
+    expect(plan.graph).not.toContain('colorbalance=')
+    // 与完全不带 color 字段的工程生成同一张图
+    expect(plan.graph).toBe(buildExportPlan(base, [SOURCE], true).graph)
+  })
+
+  it('非 0 时滤镜串按系数写入（亮度 / 对比度 / 饱和度 / 色温）', () => {
+    const base = createInitialProject({ url: SOURCE.url, duration: 10 }, 'clip-a')
+    const project: Project = {
+      ...base,
+      clips: base.clips.map((clip) => ({
+        ...clip,
+        color: { brightness: 50, contrast: 20, saturation: 80, temperature: 80 },
+      })),
+    }
+    const plan = buildExportPlan(project, [SOURCE], true)
+    // brightness 取 b/200（±0.5 区间）；contrast/saturation 取 1+c/100
+    expect(plan.graph).toContain(
+      'eq=brightness=0.25:contrast=1.2:saturation=1.4653',
+    )
+    // 暖调：加红减蓝
+    expect(plan.graph).toContain('colorbalance=rs=0.4:bs=-0.4')
+    // 冷调符号相反
+    const cool: Project = {
+      ...base,
+      clips: base.clips.map((clip) => ({
+        ...clip,
+        color: { temperature: -80 },
+      })),
+    }
+    expect(buildExportPlan(cool, [SOURCE], true).graph).toContain(
+      'colorbalance=rs=-0.4:bs=0.4',
+    )
+  })
+
+  it('叠加轨的调色只作用于叠加链，主轨不受影响', () => {
+    const base = createInitialProject({ url: SOURCE.url, duration: 10 }, 'clip-a')
+    const overlay = addOverlayTrackFromClip(base, 'clip-a', 'track-over', 'overlay-a')!.project
+
+    // 只有叠加片段带调色
+    const overlayColored: Project = {
+      ...overlay,
+      overlayTracks: overlay.overlayTracks!.map((track) => ({
+        ...track,
+        clips: track.clips.map((clip) => ({ ...clip, color: { saturation: 80 } })),
+      })),
+    }
+    const plan = buildExportPlan(overlayColored, [SOURCE], true)
+    expect(chainOf(plan.graph, '[ov0]')).toContain('saturation=1.4653')
+    expect(chainOf(plan.graph, '[basev]')).not.toContain('eq=')
+
+    // 只有主轨片段带调色：叠加链不带该参数
+    const mainColored: Project = {
+      ...overlay,
+      clips: overlay.clips.map((clip) => ({ ...clip, color: { saturation: 80 } })),
+      overlayTracks: overlay.overlayTracks!.map((track) => ({
+        ...track,
+        clips: track.clips.map((clip) => ({ ...clip, color: undefined })),
+      })),
+    }
+    const plan2 = buildExportPlan(mainColored, [SOURCE], true)
+    expect(chainOf(plan2.graph, '[basev]')).toContain('saturation=1.4653')
+    expect(chainOf(plan2.graph, '[ov0]')).not.toContain('eq=')
+  })
+})

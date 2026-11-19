@@ -1,4 +1,4 @@
-import { projectMediaUrls, remapProjectUrls, pruneProjectUrls } from './core/draft'
+import { projectMediaUrls, remapProjectUrls, pruneProjectUrls, normalizeProjectColors } from './core/draft'
 import type { MediaAsset, Project } from './core/types'
 import { remoteName, readAssetFile } from './services/assetReader'
 import { exportProject, terminateFFmpegRuntime } from './services/ffmpegExporter'
@@ -69,7 +69,9 @@ export function applyProjectToStore(
 ): ApplyProjectResult {
   const state = store.getState()
   const urlMap = input.urlMap ?? new Map<string, string>()
-  const projectUrls = projectMediaUrls(input.project)
+  // 工程文件/宿主传入的 project 可能没有 color 字段：统一归一化后再做 URL 重映射与剪枝。
+  const sourceProject = normalizeProjectColors(input.project)
+  const projectUrls = projectMediaUrls(sourceProject)
 
   // 可用 URL：重映射后的新 URL + 仍然是远程（非 blob/data）的 URL + 当前会话里已经拿着 Blob 的素材。
   const available = new Set<string>()
@@ -86,7 +88,7 @@ export function applyProjectToStore(
     available.add(asset.url)
   }
 
-  const remapped = remapProjectUrls(input.project, urlMap)
+  const remapped = remapProjectUrls(sourceProject, urlMap)
   const project = pruneProjectUrls(remapped, available)
   const removedClips = Math.max(0, countClips(remapped) - countClips(project))
 

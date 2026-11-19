@@ -1,4 +1,5 @@
 import type { AudioClip, CanvasBackground, Clip, Project, TextClip } from './types'
+import { normalizeColor } from './color'
 
 /** 背景图 URL 跟随 blob 重建一起重映射。 */
 function remapBackground(
@@ -96,6 +97,42 @@ export function pruneProjectUrls(project: Project, available: Set<string>): Proj
     audioTracks,
     textTracks,
   }
+}
+
+/**
+ * 调色归一化：草稿读取入口统一调用一次，把旧草稿缺失的 color 补成四个 0。
+ * 已经归一化过的片段保持对象引用不变（不产生无意义的重新渲染）。
+ */
+export function normalizeProjectColors(project: Project): Project {
+  const normalizeClip = (clip: Clip): Clip => {
+    const color = normalizeColor(clip.color)
+    const existing = clip.color
+    if (
+      existing &&
+      existing.brightness === color.brightness &&
+      existing.contrast === color.contrast &&
+      existing.saturation === color.saturation &&
+      existing.temperature === color.temperature
+    ) {
+      return clip
+    }
+    return { ...clip, color }
+  }
+
+  const clips = project.clips.map(normalizeClip)
+  let changed = clips.some((clip, index) => clip !== project.clips[index])
+
+  let overlayTracks = project.overlayTracks
+  if (overlayTracks) {
+    overlayTracks = overlayTracks.map((track) => {
+      const nextClips = track.clips.map(normalizeClip)
+      if (nextClips.every((clip, index) => clip === track.clips[index])) return track
+      changed = true
+      return { ...track, clips: nextClips }
+    })
+  }
+  if (!changed) return project
+  return { ...project, clips, ...(overlayTracks ? { overlayTracks } : {}) }
 }
 
 /** 收集工程里所有媒体 URL（含背景图），供草稿保存 Blob / 重载重建。 */

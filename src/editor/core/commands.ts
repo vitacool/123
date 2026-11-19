@@ -30,6 +30,7 @@ import {
   setAspectRatioInProject,
   setExportQualityInProject,
   applyTransitionToAllJunctions,
+  applyColorToAllClips,
   splitOverlayClipAt,
   splitProjectAt,
   trimOverlayClipAt,
@@ -74,6 +75,7 @@ import type {
   TrackState,
 } from './types'
 import type { TransitionAllOptions } from './operations'
+import type { ColorAdjustments } from './color'
 import { normalizeTransitionType, transitionLabel } from './transition'
 import { relinkCaptions } from './captionLink'
 import { normalizeBackground, withClipBackground } from './background'
@@ -154,6 +156,19 @@ export function createSetTransitionAllCommand(
     label: `转场 ${transitionLabel(normalizeTransitionType(options.type))} 应用到所有交界`,
     execute(project) {
       return applyTransitionToAllJunctions(project, options).project
+    },
+  }
+}
+
+/**
+ * 把同一组调色参数应用到所有画面片段（1 次命令 = 1 步撤销）。
+ * 全都没有变化时返回原 project，不写历史。
+ */
+export function createSetColorAllCommand(color: ColorAdjustments): EditorCommand {
+  return {
+    label: '调色应用到全部片段',
+    execute(project) {
+      return applyColorToAllClips(project, color).project
     },
   }
 }

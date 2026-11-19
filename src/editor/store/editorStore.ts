@@ -37,6 +37,7 @@ import {
   createSplitAudioClipCommand,
   createSplitCommand,
   createSetTransitionAllCommand,
+  createSetColorAllCommand,
   createSplitOverlayClipCommand,
   createSplitTextClipCommand,
   createTrimAudioClipCommand,
@@ -68,6 +69,7 @@ import {
   createEmptyProject,
   createInitialProject,
   applyTransitionToAllJunctions,
+  applyColorToAllClips,
   normalizeAngle,
 } from '../core/operations'
 import { createId } from '../core/ids'
@@ -95,6 +97,7 @@ import {
   transitionLabel,
   TRANSITION_MIN_DURATION,
 } from '../core/transition'
+import { isSameColor, normalizeColor, type ColorAdjustments } from '../core/color'
 import {
   blendModeLabel,
   clipBlendMode,
@@ -268,6 +271,14 @@ export interface EditorState {
   setClipOpacity: (clipId: string, opacity: number) => void
   /** 设置混合模式（一个命令）。 */
   setClipBlendMode: (clipId: string, mode: BlendMode) => void
+  /** 设置片段调色（一个命令）。 */
+  setClipColor: (clipId: string, color: ColorAdjustments) => void
+  /** 把一组调色参数应用到所有画面片段（一个命令）。 */
+  applyColorToAll: (color: ColorAdjustments) => void
+  /** 调色剪贴板：「复制当前设置」后供其他片段「粘贴调色」。 */
+  colorClipboard: ColorAdjustments | null
+  copyClipColor: (clipId: string) => void
+  pasteClipColor: (clipId: string) => void
   /** 设置/清除片段尾部转场（一个命令）。 */
   setTransition: (clipId: string, type: TransitionType | null, duration?: number) => void
   /** 把同一种转场应用到主轨所有可用交界（一个命令，跳过空隙/定格/太短的交界）。 */
@@ -606,6 +617,7 @@ export function createEditorStore() {
       previewPatch: null,
       markerEditorId: null,
       exportDialogOpen: false,
+      colorClipboard: null,
       canUndo: false,
       canRedo: false,
       lastAction: '',
@@ -1089,6 +1101,57 @@ export function createEditorStore() {
             `混合模式 ${blendModeLabel(next)}`,
           ),
         )
+      },
+
+      setClipColor: (clipId, color) => {
+        const state = get()
+        const location = findClipLocation(state.project, clipId)
+        if (!location) return
+        if (location.track ? isOverlayLocked(location.track) : isMainLocked(state.project)) return
+        const next = normalizeColor(color)
+        if (isSameColor(normalizeColor(location.clip.color), next)) return
+        run(createUpdateAnyClipCommand(clipId, { color: next }, '调整调色'))
+      },
+
+      applyColorToAll: (color) => {
+        const state = get()
+        if (isMainLocked(state.project)) {
+          state.notify('主轨已锁定，请先解锁', 'warning')
+          return
+        }
+        const preview = applyColorToAllClips(state.project, color)
+        if (preview.applied === 0) {
+          state.notify('所有片段已经是这组调色参数', 'info')
+          return
+        }
+        if (run(createSetColorAllCommand(normalizeColor(color)))) {
+          state.notify(`已应用到 ${preview.applied} 个片段`, 'success')
+        }
+      },
+
+      copyClipColor: (clipId) => {
+        const state = get()
+        const location =
+          findClipLocation(state.project, clipId)?.clip ??
+          findAudioClipLocation(state.project, clipId)?.clip ??
+          null
+        if (!location) return
+        set({ colorClipboard: normalizeColor('color' in location ? location.color : null) })
+        state.notify('已复制当前调色设置', 'info')
+      },
+
+      pasteClipColor: (clipId) => {
+        const state = get()
+        const clipboard = state.colorClipboard
+        if (!clipboard) {
+          state.notify('还没有复制调色设置', 'warning')
+          return
+        }
+        const location = findClipLocation(state.project, clipId)
+        if (!location) return
+        if (location.track ? isOverlayLocked(location.track) : isMainLocked(state.project)) return
+        if (isSameColor(normalizeColor(location.clip.color), clipboard)) return
+        run(createUpdateAnyClipCommand(clipId, { color: clipboard }, '粘贴调色'))
       },
 
       setCanvasBackground: (background) => {

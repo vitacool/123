@@ -11,6 +11,13 @@ import {
   clipBackground,
 } from '../core/background'
 import { canvasCompositeOperation, clipBlendMode, clipOpacity } from '../core/blend'
+import {
+  clipColor,
+  cssColorFilter,
+  isNeutralColor,
+  temperatureTint,
+  type ColorAdjustments,
+} from '../core/color'
 import { clampPlaybackRate, PLAYBACK_RATE_MIN, PLAYBACK_RATE_MAX } from '../core/speed'
 import {
   isAudioTrackActive,
@@ -49,6 +56,40 @@ interface SourceTarget {
   time: number
   /** 主轨为 null，叠加轨为轨道 id（用于取对应的 video 元素）。 */
   trackId?: string | null
+}
+
+/**
+ * 片段画面的调色绘制：CSS filter（亮度/对比度/饱和度）+ 色温叠加层。
+ *
+ * 只对「片段画面」调用（背景层、文本层、字幕层不走这里）。绘制完成后立刻把
+ * filter 复位为 none、把 globalCompositeOperation / globalAlpha 复原，
+ * 否则会污染后续绘制的背景、叠加轨与文本图层。
+ */
+function drawSourceWithColor(
+  ctx: CanvasRenderingContext2D,
+  color: ColorAdjustments,
+  rect: { width: number; height: number },
+  draw: () => void,
+): void {
+  if (isNeutralColor(color)) {
+    draw()
+    return
+  }
+  const filter = cssColorFilter(color)
+  if (filter) ctx.filter = filter
+  draw()
+  if (filter) ctx.filter = 'none'
+
+  const tint = temperatureTint(color)
+  if (!tint) return
+  const savedAlpha = ctx.globalAlpha
+  const savedOperation = ctx.globalCompositeOperation
+  ctx.globalCompositeOperation = 'overlay'
+  ctx.globalAlpha = savedAlpha * tint.alpha
+  ctx.fillStyle = tint.color
+  ctx.fillRect(-rect.width / 2, -rect.height / 2, rect.width, rect.height)
+  ctx.globalAlpha = savedAlpha
+  ctx.globalCompositeOperation = savedOperation
 }
 
 function getSourceTarget(
@@ -388,16 +429,24 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
         (effective.flipH ? -1 : 1) * layerScale,
         (effective.flipV ? -1 : 1) * layerScale,
       )
-      context.drawImage(
-        source,
-        crop.x,
-        crop.y,
-        crop.w,
-        crop.h,
-        -crop.w / 2,
-        -crop.h / 2,
-        crop.w,
-        crop.h,
+      // 只对片段画面应用调色；背景/文本/字幕不经过这里。
+      drawSourceWithColor(
+        context,
+        clipColor(effective),
+        { width: crop.w, height: crop.h },
+        () => {
+          context.drawImage(
+            source,
+            crop.x,
+            crop.y,
+            crop.w,
+            crop.h,
+            -crop.w / 2,
+            -crop.h / 2,
+            crop.w,
+            crop.h,
+          )
+        },
       )
       context.restore()
     }

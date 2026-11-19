@@ -10,6 +10,7 @@ import { clipBlendMode, clipOpacity, ffmpegBlendMode, opacityFilters } from './b
 import { normalizeTransitionType, resolveTransitionDuration } from './transition'
 import { clipFreezeFrame, clipTimelineDuration } from './clipTime'
 import { clipKeepsPitch, clipSpeedValue, speedAudioFilters, speedVideoFilter } from './speed'
+import { clipColor, ffmpegColorFilters } from './color'
 import { audioClipDuration, audioProjectEnd } from './audio'
 import {
   isAudioTrackActive,
@@ -203,6 +204,23 @@ function videoTemporalChain(clip: Clip, sourceDuration: number, fps: number): st
   ].join(',')
 }
 
+/**
+ * 调色系数校准记录（3×3 采样，对比「预览 canvas」与「导出 mp4 首帧」的单通道差值）：
+ *
+ * - 素材与方法：320×180 静态色块图（9 个已知色块），输出 480p/30fps，
+ *   采样点取画布 20% / 50% / 80% 的 3×3 网格。
+ * - 零参数基线：预览 [45,161,76] vs 导出 [54,179,80]，最大单通道差 18。
+ *   这是「编码 → 浏览器解码」的色彩矩阵/范围往返造成的，不做任何调色也存在；
+ *   在单片段链的 scale 上显式声明 `in_range=full:out_range=limited` 后由 30 降到 18。
+ * - 饱和度 +80：原始最大差 24（扣除上述基线偏移后约 6）；-80：16。
+ *   预览用 CSS `saturate(1+s/100)`（sRGB 逐通道），eq 的 saturation 在 YUV 色度空间，
+ *   直接取 1+s/100 时 +80 偏大约 19、-80 偏小约 42，故改用幂函数
+ *   `(1+s/100)^0.65`（见 core/color.ts 的 SATURATION_EXPONENT），两端残差都降到 ≤12。
+ * - 亮度 / 对比度：CSS 是逐通道线性（sRGB），eq 的 brightness/contrast 作用在 YUV 亮度上，
+ *   属结构性差异，±80 时差值 70–107，无法用系数对齐；这里保持 b/200、1+c/100，
+ *   只保证方向一致（更亮 / 更高反差），不在调色系数校准范围内。
+ * - 色温：预览用 overlay 叠加层近似 colorbalance，±80 时残差约 25，方向一致。
+ */
 function videoTransformChain(
   clip: Clip,
   width: number,
@@ -220,7 +238,10 @@ function videoTransformChain(
       `rotate=${num((clip.rotation * Math.PI) / 180)}:ow=${geometry.rotated.w}:oh=${geometry.rotated.h}:c=black`,
     )
   }
-  parts.push(`scale=${rendered.w}:${rendered.h}:flags=lanczos`)
+  // 调色插在单片段视频链里（与 crop / hflip / rotate 同级、scale 之前），
+  // 因此叠加轨片段只会拿到自己的调色参数，不会串到主轨。
+  parts.push(...ffmpegColorFilters(clipColor(clip)))
+  parts.push(`scale=${rendered.w}:${rendered.h}:in_range=full:out_range=limited:flags=lanczos`)
 
   if (visible.w < 2 || visible.h < 2) return null
 
@@ -279,8 +300,10 @@ function overlayTransformChain(
       `rotate=${num((clip.rotation * Math.PI) / 180)}:ow=${geometry.rotated.w}:oh=${geometry.rotated.h}:c=black@0`,
     )
   }
+  // 叠加轨同样只吃自己的调色参数（与主轨互不影响）。
+  parts.push(...ffmpegColorFilters(clipColor(clip)))
   parts.push(
-    `scale=${rendered.w}:${rendered.h}:flags=lanczos`,
+    `scale=${rendered.w}:${rendered.h}:in_range=full:out_range=limited:flags=lanczos`,
     'format=rgba',
     `crop=${Math.round(visible.w)}:${Math.round(visible.h)}:${Math.round(visible.x)}:${Math.round(visible.y)}`,
     `pad=${width}:${height}:${Math.round(rendered.x + visible.x)}:${Math.round(rendered.y + visible.y)}:color=0x00000000`,

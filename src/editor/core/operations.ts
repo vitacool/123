@@ -18,6 +18,7 @@ import {
   TRANSITION_EPSILON,
   TRANSITION_MIN_DURATION,
 } from './transition'
+import { normalizeColor, isSameColor, type ColorAdjustments } from './color'
 import type {
   AspectRatioPreset,
   Clip,
@@ -987,6 +988,51 @@ export function setAspectRatioInProject(project: Project, aspectRatio: AspectRat
 
 export function setExportQualityInProject(project: Project, quality: ExportQuality): Project {
   return { ...project, exportQuality: { ...quality } }
+}
+
+/** 「应用到全部片段」的调色：主轨 + 叠加轨的所有画面片段。 */
+export interface ApplyColorAllResult {
+  project: Project
+  applied: number
+}
+
+/**
+ * 把同一组调色参数写到所有画面片段（主轨 + 叠加轨，图片/定格同样适用）。
+ * 已经相同的片段保持引用不变；全都没有变化时返回原 project（不产生历史）。
+ */
+export function applyColorToAllClips(
+  project: Project,
+  color: ColorAdjustments,
+): ApplyColorAllResult {
+  const normalized = normalizeColor(color)
+  let applied = 0
+  let changed = false
+
+  const applyClip = (clip: Clip): Clip => {
+    const current = normalizeColor(clip.color)
+    if (isSameColor(current, normalized)) return clip
+    applied += 1
+    changed = true
+    return { ...clip, color: normalized }
+  }
+
+  const clips = project.clips.map(applyClip)
+  const overlayTracks = (project.overlayTracks ?? []).map((track) => {
+    const clipsNext = track.clips.map(applyClip)
+    return clipsNext.every((clip, index) => clip === track.clips[index])
+      ? track
+      : { ...track, clips: clipsNext }
+  })
+
+  if (!changed) return { project, applied: 0 }
+  return {
+    project: {
+      ...project,
+      clips,
+      ...(project.overlayTracks ? { overlayTracks } : {}),
+    },
+    applied,
+  }
 }
 
 export function getContentAspectRatio(
