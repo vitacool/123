@@ -1,0 +1,18 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+dist-lib/
+build/
+
+# generated assets (scripts/copy-*.mjs 产出)
+public/ffmpeg/
+public/onnxruntime/
+public/vad/
+
+# local scratch
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
