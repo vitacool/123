@@ -16,10 +16,13 @@ const AUDIO_HEIGHT = 64
 export function TrackGutter() {
   const project = useEditorStore((state) => state.project)
   const removeOverlayTrack = useEditorStore((state) => state.removeOverlayTrack)
+  const moveOverlayTrack = useEditorStore((state) => state.moveOverlayTrack)
   const removeAudioTrack = useEditorStore((state) => state.removeAudioTrack)
   const removeTextTrack = useEditorStore((state) => state.removeTextTrack)
 
-  const overlays = [...(project.overlayTracks ?? [])].reverse()
+  // overlayTracks 是 bottom-to-top（index 0 最底），UI 倒序渲染（最上层显示在最上面）。
+  const overlayArray = project.overlayTracks ?? []
+  const overlays = [...overlayArray].reverse()
   const audioTracks = project.audioTracks ?? []
   const textTracks = project.textTracks ?? []
   const mainState = mainTrackState(project)
@@ -27,17 +30,25 @@ export function TrackGutter() {
   return (
     <>
       <div className="track-gutter-spacer" />
-      {overlays.map((track: OverlayTrack) => (
-        <TrackControls
-          key={track.id}
-          kind="overlay"
-          trackId={track.id}
-          name={track.name}
-          state={overlayTrackState(track)}
-          height={OVERLAY_HEIGHT}
-          onRemove={() => removeOverlayTrack(track.id)}
-        />
-      ))}
+      {overlays.map((track: OverlayTrack) => {
+        // 边界按数组 index 判断：index = length-1 是最上层，index = 0 是最下层。
+        const arrayIndex = overlayArray.findIndex((item) => item.id === track.id)
+        return (
+          <TrackControls
+            key={track.id}
+            kind="overlay"
+            trackId={track.id}
+            name={track.name}
+            state={overlayTrackState(track)}
+            height={OVERLAY_HEIGHT}
+            onRemove={() => removeOverlayTrack(track.id)}
+            canMoveUp={arrayIndex >= 0 && arrayIndex < overlayArray.length - 1}
+            canMoveDown={arrayIndex > 0}
+            onMoveUp={() => moveOverlayTrack(track.id, 'up')}
+            onMoveDown={() => moveOverlayTrack(track.id, 'down')}
+          />
+        )
+      })}
       <TrackControls
         kind="main"
         trackId={null}

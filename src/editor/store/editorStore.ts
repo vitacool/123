@@ -40,6 +40,7 @@ import {
   createSetColorAllCommand,
   createPasteVisualAttributesCommand,
   createPasteAudioAttributesCommand,
+  createMoveOverlayTrackCommand,
   createSplitOverlayClipCommand,
   createSplitTextClipCommand,
   createTrimAudioClipCommand,
@@ -391,6 +392,8 @@ export interface EditorState {
   ) => void
   deleteSelectedClip: () => void
   addOverlayTrack: () => void
+  /** 调整叠加轨层级：'up' = 往上层（数组 index+1），'down' = 往下层。 */
+  moveOverlayTrack: (trackId: string, direction: 'up' | 'down') => void
   removeOverlayTrack: (trackId: string) => void
   toggleOverlayTrackVisibility: (trackId: string) => void
   toggleTrackFlag: (kind: TrackKind, trackId: string | null, flag: TrackFlag) => void
@@ -1935,6 +1938,19 @@ export function createEditorStore() {
           )
         ) {
           get().notify('已新增空叠加轨；拖动片段进入即可', 'success')
+        }
+      },
+
+      moveOverlayTrack: (trackId, direction) => {
+        const state = get()
+        const tracks = state.project.overlayTracks ?? []
+        const index = tracks.findIndex((track) => track.id === trackId)
+        if (index < 0) return
+        // 边界：已在最上层 / 最下层，直接返回（不产生撤销历史）。
+        const targetIndex = direction === 'up' ? index + 1 : index - 1
+        if (targetIndex < 0 || targetIndex >= tracks.length) return
+        if (run(createMoveOverlayTrackCommand(trackId, direction))) {
+          state.notify(direction === 'up' ? '叠加轨上移一层' : '叠加轨下移一层', 'info')
         }
       },
 

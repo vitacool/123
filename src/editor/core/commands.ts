@@ -32,6 +32,7 @@ import {
   applyTransitionToAllJunctions,
   applyColorToAllClips,
   applyAttributePatch,
+  moveOverlayTrackInProject,
   splitOverlayClipAt,
   splitProjectAt,
   trimOverlayClipAt,
@@ -171,6 +172,22 @@ export function createSetColorAllCommand(color: ColorAdjustments): EditorCommand
     label: '调色应用到全部片段',
     execute(project) {
       return applyColorToAllClips(project, color).project
+    },
+  }
+}
+
+/**
+ * 调整叠加轨层级（1 次命令 = 1 步撤销）。
+ * 'up' 表示数组里往上层走（index+1，视觉上更高一层）；已在边界时返回原 project。
+ */
+export function createMoveOverlayTrackCommand(
+  trackId: string,
+  direction: 'up' | 'down',
+): EditorCommand {
+  return {
+    label: direction === 'up' ? '叠加轨上移一层' : '叠加轨下移一层',
+    execute(project) {
+      return moveOverlayTrackInProject(project, trackId, direction)
     },
   }
 }

@@ -5223,3 +5223,41 @@
 .color-actions .button {
   flex: 1 1 auto;
 }
+
+/* 叠加轨层级调整：19px 宽的上下箭头竖排（只占一个按钮槽位，避免挤压轨道名） */
+.track-move-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.track-move {
+  width: 19px;
+  height: 9px;
+  border-radius: 3px;
+  color: var(--fc-faint);
+}
+
+.track-move svg {
+  display: block;
+  margin: 0 auto;
+}
+
+/* chevron 图标本身朝下：上移旋转 180°，下移保持原样 */
+.track-move-icon.is-up {
+  transform: rotate(180deg);
+}
+
+.track-move-icon.is-down {
+  transform: none;
+}
+
+.track-move:hover:not(:disabled) {
+  background: var(--fc-panel-deep);
+  color: var(--fc-accent-deep);
+}
+
+.track-move:disabled {
+  opacity: 0.32;
+  cursor: default;
+}

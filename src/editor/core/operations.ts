@@ -990,6 +990,32 @@ export function setExportQualityInProject(project: Project, quality: ExportQuali
   return { ...project, exportQuality: { ...quality } }
 }
 
+/**
+ * 移动一条叠加轨的层级。
+ *
+ * `overlayTracks` 数组是 **bottom-to-top**（见 types.ts 的 Project 注释）：
+ * index 0 是最底层，index = length-1 是最上层。因此：
+ *   direction === 'up'   → 数组里 index + 1（更高一层）
+ *   direction === 'down' → 数组里 index - 1（更低一层）
+ * 已在最上层/最下层（或轨道不存在）时返回原 project，因此不产生撤销历史。
+ * 主轨不参与重排。
+ */
+export function moveOverlayTrackInProject(
+  project: Project,
+  trackId: string,
+  direction: 'up' | 'down',
+): Project {
+  const tracks = project.overlayTracks ?? []
+  const index = tracks.findIndex((track) => track.id === trackId)
+  if (index < 0) return project
+  const targetIndex = direction === 'up' ? index + 1 : index - 1
+  if (targetIndex < 0 || targetIndex >= tracks.length) return project
+  const next = [...tracks]
+  const [moved] = next.splice(index, 1)
+  next.splice(targetIndex, 0, moved)
+  return { ...project, overlayTracks: next }
+}
+
 /** 属性粘贴的结果：project 变化 + 实际写入 / 被跳过的片段数。 */
 export interface AttributePatchResult {
   project: Project

@@ -1,6 +1,8 @@
+import { useState } from 'react'
 import type { TrackFlag, TrackKind } from '../core/tracks'
 import type { TrackState } from '../core/types'
 import { useEditorStore } from '../store/EditorProvider'
+import { ContextMenu } from './ContextMenu'
 import { Icon } from './Icon'
 
 interface TrackControlsProps {
@@ -12,6 +14,11 @@ interface TrackControlsProps {
   /** Audio track is silenced by another track's solo. */
   suppressedBySolo?: boolean
   onRemove?: () => void
+  /** 叠加轨层级调整：'up' = 更靠上层；已在边界时对应按钮置灰。 */
+  canMoveUp?: boolean
+  canMoveDown?: boolean
+  onMoveUp?: () => void
+  onMoveDown?: () => void
 }
 
 const titles: Record<TrackFlag, string> = {
@@ -30,20 +37,64 @@ export function TrackControls({
   height,
   suppressedBySolo = false,
   onRemove,
+  canMoveUp,
+  canMoveDown,
+  onMoveUp,
+  onMoveDown,
 }: TrackControlsProps) {
   const toggleTrackFlag = useEditorStore((store) => store.toggleTrackFlag)
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
   const audioOnly = kind === 'audio'
   const textOnly = kind === 'text'
   // 叠加轨现在也带声音（参与预览混音与导出 amix），只有文本轨没有独立音频。
   const noAudio = textOnly
   const toggle = (flag: TrackFlag) => toggleTrackFlag(kind, trackId, flag)
+  const reorderable = kind === 'overlay' && Boolean(onMoveUp && onMoveDown)
 
   return (
-    <div className="track-controls-row" style={{ height }}>
+    <div
+      className={`track-controls-row${reorderable ? ' is-reorderable' : ''}`}
+      style={{ height }}
+      onContextMenu={
+        reorderable
+          ? (event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              setMenu({ x: event.clientX, y: event.clientY })
+            }
+          : undefined
+      }
+    >
       <span className="track-controls-name" title={name}>
         {name}
       </span>
       <div className="track-controls-buttons" role="group" aria-label={`${name}控制`}>
+        {reorderable && (
+          <span className="track-move-stack" role="group" aria-label={`${name}层级`}>
+            <button
+              type="button"
+              className="track-control track-move"
+              aria-label={`${name}上移一层`}
+              title={canMoveUp ? '上移一层（更靠上层）' : '已是最上层'}
+              disabled={!canMoveUp}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={onMoveUp}
+            >
+              <Icon name="chevron" size={10} className="track-move-icon is-up" />
+            </button>
+            <button
+              type="button"
+              className="track-control track-move"
+              aria-label={`${name}下移一层`}
+              title={canMoveDown ? '下移一层（更靠下层）' : '已是最下层'}
+              disabled={!canMoveDown}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={onMoveDown}
+            >
+              <Icon name="chevron" size={10} className="track-move-icon is-down" />
+            </button>
+          </span>
+        )}
         <button
           type="button"
           className={`track-control${state.enabled ? '' : ' is-off'}`}
@@ -123,6 +174,28 @@ export function TrackControls({
           </button>
         )}
       </div>
+      {menu && reorderable && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          ariaLabel={`${name}层级`}
+          onClose={() => setMenu(null)}
+          items={[
+            {
+              label: '上移一层',
+              disabled: !canMoveUp,
+              reason: '已是最上层',
+              onSelect: () => onMoveUp?.(),
+            },
+            {
+              label: '下移一层',
+              disabled: !canMoveDown,
+              reason: '已是最下层',
+              onSelect: () => onMoveDown?.(),
+            },
+          ]}
+        />
+      )}
     </div>
   )
 }
