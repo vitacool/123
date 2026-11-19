@@ -28,7 +28,7 @@ import { PanelSection } from './PanelSection'
 
 const round = (value: number, digits = 2): number => Number(value.toFixed(digits))
 
-type PanelTab = 'picture' | 'audio' | 'speed' | 'transition' | 'color' | 'compositing'
+type PanelTab = 'picture' | 'audio' | 'speed' | 'transition' | 'color'
 
 const PANEL_TABS: readonly { id: PanelTab; label: string }[] = [
   { id: 'picture', label: '画面' },
@@ -36,7 +36,6 @@ const PANEL_TABS: readonly { id: PanelTab; label: string }[] = [
   { id: 'speed', label: '变速' },
   { id: 'transition', label: '转场' },
   { id: 'color', label: '调节' },
-  { id: 'compositing', label: '合成' },
 ]
 
 /** 每个 section 的「恢复默认值」补丁：一次命令提交，1 步撤销。 */
@@ -656,6 +655,26 @@ export function PropertiesPanel() {
           </PanelSection>
         )}
 
+        {/* 「合成」分组：整体搬自原「合成」tab（标题 / hint / 折叠键 / 重置 / 控件顺序均未改） */}
+        {tab === 'picture' && (
+          <PanelSection
+            title="合成"
+            hint={`不透明度 ${Math.round(clipOpacity(clip) * 100)}%`}
+            collapsed={isCollapsed('compositing')}
+            onToggle={() => toggleSection('compositing')}
+            onReset={() => resetSection('compositing', '合成')}
+            resetDisabled={disabled}
+          >
+            <ClipCompositingSection
+              clip={clip}
+              bare
+              onOpacity={(value) => setClipOpacity(clip.id, value)}
+              onBlendMode={(mode) => setClipBlendMode(clip.id, mode)}
+              onPreviewOpacity={(value) => preview({ opacity: value })}
+            />
+          </PanelSection>
+        )}
+
         {tab === 'picture' && (
           <PanelSection
             title="画面裁剪"
@@ -794,25 +813,6 @@ export function PropertiesPanel() {
               }}
             />
           </section>
-        )}
-
-        {tab === 'compositing' && (
-          <PanelSection
-            title="合成"
-            hint={`不透明度 ${Math.round(clipOpacity(clip) * 100)}%`}
-            collapsed={isCollapsed('compositing')}
-            onToggle={() => toggleSection('compositing')}
-            onReset={() => resetSection('compositing', '合成')}
-            resetDisabled={disabled}
-          >
-            <ClipCompositingSection
-              clip={clip}
-              bare
-              onOpacity={(value) => setClipOpacity(clip.id, value)}
-              onBlendMode={(mode) => setClipBlendMode(clip.id, mode)}
-              onPreviewOpacity={(value) => preview({ opacity: value })}
-            />
-          </PanelSection>
         )}
 
         <section className="panel-section panel-danger">
