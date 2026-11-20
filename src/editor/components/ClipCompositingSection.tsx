@@ -6,6 +6,7 @@ import {
 } from '../core/blend'
 import type { BlendMode, Clip } from '../core/types'
 import { CommitNumber } from './Toast'
+import { KeyframeButton } from './KeyframeButton'
 import { CommitSlider } from './CommitSlider'
 
 interface ClipCompositingSectionProps {
@@ -63,6 +64,7 @@ export function ClipCompositingSection({
           onPreview={(value) => onPreviewOpacity?.(value / 100)}
           onCommit={(value) => onOpacity(value / 100)}
         />
+        <KeyframeButton prop="opacity" clip={clip} />
       </div>
 
       {!bare && (

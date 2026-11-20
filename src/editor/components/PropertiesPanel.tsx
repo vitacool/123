@@ -3,12 +3,11 @@ import { clipFreezeFrame, clipTimelineDuration } from '../core/clipTime'
 import { useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { FREEZE_DEFAULT_DURATION, FREEZE_MAX_DURATION, FREEZE_MIN_DURATION } from '../core/constants'
 import { clipVolume } from '../core/clipAudio'
-import { animatedProps } from '../core/animation'
 import { clipOpacity } from '../core/blend'
 import { findAudioClipLocation } from '../core/audio'
 import { findTextClipLocation } from '../core/text'
 import { findClipLocation } from '../core/timeline'
-import type { AnimatableProperty, Clip, TextClip, TextTrack } from '../core/types'
+import type { Clip, TextClip, TextTrack } from '../core/types'
 import { useEditorStore } from '../store/EditorProvider'
 import { CommitNumber } from './Toast'
 import { CommitSlider } from './CommitSlider'
@@ -45,13 +44,6 @@ const PANEL_TABS: readonly { id: PanelTab; label: string }[] = [
 ]
 
 /** 每个 section 的「恢复默认值」补丁：一次命令提交，1 步撤销。 */
-const ANIMATABLE_ROWS: readonly { prop: AnimatableProperty; label: string }[] = [
-  { prop: 'position.x', label: '位置 X' },
-  { prop: 'position.y', label: '位置 Y' },
-  { prop: 'scale', label: '缩放' },
-  { prop: 'rotation', label: '旋转' },
-  { prop: 'opacity', label: '不透明度' },
-]
 
 const SECTION_DEFAULTS: Record<string, Partial<Clip>> = {
   rotation: { rotation: 0 },
@@ -59,7 +51,6 @@ const SECTION_DEFAULTS: Record<string, Partial<Clip>> = {
   transform: { scale: 1, position: { x: 0, y: 0 } },
   crop: { crop: { x: 0, y: 0, w: 1, h: 1 } },
   compositing: { opacity: 1, blendMode: 'normal' },
-  keyframes: { anim: undefined },
   speed: { speed: 1, keepPitch: true },
   audio: { volume: 1, fadeIn: 0, fadeOut: 0 },
 }
@@ -284,7 +275,6 @@ export function PropertiesPanel() {
   const setClipAudio = useEditorStore((state) => state.setClipAudio)
   const detachAudio = useEditorStore((state) => state.detachAudio)
   const setClipSpeed = useEditorStore((state) => state.setClipSpeed)
-  const setClipOpacity = useEditorStore((state) => state.setClipOpacity)
   const setClipBlendMode = useEditorStore((state) => state.setClipBlendMode)
   const setTransition = useEditorStore((state) => state.setTransition)
   const applyTransitionToAll = useEditorStore((state) => state.applyTransitionToAll)
@@ -591,6 +581,7 @@ export function PropertiesPanel() {
               onPreview={(value) => preview({ rotation: value })}
               onCommit={commitRotation}
             />
+            <KeyframeButton prop="rotation" clip={clip} />
           </div>
           <div className="inline-actions">
             <button
@@ -695,6 +686,7 @@ export function PropertiesPanel() {
               onPreview={(value) => preview({ scale: value / 100 })}
               onCommit={(value) => commitScale(value / 100)}
             />
+            <KeyframeButton prop="scale" clip={clip} />
           </div>
           <div className="inline-actions">
             <button
@@ -749,6 +741,7 @@ export function PropertiesPanel() {
                 }
                 onCommit={(value) => commitPosition(value, clip.position.y * 100)}
               />
+              <KeyframeButton prop="position.x" clip={clip} />
             </label>
             <label>
               <span>垂直偏移</span>
@@ -765,6 +758,7 @@ export function PropertiesPanel() {
                 }
                 onCommit={(value) => commitPosition(clip.position.x * 100, value)}
               />
+              <KeyframeButton prop="position.y" clip={clip} />
             </label>
           </div>
           </PanelSection>
@@ -783,33 +777,11 @@ export function PropertiesPanel() {
             <ClipCompositingSection
               clip={clip}
               bare
-              onOpacity={(value) => setClipOpacity(clip.id, value)}
+              // 不透明度同样走可动画入口：有关键帧时改关键帧，否则改基础值。
+              onOpacity={(value) => setAnimatableValue('opacity', value)}
               onBlendMode={(mode) => setClipBlendMode(clip.id, mode)}
               onPreviewOpacity={(value) => preview({ opacity: value })}
             />
-          </PanelSection>
-        )}
-
-        {tab === 'picture' && (
-          <PanelSection
-            title="关键帧"
-            hint={animatedProps(clip).length > 0 ? `${animatedProps(clip).length} 个属性` : '无动画'}
-            collapsed={isCollapsed('keyframes')}
-            onToggle={() => toggleSection('keyframes')}
-            onReset={() => resetSection('keyframes', '关键帧')}
-            resetDisabled={disabled}
-          >
-            <ul className="keyframe-list">
-              {ANIMATABLE_ROWS.map((row) => (
-                <li key={row.prop} className="keyframe-list-row">
-                  <span className="keyframe-list-label">{row.label}</span>
-                  <KeyframeButton prop={row.prop} clip={clip} />
-                </li>
-              ))}
-            </ul>
-            <p className="control-note">
-              点击菱形在当前播放头添加 / 删除关键帧；有关键帧的属性在导出时会逐帧烘焙。
-            </p>
           </PanelSection>
         )}
 

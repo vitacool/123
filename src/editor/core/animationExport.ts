@@ -1,4 +1,5 @@
 import { clipTimelineDuration } from './clipTime'
+import { getTimeline } from './timeline'
 import { hasAnimation } from './animation'
 import type { Clip, Project } from './types'
 
@@ -7,18 +8,24 @@ export interface AnimatedClipRef {
   /** 主轨为 null；叠加轨为轨道 id。 */
   trackId: string | null
   index: number
+  /** 片段在所属轨道上的时间线起点（秒）。 */
+  start: number
 }
 
 /** 工程里所有带动画的片段（主轨在前，叠加轨按轨道顺序）。 */
 export function animatedClips(project: Project): AnimatedClipRef[] {
   const list: AnimatedClipRef[] = []
-  project.clips.forEach((clip, index) => {
-    if (hasAnimation(clip)) list.push({ clip, trackId: null, index })
-  })
+  for (const segment of getTimeline(project.clips)) {
+    if (hasAnimation(segment.clip)) {
+      list.push({ clip: segment.clip, trackId: null, index: segment.index, start: segment.start })
+    }
+  }
   for (const track of project.overlayTracks ?? []) {
-    track.clips.forEach((clip, index) => {
-      if (hasAnimation(clip)) list.push({ clip, trackId: track.id, index })
-    })
+    for (const segment of getTimeline(track.clips)) {
+      if (hasAnimation(segment.clip)) {
+        list.push({ clip: segment.clip, trackId: track.id, index: segment.index, start: segment.start })
+      }
+    }
   }
   return list
 }

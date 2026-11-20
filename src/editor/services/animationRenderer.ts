@@ -19,8 +19,26 @@ export interface RenderAnimatedClipOptions {
   index: number
   ffmpeg: FFmpeg
   signal: AbortSignal | null
+  /**
+   * 可选的「下方画面」：叠加轨片段的中间视频不带 alpha，
+   * 所以把该时刻位于它下方的片段一起烘进来，合成时才能与预览一致。
+   * 仅当这个下方片段本身没有动画时才允许传入（否则会与它的中间视频重复烘焙）。
+   */
+  underlay?: { clip: Clip; asset: SourceInfo }
   /** 每渲染完一帧回调一次（done, total）。 */
   onFrame?: (done: number, total: number) => void
+}
+
+/** 取素材的原始字节（用于把原声裁进中间视频）。 */
+async function readAssetBytes(asset: SourceInfo): Promise<Uint8Array | null> {
+  try {
+    if (asset.file) return new Uint8Array(await asset.file.arrayBuffer())
+    const response = await fetch(asset.url)
+    if (!response.ok) return null
+    return new Uint8Array(await (await response.blob()).arrayBuffer())
+  } catch {
+    return null
+  }
 }
 
 const throwIfAborted = (signal: AbortSignal | null): void => {
@@ -129,7 +147,8 @@ async function openSource(
 export async function renderAnimatedClipToFile(
   options: RenderAnimatedClipOptions,
 ): Promise<File> {
-  const { clip, asset, project, width, height, fps, index, ffmpeg, signal, onFrame } = options
+  const { clip, asset, project, width, height, fps, index, ffmpeg, signal, onFrame, underlay } =
+    options
   const duration = clipTimelineDuration(clip)
   const total = animationFrameCount(clip, fps)
   const canvasW = Math.max(2, Math.round(width / 2) * 2)
@@ -145,6 +164,8 @@ export async function renderAnimatedClipToFile(
   const frameFiles: string[] = []
   const outputName = `anim_${index}.mp4`
   const source = await openSource(asset)
+  let audioFileName = ''
+  const underlaySource = underlay ? await openSource(underlay.asset) : null
 
   try {
     for (let frame = 0; frame < total; frame += 1) {
@@ -156,7 +177,8 @@ export async function renderAnimatedClipToFile(
           clip.type === 'freeze' ? clipFreezeFrame(clip) : clipSpanSourceAt(clip, localTime)
         await source.seek(sourceTime)
       }
-      // 背景烘焙：中间视频不带 alpha，先把该时刻的画面背景铺上，再画片段。
+      // 中间视频不带 alpha：先把「该时刻的画面底」铺上（有下方片段就画它，
+      // 否则铺画布背景色），再画本片段。这样合成时覆盖整幅画面也不会丢失内容。
       ctx.save()
       ctx.setTransform(1, 0, 0, 1, 0, 0)
       ctx.globalAlpha = 1
@@ -166,6 +188,23 @@ export async function renderAnimatedClipToFile(
       ctx.fillStyle = backgroundFill
       ctx.fillRect(0, 0, canvasW, canvasH)
       ctx.restore()
+
+      if (underlay && underlaySource) {
+        if (underlaySource.seek) {
+          await underlaySource.seek(clipSpanSourceAt(underlay.clip, localTime))
+        }
+        drawClipFrame({
+          ctx,
+          clip: underlay.clip,
+          localTime,
+          asset: underlay.asset,
+          canvasW,
+          canvasH,
+          source: underlaySource.draw,
+          sourceWidth: underlaySource.width,
+          sourceHeight: underlaySource.height,
+        })
+      }
 
       drawClipFrame({
         ctx,
@@ -191,6 +230,48 @@ export async function renderAnimatedClipToFile(
     }
 
     throwIfAborted(signal)
+
+    // 中间视频必须带一条音轨：滤镜图会按「有音频」引用该输入，缺轨会让整次导出失败。
+    // 有原声就把该片段的源区间裁进来（音量/淡入淡出仍由 exportPlan 在最后应用），
+    // 没有原声（图片 / 静音素材）就补一条静音轨。
+    const audioFile = `anim_${index}_audio`
+    const extension = /\.(mp4|mov|webm|mkv|m4a|mp3|wav|aac|ogg)$/i.exec(asset.name ?? '')?.[1]
+    audioFileName = extension ? `${audioFile}.${extension}` : `${audioFile}.m4a`
+    let audioInputArgs: string[] = ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo']
+    let audioReady = false
+    if (asset.kind !== 'image') {
+      const bytes = await readAssetBytes(asset)
+      if (bytes && bytes.byteLength > 0) {
+        try {
+          await ffmpeg.writeFile(audioFileName, bytes)
+          audioInputArgs = [
+            '-ss',
+            String(clip.sourceStart),
+            '-t',
+            String(duration),
+            '-i',
+            audioFileName,
+          ]
+          audioReady = true
+        } catch {
+          audioReady = false
+          audioInputArgs = ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo']
+        }
+      }
+    }
+    void audioReady
+    const audioMapArgs = [
+      '-map',
+      '0:v',
+      '-map',
+      '1:a',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '128k',
+      '-shortest',
+    ]
+
     // 编码超时兜底：wasm 里若卡住，宁可报错也不要让导出无限挂起。
     const encodeTimeoutMs = 180000
     let timeoutId: number | undefined
@@ -208,6 +289,8 @@ export async function renderAnimatedClipToFile(
       String(fps),
       '-i',
       `anim_${index}_%05d.png`,
+      ...audioInputArgs,
+      ...audioMapArgs,
       '-c:v',
       'libx264',
       '-preset',
@@ -230,7 +313,8 @@ export async function renderAnimatedClipToFile(
     return new File([copy.buffer], outputName, { type: 'video/mp4' })
   } finally {
     source.dispose()
-    for (const file of [...frameFiles, outputName]) {
+    underlaySource?.dispose()
+    for (const file of [...frameFiles, outputName, audioFileName]) {
       try {
         await ffmpeg.deleteFile(file)
       } catch {

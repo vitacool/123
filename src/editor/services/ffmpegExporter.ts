@@ -7,8 +7,10 @@ import {
 import { drawTextClip } from '../core/textRender'
 import { buildCoverJpeg, buildCoverPng, coverFrameSeconds } from '../core/cover'
 import { animationFrameCount, animatedClips, bakeAnimatedClip, hasAnyAnimation } from '../core/animationExport'
+import { hasAnimation } from '../core/animation'
 import { renderAnimatedClipToFile } from './animationRenderer'
 import { clipTimelineDuration } from '../core/clipTime'
+import { findSegmentAt } from '../core/timeline'
 import { resolveCaptionStyle } from '../core/text'
 import { buildTextOverlayTimeline } from '../core/textOverlay'
 import type { CaptionStyle, Clip, Project, SourceInfo } from '../core/types'
@@ -466,6 +468,17 @@ async function prepareAnimatedProject(args: {
     throwIfAborted(signal)
     const asset = assets.find((item) => item.url === ref.clip.sourceUrl)
     if (!asset) continue
+    // 叠加轨片段的中间视频没有 alpha：若该时刻下方的主轨片段本身没有动画，
+    // 就把它一起烘进来，合成结果才与预览一致；主轨片段自己也有动画时不做（避免重复烘焙）。
+    let underlay: { clip: Clip; asset: SourceInfo } | undefined
+    if (ref.trackId !== null) {
+      const segment = findSegmentAt(project.clips, ref.start)
+      const baseClip = segment?.clip ?? null
+      if (baseClip && !hasAnimation(baseClip)) {
+        const baseAsset = assets.find((item) => item.url === baseClip.sourceUrl)
+        if (baseAsset) underlay = { clip: baseClip, asset: baseAsset }
+      }
+    }
     const total = animationFrameCount(ref.clip, fps)
     onStatus?.(
       `正在渲染动画片段 ${index + 1}/${refs.length}（${total} 帧）`,
@@ -481,6 +494,7 @@ async function prepareAnimatedProject(args: {
       index,
       ffmpeg,
       signal,
+      underlay,
       onFrame: (done) => {
         current = done
         onProgress?.(Math.min(0.99, (index + done / total) / refs.length))
@@ -498,7 +512,8 @@ async function prepareAnimatedProject(args: {
       height: Math.max(2, Math.round(height / 2) * 2),
       kind: 'video',
       file,
-      hasAudio: false,
+      // 中间视频带一条音轨（原声或静音），因此就是「有音频」的输入。
+      hasAudio: true,
     }
     // 几何/不透明度/调色/动画已经烘焙进中间视频：重置为普通素材（见 bakeAnimatedClip）。
     const baked: Clip = bakeAnimatedClip(ref.clip, url, duration)
