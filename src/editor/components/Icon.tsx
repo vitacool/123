@@ -46,6 +46,7 @@ export type IconName =
   | 'lock'
   | 'text'
   | 'unlink'
+  | 'camera'
 
 interface IconProps extends SVGProps<SVGSVGElement> {
   name: IconName
@@ -314,6 +315,12 @@ const paths: Record<IconName, ReactNode> = {
     <>
       <rect x="5" y="10" width="14" height="10" rx="2" />
       <path d="M8 10V7.2a4 4 0 0 1 8 0V10" />
+    </>
+  ),
+  camera: (
+    <>
+      <path d="M4 8.5h3l1.4-2h7.2L17 8.5h3v9.5H4z" />
+      <circle cx="12" cy="13" r="3.2" />
     </>
   ),
   unlink: (

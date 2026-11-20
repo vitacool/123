@@ -37,7 +37,10 @@ import { TrackGutter } from './TrackGutter'
 import { TextTracks } from './TextTracks'
 import { MarkerPopover } from './MarkerPopover'
 
-const PAD = 12
+const BASE_PAD = 12
+/** 封面块宽度与它和 t=0 之间的间隙（只在有封面时占用）。 */
+const COVER_BLOCK_WIDTH = 56
+const COVER_GAP = 8
 const ASSET_DRAG_TYPE = 'application/x-framecut-asset'
 const POPOVER_OPEN_DELAY = 180
 const POPOVER_CLOSE_DELAY = 320
@@ -107,6 +110,8 @@ export function Timeline({ onPickFile }: TimelineProps) {
   const toggleSelectClip = useEditorStore((state) => state.toggleSelectClip)
   const rangeSelectClip = useEditorStore((state) => state.rangeSelectClip)
   const setPlayhead = useEditorStore((state) => state.setPlayhead)
+  const openCoverPanel = useEditorStore((state) => state.openCoverPanel)
+  const setCoverPreview = useEditorStore((state) => state.setCoverPreview)
   const setPlaying = useEditorStore((state) => state.setPlaying)
   const setTimelineZoom = useEditorStore((state) => state.setTimelineZoom)
   const setTimelineViewportWidth = useEditorStore((state) => state.setTimelineViewportWidth)
@@ -185,6 +190,9 @@ export function Timeline({ onPickFile }: TimelineProps) {
   const overlayTracks = project.overlayTracks ?? []
   /** 素材库现有素材的 url 集合：用于判断片段的素材是否已被移除。 */
   const assetUrls = useMemo(() => new Set(assets.map((asset) => asset.url)), [assets])
+  // 有封面时把时间轴左侧的留白加宽，避免封面块压住 t=0 的片段与标尺刻度。
+  const hasCoverBlock = Boolean(project.cover?.dataUrl)
+  const pad = BASE_PAD + (hasCoverBlock ? COVER_BLOCK_WIDTH + COVER_GAP : 0)
   const assetByUrl = useMemo(
     () => new Map(assets.map((asset) => [asset.url, asset])),
     [assets],
@@ -201,8 +209,8 @@ export function Timeline({ onPickFile }: TimelineProps) {
       assetForClip(clip)?.thumbnail,
     [assetForClip],
   )
-  const contentWidth = Math.max(viewportWidth, total * pps + PAD * 2 + 36)
-  const visibleDuration = Math.max(0.1, (contentWidth - PAD * 2) / pps)
+  const contentWidth = Math.max(viewportWidth, total * pps + pad * 2 + 36)
+  const visibleDuration = Math.max(0.1, (contentWidth - pad * 2) / pps)
 
   let majorStep = getRulerStep(pps)
   while (visibleDuration / majorStep > 220) majorStep *= 2
@@ -233,7 +241,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
     if (!isPlaying) return
     const element = scrollRef.current
     if (!element) return
-    const x = PAD + playhead * pps
+    const x = pad + playhead * pps
     if (x > element.scrollLeft + element.clientWidth - 70) {
       element.scrollLeft = Math.max(0, x - element.clientWidth * 0.34)
     } else if (x < element.scrollLeft + 34) {
@@ -255,7 +263,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
       const content = contentRef.current
       if (!content) return
       const rect = content.getBoundingClientRect()
-      const x = clientX - rect.left - PAD
+      const x = clientX - rect.left - pad
       const time = clamp(x / pps, 0, total)
       const snapDistance = 7 / pps
       setPlayhead(time, snapDistance)
@@ -273,7 +281,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
       const content = contentRef.current
       if (!content) return
       const rect = content.getBoundingClientRect()
-      const raw = clamp((clientX - rect.left - PAD) / pps, 0, total)
+      const raw = clamp((clientX - rect.left - pad) / pps, 0, total)
       let target = raw
       if (timelineSettings.autoSnap) {
         const threshold = 12 / pps
@@ -451,7 +459,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
       if (!current.active && distance < 5) return
       const rect = content.getBoundingClientRect()
       const rawTime = clamp(
-        (event.clientX - rect.left - PAD) / pps - current.grabOffset,
+        (event.clientX - rect.left - pad) / pps - current.grabOffset,
         0,
         total,
       )
@@ -602,11 +610,11 @@ export function Timeline({ onPickFile }: TimelineProps) {
       if (Math.abs(nextZoom - oldZoom) < 0.1) return
       const rect = element.getBoundingClientRect()
       const cursorX = event.clientX - rect.left
-      const anchorTime = (element.scrollLeft + cursorX - PAD) / oldZoom
+      const anchorTime = (element.scrollLeft + cursorX - pad) / oldZoom
       state.setTimelineZoom(nextZoom)
       setPopover(null)
       requestAnimationFrame(() => {
-        element.scrollLeft = Math.max(0, PAD + anchorTime * nextZoom - cursorX)
+        element.scrollLeft = Math.max(0, pad + anchorTime * nextZoom - cursorX)
       })
     }
     element.addEventListener('wheel', handleWheel, { passive: false })
@@ -621,7 +629,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
     requestAnimationFrame(() => {
       element.scrollLeft = Math.max(
         0,
-        PAD + anchorTime * next - element.clientWidth * 0.5,
+        pad + anchorTime * next - element.clientWidth * 0.5,
       )
     })
   }
@@ -769,7 +777,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
       setPopover(null)
       const contentRect = contentRef.current?.getBoundingClientRect()
       const pointerTime = contentRect
-        ? clamp((event.clientX - contentRect.left - PAD) / pps, 0, total)
+        ? clamp((event.clientX - contentRect.left - pad) / pps, 0, total)
         : 0
       const sourceLocation = findClipLocation(project, clipId)
       const grabOffset = sourceLocation
@@ -825,8 +833,8 @@ export function Timeline({ onPickFile }: TimelineProps) {
    */
   useEffect(() => {
     if (!boxSelect) return
-    /** 相对内容区的 x（不含 PAD）→ 时间轴秒数。startX/x 都是相对坐标。 */
-    const localToTime = (localX: number): number => clamp((localX - PAD) / pps, 0, total)
+    /** 相对内容区的 x（不含 pad）→ 时间轴秒数。startX/x 都是相对坐标。 */
+    const localToTime = (localX: number): number => clamp((localX - pad) / pps, 0, total)
     const move = (event: PointerEvent) => {
       if (event.pointerId !== boxSelect.pointerId) return
       const bounds = contentRef.current?.getBoundingClientRect()
@@ -908,16 +916,16 @@ export function Timeline({ onPickFile }: TimelineProps) {
 
   const tickIndexStart = Math.max(
     0,
-    Math.floor((scrollLeft - PAD - tickStepPx) / tickStepPx),
+    Math.floor((scrollLeft - pad - tickStepPx) / tickStepPx),
   )
   const tickIndexEnd = Math.ceil(
-    (scrollLeft + viewportWidth - PAD + tickStepPx) / tickStepPx,
+    (scrollLeft + viewportWidth - pad + tickStepPx) / tickStepPx,
   )
   const ticks: { time: number; x: number }[] = []
   for (let index = tickIndexStart; index <= tickIndexEnd; index += 1) {
     const time = index * majorStep
     if (time > visibleDuration + majorStep * 0.5) break
-    ticks.push({ time, x: PAD + time * pps })
+    ticks.push({ time, x: pad + time * pps })
   }
 
   const markerPopoverMarker = popover
@@ -933,7 +941,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
     })
     .filter((gap): gap is { start: number; duration: number } => gap !== null)
 
-  const dropX = PAD + (clipDrag?.targetTime ?? 0) * pps
+  const dropX = pad + (clipDrag?.targetTime ?? 0) * pps
   const dropHintLeft = clipDrag ? Math.min(window.innerWidth - 148, clipDrag.clientX + 14) : 0
   const dropHintTop = clipDrag ? Math.max(10, clipDrag.clientY - 38) : 0
   const dropTrackName =
@@ -1000,7 +1008,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
     const content = contentRef.current
     if (!content) return
     const rect = content.getBoundingClientRect()
-    const time = clamp((event.clientX - rect.left - PAD) / pps, 0, getProjectEnd(project))
+    const time = clamp((event.clientX - rect.left - pad) / pps, 0, getProjectEnd(project))
     let targetTrackId: string | null = null
     const baseLane = document.querySelector<HTMLElement>('.clip-lane')
     const baseBounds = baseLane?.getBoundingClientRect()
@@ -1247,6 +1255,15 @@ export function Timeline({ onPickFile }: TimelineProps) {
           <button
             type="button"
             className="button mini overlay-add"
+            title="封面：截取当前帧 / 上传图片 / 选择导出方式"
+            onClick={openCoverPanel}
+          >
+            <Icon name="fit" size={12} />
+            封面
+          </button>
+          <button
+            type="button"
+            className="button mini overlay-add"
             title="在播放头添加文本片段"
             onClick={addTextAtPlayhead}
           >
@@ -1382,7 +1399,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
           onPointerMove={(event) => {
             if (!timelineSettings.previewAxis) return
             const rect = event.currentTarget.getBoundingClientRect()
-            setHoverTime(clamp((event.clientX - rect.left - PAD) / pps, 0, total))
+            setHoverTime(clamp((event.clientX - rect.left - pad) / pps, 0, total))
           }}
           onPointerLeave={() => setHoverTime(null)}
         >
@@ -1392,7 +1409,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
               backgroundImage:
                 'linear-gradient(to right, rgba(31, 30, 27, 0.075) 1px, transparent 1px)',
               backgroundSize: `${tickStepPx}px 100%`,
-              backgroundPositionX: `${PAD}px`,
+              backgroundPositionX: `${pad}px`,
             }}
           >
             {ticks.map((tick, index) => (
@@ -1408,7 +1425,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
 
           <div className="marker-lane">
             {project.markers.map((marker) => {
-              const x = PAD + marker.time * pps
+              const x = pad + marker.time * pps
               return (
                 <button
                   key={marker.id}
@@ -1475,7 +1492,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
                       backgroundImage:
                         'linear-gradient(to right, rgba(31, 30, 27, 0.045) 1px, transparent 1px)',
                       backgroundSize: `${tickStepPx}px 100%`,
-                      backgroundPositionX: `${PAD}px`,
+                      backgroundPositionX: `${pad}px`,
                     }}
                   >
                     {trackSegments.map((segment) => {
@@ -1496,7 +1513,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
                           }`}
                           data-clip-id={clip.id}
                           data-track-id={track.id}
-                          style={{ left: PAD + segment.start * pps + 1, width }}
+                          style={{ left: pad + segment.start * pps + 1, width }}
                           role="option"
                           aria-selected={isSelected}
                           tabIndex={0}
@@ -1570,7 +1587,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
                           className={`clip-bar is-drag-ghost ${
                             dragGhostIsFreeze ? 'is-freeze' : 'is-video'
                           }`}
-                          style={{ left: PAD + clipDrag.targetTime * pps + 1, width: dragGhostWidth }}
+                          style={{ left: pad + clipDrag.targetTime * pps + 1, width: dragGhostWidth }}
                           aria-hidden="true"
                         >
                           {!dragGhostIsFreeze && dragGhostThumbnail && (
@@ -1612,7 +1629,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
               backgroundImage:
                 'linear-gradient(to right, rgba(31, 30, 27, 0.045) 1px, transparent 1px)',
               backgroundSize: `${tickStepPx}px 100%`,
-              backgroundPositionX: `${PAD}px`,
+              backgroundPositionX: `${pad}px`,
             }}
           >
             {gapBands.map((gap) => {
@@ -1621,13 +1638,35 @@ export function Timeline({ onPickFile }: TimelineProps) {
                 <span
                   key={`gap-${gap.start.toFixed(3)}`}
                   className="timeline-gap"
-                  style={{ left: PAD + gap.start * pps, width }}
+                  style={{ left: pad + gap.start * pps, width }}
                   aria-hidden="true"
                 >
                   {width > 46 && <span className="timeline-gap-label">空隙</span>}
                 </span>
               )
             })}
+            {hasCoverBlock && (
+              <button
+                type="button"
+                className="timeline-cover-block"
+                style={{ left: BASE_PAD, width: COVER_BLOCK_WIDTH }}
+                title="封面：点击设置（截取当前帧 / 上传图片 / 导出模式）"
+                aria-label="封面"
+                onPointerEnter={() => setCoverPreview(true)}
+                onPointerLeave={() => setCoverPreview(false)}
+                onFocus={() => setCoverPreview(true)}
+                onBlur={() => setCoverPreview(false)}
+                onClick={() => openCoverPanel()}
+              >
+                <img
+                  className="timeline-cover-thumb"
+                  src={project.cover?.dataUrl}
+                  alt=""
+                  draggable={false}
+                />
+                <span className="timeline-cover-badge">封面</span>
+              </button>
+            )}
             {segments.map((segment) => {
               const { clip } = segment
               const asset = assetForClip(clip)
@@ -1652,7 +1691,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
                   }`}
                   data-clip-id={clip.id}
                   data-track-id="base"
-                  style={{ left: PAD + renderStart * pps + 1, width }}
+                  style={{ left: pad + renderStart * pps + 1, width }}
                   role="option"
                   aria-selected={isSelected}
                   tabIndex={0}
@@ -1727,7 +1766,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
               const gap = Math.max(0, nextClip.gapBefore ?? 0)
               if (!hasTransitionPair(segment.clip, nextClip, gap)) return null
               const active = Boolean(segment.clip.transitionOut)
-              const x = PAD + (active ? next.start + (next.duration - 0) * 0 : next.start) * pps
+              const x = pad + (active ? next.start + (next.duration - 0) * 0 : next.start) * pps
               return (
                 <button
                   key={`transition-${segment.clip.id}`}
@@ -1759,7 +1798,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
                 className={`clip-bar is-drag-ghost ${
                   dragGhostIsFreeze ? 'is-freeze' : 'is-video'
                 }`}
-                style={{ left: PAD + clipDrag.targetTime * pps + 1, width: dragGhostWidth }}
+                style={{ left: pad + clipDrag.targetTime * pps + 1, width: dragGhostWidth }}
                 aria-hidden="true"
               >
                 {!dragGhostIsFreeze && dragGhostThumbnail && (
@@ -1817,11 +1856,11 @@ export function Timeline({ onPickFile }: TimelineProps) {
           {edgeDrag?.snapTime !== null && edgeDrag?.snapTime !== undefined && (
             <span
               className="clip-drop-line is-global is-snap-auto"
-              style={{ left: PAD + edgeDrag.snapTime * pps }}
+              style={{ left: pad + edgeDrag.snapTime * pps }}
               aria-hidden="true"
             />
           )}
-          <div className="playhead" style={{ left: PAD + playhead * pps }}>
+          <div className="playhead" style={{ left: pad + playhead * pps }}>
             <span
               className={`playhead-handle${playheadDrag ? ' is-dragging' : ''}`}
               role="slider"
@@ -1836,7 +1875,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
             <span className="playhead-line" />
           </div>
           {timelineSettings.previewAxis && hoverTime !== null && (
-            <div className="timeline-preview-axis" style={{ left: PAD + hoverTime * pps }}>
+            <div className="timeline-preview-axis" style={{ left: pad + hoverTime * pps }}>
               <span>{formatClock(hoverTime)}</span>
             </div>
           )}

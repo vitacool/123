@@ -280,6 +280,25 @@ export interface Project {
   exportQuality: ExportQuality
   /** 画布背景；缺省为黑场（旧草稿无此字段）。 */
   canvasBackground?: CanvasBackground
+  /** 封面（时间轴左侧独立块，不参与片段时长计算）；缺省无封面。 */
+  cover?: ProjectCover
+}
+
+/** 封面来源：从素材某时刻截帧，或用户上传的图片。 */
+export type CoverSource =
+  | { kind: 'frame'; assetId?: string; time: number }
+  | { kind: 'image'; name?: string }
+
+/** 封面的导出行为：单独产出封面图，或作为视频首帧。 */
+export type CoverMode = 'separate' | 'first-frame'
+
+export interface ProjectCover {
+  /** 封面图。dataURL（便于直接进草稿与工程文件，避免 blob URL 失效）。 */
+  dataUrl: string
+  /** 来源描述，仅用于 UI 显示。 */
+  source: CoverSource
+  /** 导出行为。 */
+  mode: CoverMode
 }
 
 export interface SourceInfo {

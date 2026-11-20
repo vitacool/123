@@ -1,5 +1,6 @@
 import type { AudioClip, CanvasBackground, Clip, Project, TextClip } from './types'
 import { normalizeColor } from './color'
+import { normalizeCover } from './cover'
 
 /** 背景图 URL 跟随 blob 重建一起重映射。 */
 function remapBackground(
@@ -133,6 +134,26 @@ export function normalizeProjectColors(project: Project): Project {
   }
   if (!changed) return project
   return { ...project, clips, ...(overlayTracks ? { overlayTracks } : {}) }
+}
+
+/** 旧草稿/工程文件里的封面字段做一次归一化（不合法就当没有封面）。 */
+export function normalizeProjectCover(project: Project): Project {
+  const cover = normalizeCover(project.cover)
+  const current = project.cover
+  if (!cover) {
+    if (!current) return project
+    const { cover: _omit, ...rest } = project
+    return rest
+  }
+  const same =
+    current !== undefined &&
+    current.dataUrl === cover.dataUrl &&
+    current.mode === cover.mode &&
+    current.source?.kind === cover.source.kind &&
+    (cover.source.kind === 'frame'
+      ? (current.source as { time?: number }).time === cover.source.time
+      : (current.source as { name?: string }).name === cover.source.name)
+  return same ? project : { ...project, cover }
 }
 
 /** 收集工程里所有媒体 URL（含背景图），供草稿保存 Blob / 重载重建。 */

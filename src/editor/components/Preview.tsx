@@ -216,6 +216,8 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
   const isPlaying = useEditorStore((state) => state.isPlaying)
   const selectedClipId = useEditorStore((state) => state.selectedClipId)
   const cropSession = useEditorStore((state) => state.cropSession)
+  const cover = useEditorStore((state) => state.project.cover)
+  const coverPreview = useEditorStore((state) => state.coverPreview)
   const previewPatch = useEditorStore((state) => state.previewPatch)
   const setPreviewPatch = useEditorStore((state) => state.setPreviewPatch)
   const setPosition = useEditorStore((state) => state.setPosition)
@@ -1308,6 +1310,14 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
             onPointerUp={finishDrag}
             onPointerCancel={finishDrag}
           />
+          {cover && (coverPreview || (playhead <= 0.001 && cover.mode === 'first-frame')) && (
+            <img
+              className="preview-cover-overlay"
+              src={cover.dataUrl}
+              alt="封面预览"
+              draggable={false}
+            />
+          )}
           {assets.length > 0 && (
             <>
               {baseVideoUrls.map((url) => (

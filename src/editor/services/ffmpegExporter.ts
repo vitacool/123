@@ -5,6 +5,7 @@ import {
   getExportCrf,
 } from '../core/exportPlan'
 import { drawTextClip } from '../core/textRender'
+import { buildCoverJpeg, buildCoverPng, coverFrameSeconds } from '../core/cover'
 import { resolveCaptionStyle } from '../core/text'
 import { buildTextOverlayTimeline } from '../core/textOverlay'
 import type { CaptionStyle, Project, SourceInfo } from '../core/types'
@@ -27,6 +28,8 @@ export interface ExportResult {
   height: number
   fps: number
   hasAudio: boolean
+  /** mode=separate 时单独产出的封面 JPEG（未设置封面或 first-frame 模式为 undefined）。 */
+  cover?: Blob
 }
 
 /** 导出阶段：加载核心 → 写入素材 → 编码 → 收尾。 */
@@ -418,6 +421,29 @@ function applyTextOverlayGraph(
   plan.graph = graph
 }
 
+/**
+ * 把封面 PNG 作为「额外一路输入」接到 [outv] 上，只覆盖首帧。
+ * 与文本层一致：先改名最终标签，再追加 overlay，因此对 contiguous / gapped / overlay
+ * 三条构建路径同时生效，且不影响音频与总时长（eof_action=pass，图案 EOF 后直接透传底图）。
+ */
+function applyCoverOverlayGraph(
+  plan: ReturnType<typeof buildExportPlan>,
+  inputIndex: number,
+): void {
+  const original = plan.graph
+  const marker = `[${plan.videoLabel}]`
+  const at = original.lastIndexOf(marker)
+  if (at < 0) return
+  const base = `${plan.videoLabel}_coverbase`
+  const hold = coverFrameSeconds(plan.fps)
+  plan.graph =
+    `${original.slice(0, at)}[${base}]${original.slice(at + marker.length)}` +
+    `;
+[${inputIndex}:v]format=rgba,fps=${plan.fps},setpts=PTS-STARTPTS[coverpng]` +
+    `;
+[${base}][coverpng]overlay=0:0:eof_action=pass:format=auto:enable='between(t,0,${hold.toFixed(6)})'[${plan.videoLabel}]`
+}
+
 function injectTextInputArgs(args: string[], layer: TextOverlayLayer | null): string[] {
   if (!layer) return args
   const at = args.indexOf('-filter_complex_script')
@@ -432,6 +458,17 @@ function injectTextInputArgs(args: string[], layer: TextOverlayLayer | null): st
     layer.listFile,
     ...args.slice(at),
   ]
+}
+
+/**
+ * 把封面 PNG 追加为最后一路输入（在文本层输入之后，因为封面盖在字幕之上）。
+ * 与文本层同样插在 `-filter_complex_script` 之前，保证输入序号与 graph 里的一致。
+ */
+function injectCoverInputArgs(args: string[], coverFile: string | null): string[] {
+  if (!coverFile) return args
+  const at = args.indexOf('-filter_complex_script')
+  if (at < 0) return args
+  return [...args.slice(0, at), '-i', coverFile, ...args.slice(at)]
 }
 
 async function writeInputs(
@@ -539,6 +576,18 @@ export async function exportProject(
   let textLayer = await renderTextLayer()
   onStage?.('loading-core')
   onStatus?.(capabilities.multiThread ? '正在加载多线程 FFmpeg…' : '正在加载 FFmpeg…')
+  // 封面：first-frame 模式需要把封面渲染成 PNG 作为额外输入；separate 模式只在收尾时出图。
+  const cover = project.cover
+  let coverPng: Uint8Array | null = null
+  if (cover && cover.mode === 'first-frame') {
+    coverPng = await buildCoverPng(plan.width, plan.height, cover)
+  }
+  const coverFileName = 'framecut-cover.png'
+  const coverInputIndex = plan.inputs.length + (textLayer ? 1 : 0)
+  // 多线程降级后输入要重新写入，封面 PNG 也按需重算。
+  const renderCoverPng = async (): Promise<Uint8Array | null> =>
+    cover && cover.mode === 'first-frame' ? buildCoverPng(plan.width, plan.height, cover) : null
+
   let loaded = await raceWithAbort(getFFmpeg(), signal)
   throwIfAborted(signal)
   let ffmpeg = loaded.ffmpeg
@@ -561,6 +610,7 @@ export async function exportProject(
     )
     await writeInputs(ffmpeg, resolvedInputs, onStatus, onProgress, signal)
     await writeTextOverlayLayer(ffmpeg, textLayer)
+    if (coverPng) await ffmpeg.writeFile(coverFileName, coverPng)
 
     const probeInput = resolvedInputs[0]?.file
     if (mode === 'multi-thread' && probeInput) {
@@ -586,6 +636,8 @@ export async function exportProject(
         await writeInputs(ffmpeg, resolvedInputs, onStatus, onProgress, signal)
         textLayer = await renderTextLayer()
         await writeTextOverlayLayer(ffmpeg, textLayer)
+        coverPng = await renderCoverPng()
+        if (coverPng) await ffmpeg.writeFile(coverFileName, coverPng)
       }
     }
 
@@ -613,11 +665,12 @@ export async function exportProject(
       `正在合成 ${plan.width}×${plan.height} · ${plan.fps}fps ${plan.hasAudio ? '含原声' : '无音轨'}…`,
     )
     if (textLayer) applyTextOverlayGraph(plan, textLayer.inputIndex)
+    if (coverPng) applyCoverOverlayGraph(plan, coverInputIndex)
     await ffmpeg.writeFile(graphName, plan.graph)
 
-    let commandArgs = injectTextInputArgs(
-      buildExportArgs(plan, graphName, outputName),
-      textLayer,
+    let commandArgs = injectCoverInputArgs(
+      injectTextInputArgs(buildExportArgs(plan, graphName, outputName), textLayer),
+      coverPng ? coverFileName : null,
     )
     onStage?.('rendering')
     try {
@@ -631,10 +684,11 @@ export async function exportProject(
       onProgress?.(0)
       plan = buildExportPlan(project, sources, false)
       if (textLayer) applyTextOverlayGraph(plan, textLayer.inputIndex)
+      if (coverPng) applyCoverOverlayGraph(plan, coverInputIndex)
       await ffmpeg.writeFile(graphName, plan.graph)
-      commandArgs = injectTextInputArgs(
-        buildExportArgs(plan, graphName, outputName),
-        textLayer,
+      commandArgs = injectCoverInputArgs(
+        injectTextInputArgs(buildExportArgs(plan, graphName, outputName), textLayer),
+        coverPng ? coverFileName : null,
       )
       await runExportCommand(ffmpeg, commandArgs, outputName, lines, signal)
     }
@@ -650,8 +704,11 @@ export async function exportProject(
     const blob = new Blob([copy.buffer], { type: 'video/mp4' })
 
     onProgress?.(1)
+    const coverBlob =
+      cover && cover.mode === 'separate' ? await buildCoverJpeg(plan.width, plan.height, cover) : undefined
     return {
       blob,
+      ...(coverBlob ? { cover: coverBlob } : {}),
       mode,
       warning,
       width: plan.width,
@@ -669,6 +726,7 @@ export async function exportProject(
       ...(textLayer ? textLayer.assets.map((asset) => asset.file) : []),
       graphName,
       outputName,
+      coverFileName,
       PROBE_OUTPUT,
     ]
     if (textLayer) cleanup.push(textLayer.listFile)

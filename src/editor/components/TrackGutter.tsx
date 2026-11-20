@@ -19,6 +19,7 @@ export function TrackGutter() {
   const moveOverlayTrack = useEditorStore((state) => state.moveOverlayTrack)
   const removeAudioTrack = useEditorStore((state) => state.removeAudioTrack)
   const removeTextTrack = useEditorStore((state) => state.removeTextTrack)
+  const openCoverPanel = useEditorStore((state) => state.openCoverPanel)
 
   // overlayTracks 是 bottom-to-top（index 0 最底），UI 倒序渲染（最上层显示在最上面）。
   const overlayArray = project.overlayTracks ?? []
@@ -56,6 +57,7 @@ export function TrackGutter() {
         state={mainState}
         height={MAIN_HEIGHT}
         suppressedBySolo={isAudioSuppressedBySolo(project, mainState)}
+        onOpenCover={() => openCoverPanel()}
       />
       {audioTracks.map((track: AudioTrack) => {
         const state = audioTrackState(track)

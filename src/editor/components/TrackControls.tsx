@@ -19,6 +19,8 @@ interface TrackControlsProps {
   canMoveDown?: boolean
   onMoveUp?: () => void
   onMoveDown?: () => void
+  /** 主轨行的封面入口。 */
+  onOpenCover?: () => void
 }
 
 const titles: Record<TrackFlag, string> = {
@@ -41,6 +43,7 @@ export function TrackControls({
   canMoveDown,
   onMoveUp,
   onMoveDown,
+  onOpenCover,
 }: TrackControlsProps) {
   const toggleTrackFlag = useEditorStore((store) => store.toggleTrackFlag)
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
@@ -94,6 +97,18 @@ export function TrackControls({
               <Icon name="chevron" size={10} className="track-move-icon is-down" />
             </button>
           </span>
+        )}
+        {onOpenCover && (
+          <button
+            type="button"
+            className="track-control"
+            aria-label="封面设置"
+            title="封面：截取当前帧 / 上传图片 / 导出方式"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={onOpenCover}
+          >
+            <Icon name="camera" size={12} />
+          </button>
         )}
         <button
           type="button"

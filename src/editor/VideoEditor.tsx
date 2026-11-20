@@ -48,6 +48,7 @@ import { ContextMenu } from './components/ContextMenu'
 import { Preview } from './components/Preview'
 import { MediaLibrary } from './components/MediaLibrary'
 import { CanvasBackgroundPanel } from './components/CanvasBackgroundPanel'
+import { CoverPanel } from './components/CoverPanel'
 import { PropertiesPanel } from './components/PropertiesPanel'
 import { Toolbar } from './components/Toolbar'
 import { Timeline } from './components/Timeline'
@@ -62,6 +63,8 @@ export interface VideoEditorProps {
   initialVideo?: File | string | null
   /** Called once FFmpeg.wasm has produced the final MP4. */
   onExport?: (blob: Blob) => void
+  /** Called with the separately exported cover image (mode=separate). */
+  onCoverExport?: (blob: Blob) => void
   /** Called when the user asks to leave the editor. */
   onCancel?: () => void
   /**
@@ -212,6 +215,7 @@ interface EditorShellProps {
   onNewProject: () => void
   onImportSubtitles: () => void
   onExport?: (blob: Blob) => void
+  onCoverExport?: (blob: Blob) => void
   onExportProject: () => void
   onImportProject: () => void
   loadingLabel?: string | null
@@ -227,6 +231,7 @@ function EditorShell({
   onNewProject,
   onImportSubtitles,
   onExport,
+  onCoverExport,
   onExportProject,
   onImportProject,
   onCancel,
@@ -479,7 +484,8 @@ function EditorShell({
         />
       )}
       <AutoCaptionDialog open={autoCaptionOpen} onClose={() => setAutoCaptionOpen(false)} provider={transcribeProvider} />
-      <ExportDialog onExport={onExport} />
+      <CoverPanel />
+      <ExportDialog onExport={onExport} onCoverExport={onCoverExport} />
       {backgroundOpen && (
         <div
           className="modal-backdrop"

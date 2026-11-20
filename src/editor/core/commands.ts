@@ -81,6 +81,7 @@ import type { TransitionAllOptions } from './operations'
 import type { RemoveAssetClipsOptions } from './operations'
 import type { ColorAdjustments } from './color'
 import type { AudioAttrs, VisualAttrs } from './attributeClipboard'
+import type { ProjectCover } from './types'
 import { normalizeTransitionType, transitionLabel } from './transition'
 import { relinkCaptions } from './captionLink'
 import { normalizeBackground, withClipBackground } from './background'
@@ -174,6 +175,28 @@ export function createSetColorAllCommand(color: ColorAdjustments): EditorCommand
     label: '调色应用到全部片段',
     execute(project) {
       return applyColorToAllClips(project, color).project
+    },
+  }
+}
+
+/** 设置封面（1 次命令 = 1 步撤销）。 */
+export function createSetCoverCommand(cover: ProjectCover): EditorCommand {
+  return {
+    label: '设置封面',
+    execute(project) {
+      return { ...project, cover }
+    },
+  }
+}
+
+/** 移除封面（1 次命令 = 1 步撤销）；没有封面时返回原 project。 */
+export function createClearCoverCommand(): EditorCommand {
+  return {
+    label: '移除封面',
+    execute(project) {
+      if (!project.cover) return project
+      const { cover: _cover, ...rest } = project
+      return rest
     },
   }
 }

@@ -1,4 +1,12 @@
-import { projectMediaUrls, remapProjectUrls, pruneProjectUrls, normalizeProjectColors } from './core/draft'
+import { getOutputDimensions } from './core/aspect'
+import { buildCoverJpeg } from './core/cover'
+import {
+  projectMediaUrls,
+  remapProjectUrls,
+  pruneProjectUrls,
+  normalizeProjectColors,
+  normalizeProjectCover,
+} from './core/draft'
 import type { MediaAsset, Project } from './core/types'
 import { remoteName, readAssetFile } from './services/assetReader'
 import { exportProject, terminateFFmpegRuntime } from './services/ffmpegExporter'
@@ -19,6 +27,8 @@ export interface FrameCutApi {
   loadProject(project: Project, assets?: File[]): Promise<void>
   /** 无界面导出：走与导出对话框相同的管线，返回 MP4 Blob。 */
   export(): Promise<Blob>
+  /** 当前封面图（JPG）；没有封面时返回 null。 */
+  getCover(): Promise<Blob | null>
   /** 播放头定位（秒，自动夹到工程范围内）。 */
   seek(time: number): void
   play(): void
@@ -70,7 +80,7 @@ export function applyProjectToStore(
   const state = store.getState()
   const urlMap = input.urlMap ?? new Map<string, string>()
   // 工程文件/宿主传入的 project 可能没有 color 字段：统一归一化后再做 URL 重映射与剪枝。
-  const sourceProject = normalizeProjectColors(input.project)
+  const sourceProject = normalizeProjectCover(normalizeProjectColors(input.project))
   const projectUrls = projectMediaUrls(sourceProject)
 
   // 可用 URL：重映射后的新 URL + 仍然是远程（非 blob/data）的 URL + 当前会话里已经拿着 Blob 的素材。
@@ -190,6 +200,20 @@ export function createFrameCutApi({ store, readAsset }: FrameCutApiOptions): Fra
       if (countClips(state.project) === 0) throw new Error('时间轴为空，无法导出。')
       const result = await exportProject(state.project, source, state.assets)
       return result.blob
+    },
+
+getCover: async () => {
+      const state = store.getState()
+      const cover = state.project.cover
+      if (!cover) return null
+      const source =
+        state.source ?? state.assets.find((asset) => asset.kind !== 'audio') ?? null
+      const { width, height } = getOutputDimensions(
+        state.project.aspectRatio,
+        state.project.exportQuality.resolution,
+        source ?? { width: 1920, height: 1080 },
+      )
+      return buildCoverJpeg(width, height, cover)
     },
 
     seek: (time) => {

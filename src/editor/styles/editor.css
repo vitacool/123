@@ -5395,3 +5395,156 @@
 .media-confirm-actions .is-danger:hover {
   background: rgba(181, 76, 55, 0.1);
 }
+
+/* ===== 封面块（时间轴 t=0 左侧，不参与片段计算） ===== */
+.timeline-cover-block {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  z-index: 2;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--fc-line-strong);
+  border-radius: var(--fc-radius-sm);
+  background: #1f1d19;
+  cursor: pointer;
+}
+
+.timeline-cover-thumb {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+.timeline-cover-badge {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  padding: 1px 0 2px;
+  background: rgba(20, 18, 15, 0.62);
+  color: #fdfaf3;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-align: center;
+}
+
+.timeline-cover-block:hover {
+  border-color: var(--fc-accent);
+  box-shadow: 0 0 0 2px rgba(196, 122, 55, 0.28);
+}
+
+/* ===== 封面设置浮层（小面板，不是完整弹窗） ===== */
+.cover-popover {
+  position: fixed;
+  z-index: 150;
+  width: min(420px, calc(100vw - 32px));
+  padding: 14px;
+  border: 1px solid var(--fc-line);
+  border-radius: var(--fc-radius-lg);
+  background: #faf7f0;
+  box-shadow: 0 20px 60px rgba(25, 23, 19, 0.26);
+}
+
+.cover-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.cover-popover-head h3 {
+  margin: 0;
+  font-size: var(--fc-text-md);
+}
+
+.cover-popover-body {
+  display: grid;
+  grid-template-columns: 132px 1fr;
+  gap: 12px;
+}
+
+.cover-preview {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid var(--fc-line);
+  border-radius: var(--fc-radius-sm);
+  background: #efeae0;
+}
+
+.cover-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.cover-preview-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--fc-muted);
+  font-size: var(--fc-text-xs);
+  text-align: center;
+  line-height: 1.5;
+  padding: 6px;
+}
+
+.cover-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cover-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.cover-mode label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fc-text-xs);
+  color: var(--fc-ink-soft);
+  cursor: pointer;
+}
+
+.cover-popover-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.cover-source-note {
+  color: var(--fc-muted);
+  font-size: var(--fc-text-xs);
+}
+
+.cover-popover-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 149;
+  background: transparent;
+}
+
+/* 预览上的封面叠加（t=0 且 first-frame 模式，或 hover 封面块时临时显示） */
+.preview-cover-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}

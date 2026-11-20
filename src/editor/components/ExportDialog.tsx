@@ -16,6 +16,8 @@ import { Icon } from './Icon'
 
 interface ExportDialogProps {
   onExport?: (blob: Blob) => void
+  /** 宿主接收单独产出的封面图（未提供时仅在完成页可下载）。 */
+  onCoverExport?: (blob: Blob) => void
 }
 
 type Phase = 'config' | 'running' | 'done' | 'error'
@@ -80,7 +82,7 @@ function triggerDownload(blob: Blob, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1200)
 }
 
-export function ExportDialog({ onExport }: ExportDialogProps) {
+export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
   const open = useEditorStore((state) => state.exportDialogOpen)
   const project = useEditorStore((state) => state.project)
   const source = useEditorStore((state) => state.source)
@@ -179,6 +181,7 @@ export function ExportDialog({ onExport }: ExportDialogProps) {
   )
   const filename = source ? `${sanitizeBase(source.name)}-framecut.mp4` : 'framecut.mp4'
   const isLargeFile = Boolean(source && source.size > 500 * 1024 * 1024)
+  const coverFilename = source ? `${sanitizeBase(source.name)}-cover.jpg` : 'framecut-cover.jpg'
 
   const startExport = async () => {
     if (!source || project.clips.length === 0) return
@@ -215,6 +218,13 @@ export function ExportDialog({ onExport }: ExportDialogProps) {
         }
       } else {
         triggerDownload(exported.blob, filename)
+      }
+      if (exported.cover && onCoverExport) {
+        try {
+          await Promise.resolve(onCoverExport(exported.cover))
+        } catch {
+          setCallbackError('宿主平台的 onCoverExport 回调执行失败，封面图已生成但未提交。')
+        }
       }
     } catch (caught) {
       // 取消不是错误：直接回到可以重新配置的初始态。
@@ -582,6 +592,17 @@ export function ExportDialog({ onExport }: ExportDialogProps) {
                 <Icon name="volume" size={16} />
                 {checkingAudio ? '检测中…' : '检测音频'}
               </button>
+              {result?.cover && (
+                <button
+                  type="button"
+                  className="button ghost"
+                  onClick={() => triggerDownload(result.cover!, coverFilename)}
+                  title="下载单独产出的封面图（JPG）"
+                >
+                  <Icon name="camera" size={16} />
+                  下载封面
+                </button>
+              )}
               <button
                 type="button"
                 className="button ghost"

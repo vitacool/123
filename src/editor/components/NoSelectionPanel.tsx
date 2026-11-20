@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useEditorStore } from '../store/EditorProvider'
 import { Icon, type IconName } from './Icon'
 
 interface HintRow {
@@ -29,6 +30,7 @@ const SHORTCUTS: { keys: string; label: string }[] = [
  */
 export function NoSelectionPanel() {
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const openCoverPanel = useEditorStore((state) => state.openCoverPanel)
 
   return (
     <aside className="properties-panel is-empty" aria-label="属性面板（未选中片段）">
@@ -82,6 +84,15 @@ export function NoSelectionPanel() {
               ))}
             </ul>
           )}
+          <button
+            type="button"
+            className="button mini ghost-mini no-selection-cover"
+            onClick={openCoverPanel}
+            title="封面：截取当前帧 / 上传图片 / 选择导出方式"
+          >
+            <Icon name="camera" size={12} />
+            封面设置
+          </button>
         </section>
       </div>
     </aside>

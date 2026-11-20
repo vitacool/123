@@ -42,6 +42,8 @@ import {
   createPasteAudioAttributesCommand,
   createMoveOverlayTrackCommand,
   createRemoveAssetClipsCommand,
+  createSetCoverCommand,
+  createClearCoverCommand,
   createSplitOverlayClipCommand,
   createSplitTextClipCommand,
   createTrimAudioClipCommand,
@@ -93,7 +95,8 @@ import {
 import { buildCaptionsFromWords, splitCaptionText } from '../core/captions'
 import { IMAGE_DEFAULT_DURATION } from '../core/image'
 import { normalizeBackground } from '../core/background'
-import { clampSpeed, canChangeClipSpeed } from '../core/speed'
+import { clampSpeed, canChangeClipSpeed, clipSpeedValue } from '../core/speed'
+import { clipFreezeFrame, clipTimelineDuration } from '../core/clipTime'
 import {
   clampTransitionDuration,
   maxTransitionDuration,
@@ -103,6 +106,7 @@ import {
 } from '../core/transition'
 import { isSameColor, normalizeColor, type ColorAdjustments } from '../core/color'
 import { isAssetReferenced, unusedAssets } from '../core/assets'
+import { captureCoverFrame, coverTargetSize, readCoverImage } from '../core/cover'
 import { deleteMediaBlob } from '../services/draftStore'
 import {
   captureAudioAttrs,
@@ -118,7 +122,6 @@ import {
   clipOpacity,
   normalizeBlendMode,
 } from '../core/blend'
-import { clipTimelineDuration } from '../core/clipTime'
 import {
   buildClipboardPayload,
   planPaste,
@@ -162,6 +165,7 @@ import {
 import {
   clamp,
   findClipLocation,
+  findSegmentAt,
   findSegmentById,
   getActionAvailability,
   getProjectEnd,
@@ -188,11 +192,13 @@ import type {
   TransitionType,
   CaptionStyle,
   Clip,
+  CoverMode,
   CropRect,
   ExportQuality,
   Marker,
   MediaAsset,
   Project,
+  ProjectCover,
   SourceInfo,
   TextClip,
 } from '../core/types'
@@ -291,6 +297,12 @@ export interface EditorState {
   applyColorToAll: (color: ColorAdjustments) => void
   /** 调色剪贴板：「复制当前设置」后供其他片段「粘贴调色」。 */
   colorClipboard: ColorAdjustments | null
+  /** 预览是否临时显示封面（hover / 点击封面块）。 */
+  coverPreview: boolean
+  /** 封面设置浮层是否打开。 */
+  coverPanelOpen: boolean
+  openCoverPanel: () => void
+  closeCoverPanel: () => void
   copyClipColor: (clipId: string) => void
   pasteClipColor: (clipId: string) => void
   /** 设置/清除片段尾部转场（一个命令）。 */
@@ -309,6 +321,17 @@ export interface EditorState {
   copyAudioAttributes: (clipId: string) => void
   /** 把音频属性粘贴到一组片段（一个命令）。 */
   pasteAudioAttributes: (ids: string[]) => void
+
+  /** 从播放头所在的主轨画面截一帧作为封面（失败时 Toast 警告，不写状态）。 */
+  setCoverFromFrame: (time: number) => void
+  /** 用上传的图片作为封面（只接受 jpg / png / webp），按画布比例居中裁剪。 */
+  setCoverFromImage: (file: File) => void
+  /** 切换封面的导出行为。 */
+  setCoverMode: (mode: CoverMode) => void
+  /** 移除封面（1 步撤销）。 */
+  clearCover: () => void
+  /** 预览临时显示封面（hover / 点击封面块时）。 */
+  setCoverPreview: (active: boolean) => void
   /** 设置工程级画布背景（一个命令）。 */
   setCanvasBackground: (background: CanvasBackground) => void
   /** 给指定片段设置背景覆盖（一个命令）。 */
@@ -511,6 +534,14 @@ const selectedClip = (project: Project, id: string | null): Clip | null => {
   return locked ? null : location.clip
 }
 
+/** 封面出图尺寸：跟随画布比例，短边 ≤1280（与 core/cover 的规则一致）。 */
+const coverCanvasSize = (state: EditorState): { width: number; height: number } => {
+  const reference = state.source ?? state.assets[0] ?? null
+  const ratio = aspectValue(state.project.aspectRatio, reference)
+  const height = 720
+  return coverTargetSize(Math.round(height * Math.max(0.1, ratio)), height)
+}
+
 /** 粘贴目标：显式传入的 ids 优先，其次多选，最后当前单选。 */
 const resolvePasteTargets = (state: EditorState, ids: readonly string[]): string[] => {
   if (ids.length > 0) return [...ids]
@@ -635,6 +666,12 @@ export function createEditorStore() {
       return true
     }
 
+    /** 把封面写入工程历史（1 步撤销），成功后提示。 */
+    const applyCover = (cover: ProjectCover): void => {
+      const state = get()
+      if (run(createSetCoverCommand(cover))) state.notify('封面已更新', 'success')
+    }
+
     return {
       project: initial,
       source: null,
@@ -658,6 +695,8 @@ export function createEditorStore() {
       markerEditorId: null,
       exportDialogOpen: false,
       colorClipboard: null,
+      coverPreview: false,
+      coverPanelOpen: false,
       canUndo: false,
       canRedo: false,
       lastAction: '',
@@ -2013,6 +2052,83 @@ export function createEditorStore() {
         ) {
           get().notify('已新增空叠加轨；拖动片段进入即可', 'success')
         }
+      },
+
+      setCoverFromFrame: (time) => {
+        const state = get()
+        const segment = findSegmentAt(state.project.clips, time)
+        if (!segment) {
+          state.notify('当前时间没有可截取的画面', 'warning')
+          return
+        }
+        const clip = segment.clip
+        const asset = state.assets.find((item) => item.url === clip.sourceUrl)
+        if (!asset) {
+          state.notify('该片段的素材已移除，无法截帧', 'warning')
+          return
+        }
+        const offset = Math.max(0, time - segment.start)
+        const sourceTime =
+          clip.type === 'freeze'
+            ? clipFreezeFrame(clip)
+            : clip.sourceStart + offset * clipSpeedValue(clip)
+        const { width, height } = coverCanvasSize(state)
+        void captureCoverFrame(asset, sourceTime, width, height).then((dataUrl) => {
+          if (!dataUrl) {
+            get().notify('截帧失败：没有可用画面', 'warning')
+            return
+          }
+          const current = get()
+          applyCover({
+            dataUrl,
+            source: { kind: 'frame', assetId: asset.id, time },
+            mode: current.project.cover?.mode ?? 'separate',
+          })
+        })
+      },
+
+      setCoverFromImage: (file) => {
+        const allowed = ['image/jpeg', 'image/png', 'image/webp']
+        if (!allowed.includes(file.type)) {
+          get().notify('封面只支持 JPG / PNG / WebP 图片', 'warning')
+          return
+        }
+        const state = get()
+        const { width, height } = coverCanvasSize(state)
+        void readCoverImage(file, width, height).then((dataUrl) => {
+          if (!dataUrl) {
+            get().notify('无法读取该图片', 'warning')
+            return
+          }
+          const current = get()
+          applyCover({
+            dataUrl,
+            source: { kind: 'image', name: file.name },
+            mode: current.project.cover?.mode ?? 'separate',
+          })
+        })
+      },
+
+      setCoverMode: (mode) => {
+        const state = get()
+        const cover = state.project.cover
+        if (!cover || cover.mode === mode) return
+        run(createSetCoverCommand({ ...cover, mode }))
+      },
+
+      clearCover: () => {
+        const state = get()
+        if (!state.project.cover) return
+        if (run(createClearCoverCommand())) state.notify('已移除封面', 'info')
+      },
+
+      openCoverPanel: () => set({ coverPanelOpen: true }),
+
+      closeCoverPanel: () => set({ coverPanelOpen: false, coverPreview: false }),
+
+      setCoverPreview: (active) => {
+        if (get().coverPreview === active) return
+        set({ coverPreview: active })
       },
 
       moveOverlayTrack: (trackId, direction) => {

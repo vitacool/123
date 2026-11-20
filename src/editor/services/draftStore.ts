@@ -2,6 +2,7 @@ import type { MediaAsset, Project } from '../core/types'
 import {
   migrateCaptionLinks,
   normalizeProjectColors,
+  normalizeProjectCover,
   pruneProjectUrls,
   remapProjectUrls,
   type DraftAsset,
@@ -141,7 +142,10 @@ export async function restoreDraft(snapshot: DraftSnapshot): Promise<RestoredDra
   const available = new Set(assets.map((asset) => asset.url))
   const assetIdByUrl = new Map<string, string>()
   for (const meta of snapshot.assets) assetIdByUrl.set(meta.url, meta.id)
-  let project = migrateCaptionLinks(normalizeProjectColors(snapshot.project), assetIdByUrl)
+  let project = migrateCaptionLinks(
+    normalizeProjectCover(normalizeProjectColors(snapshot.project)),
+    assetIdByUrl,
+  )
   project = pruneProjectUrls(remapProjectUrls(project, urlMap), available)
   if (project.clips.length === 0 && (project.audioTracks ?? []).length === 0) {
     // Keep overlay-only drafts alive; only reject a fully empty timeline.
