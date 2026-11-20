@@ -31,8 +31,7 @@ import {
   normalizeTransitionType,
   transitionProgress,
 } from '../core/transition'
-import type { MediaAsset, TransitionType } from '../core/types'
-import type { Clip, Project, SourceInfo } from '../core/types'
+import type { Clip, Project, SourceInfo, TransitionType } from '../core/types'
 import type { CropSession, PreviewPatch } from '../store/editorStore'
 import { useEditorStore, useEditorStoreApi } from '../store/EditorProvider'
 import { CropOverlay } from './CropOverlay'
@@ -395,7 +394,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
         ctx: context,
         clip: effective,
         localTime: 0,
-        asset: clipSource as MediaAsset,
+        asset: clipSource,
         canvasW: width,
         canvasH: height,
         source,
