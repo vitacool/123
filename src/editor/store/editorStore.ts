@@ -46,6 +46,10 @@ import {
   createClearCoverCommand,
   createSetKeyframeCommand,
   createRemoveKeyframeCommand,
+  createMoveKeyframesCommand,
+  createSetKeyframeEasingCommand,
+  createClearPropertyKeyframesCommand,
+  createRemoveKeyframesCommand,
   createSplitOverlayClipCommand,
   createSplitTextClipCommand,
   createTrimAudioClipCommand,
@@ -109,7 +113,8 @@ import {
 import { isSameColor, normalizeColor, type ColorAdjustments } from '../core/color'
 import { isAssetReferenced, unusedAssets } from '../core/assets'
 import { captureCoverFrame, coverTargetSize, readCoverImage } from '../core/cover'
-import { propertyValueAt } from '../core/keyframes'
+import { moveKeyframesInProject, propertyValueAt } from '../core/keyframes'
+import type { KeyframeRef } from '../core/keyframeEdit'
 import { deleteMediaBlob } from '../services/draftStore'
 import {
   captureAudioAttrs,
@@ -190,6 +195,7 @@ import {
 import type {
   AnimatableProperty,
   AspectRatioPreset,
+  Easing,
   AudioClip,
   BlendMode,
   CanvasBackground,
@@ -305,6 +311,14 @@ export interface EditorState {
   coverPreview: boolean
   /** 在当前播放头处切换某个属性的关键帧（有则删、无则按当前值加）。 */
   toggleKeyframe: (prop: AnimatableProperty) => void
+  /** 多选整体平移关键帧（1 步撤销）；被唯一性校验拒绝时 Toast 提示并放弃。 */
+  moveKeyframes: (clipId: string, refs: KeyframeRef[], delta: number) => void
+  /** 批量删除关键帧（1 步撤销）。 */
+  deleteKeyframes: (clipId: string, refs: KeyframeRef[]) => void
+  /** 给选中的关键帧批量设置缓动（1 步撤销）。 */
+  setKeyframeEasing: (refs: KeyframeRef[], ease: Easing) => void
+  /** 清空选中片段某个属性的全部关键帧（1 步撤销）。 */
+  clearPropertyKeyframes: (prop: AnimatableProperty) => void
   /** 可视化属性的统一写入入口：有关键帧时改关键帧，否则改基础值。 */
   setAnimatableValue: (prop: AnimatableProperty, value: number) => void
   /** 封面设置浮层是否打开。 */
@@ -2128,6 +2142,51 @@ export function createEditorStore() {
         const state = get()
         if (!state.project.cover) return
         if (run(createClearCoverCommand())) state.notify('已移除封面', 'info')
+      },
+
+      moveKeyframes: (clipId, refs, delta) => {
+        const state = get()
+        if (refs.length === 0) return
+        // 先干跑一次：被夹取到 0 或产生重复时命令返回原 project（不写历史）。
+        const preview = moveKeyframesInProject(state.project, clipId, refs, delta)
+        if (!preview) {
+          state.notify('关键帧位置重复，已回到拖动前', 'warning')
+          return
+        }
+        if (run(createMoveKeyframesCommand(clipId, refs, delta))) {
+          state.notify(refs.length > 1 ? `已移动 ${refs.length} 个关键帧` : '已移动关键帧', 'info')
+        } else {
+          state.notify('关键帧位置重复，已回到拖动前', 'warning')
+        }
+      },
+
+      deleteKeyframes: (clipId, refs) => {
+        const state = get()
+        if (refs.length === 0) return
+        if (run(createRemoveKeyframesCommand(clipId, refs))) {
+          state.notify(`已删除 ${refs.length} 个关键帧`, 'info')
+        }
+      },
+
+      setKeyframeEasing: (refs, ease) => {
+        const state = get()
+        const clipId = state.selectedClipId
+        if (!clipId || refs.length === 0) return
+        const label =
+          ease === 'linear' ? '线性' : ease === 'easeIn' ? '缓入' : ease === 'easeOut' ? '缓出'
+            : ease === 'easeInOut' ? '缓入缓出' : '保持'
+        if (run(createSetKeyframeEasingCommand(clipId, refs, ease))) {
+          state.notify(`已设为「${label}」`, 'success')
+        }
+      },
+
+      clearPropertyKeyframes: (prop) => {
+        const state = get()
+        const clipId = state.selectedClipId
+        if (!clipId) return
+        if (run(createClearPropertyKeyframesCommand(clipId, prop))) {
+          state.notify('已清空该属性的关键帧', 'info')
+        }
       },
 
       toggleKeyframe: (prop) => {

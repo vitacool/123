@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { hasTransitionPair, normalizeTransitionType, transitionLabel } from '../core/transition'
-import { animationFrameTimes } from '../core/keyframes'
+import { keyframeAt, type KeyframeRef } from '../core/keyframeEdit'
+import { ClipKeyframeBand } from './ClipKeyframeBand'
+import { EasingPopover } from './EasingPopover'
+import type { Easing } from '../core/types'
 import { clipSpeedValue } from '../core/speed'
 import { idsInRect, type SelectableSpan } from '../core/selection'
 import type {
@@ -111,6 +114,52 @@ export function Timeline({ onPickFile }: TimelineProps) {
   const toggleSelectClip = useEditorStore((state) => state.toggleSelectClip)
   const rangeSelectClip = useEditorStore((state) => state.rangeSelectClip)
   const setPlayhead = useEditorStore((state) => state.setPlayhead)
+  const moveKeyframes = useEditorStore((state) => state.moveKeyframes)
+  const setKeyframeEasing = useEditorStore((state) => state.setKeyframeEasing)
+  const deleteKeyframes = useEditorStore((state) => state.deleteKeyframes)
+  // ---- 关键帧交互 ----
+  const selectKeyframes = (clipId: string, refs: KeyframeRef[], additive: boolean) => {
+    setKeySelection((current) => {
+      if (!additive || !current || current.clipId !== clipId) return { clipId, refs }
+      const merged = [...current.refs]
+      for (const ref of refs) {
+        const hit = merged.findIndex(
+          (item) => item.prop === ref.prop && Math.abs(item.t - ref.t) < 5e-4,
+        )
+        if (hit >= 0) merged.splice(hit, 1)
+        else merged.push(ref)
+      }
+      return merged.length > 0 ? { clipId, refs: merged } : null
+    })
+  }
+
+  const commitKeyframeMove = (clipId: string, refs: KeyframeRef[], deltaT: number) => {
+    moveKeyframes(clipId, refs, deltaT)
+    setKeySelection({ clipId, refs: refs.map((ref) => ({ ...ref, t: Math.min(1, Math.max(0, ref.t + deltaT)) })) })
+  }
+
+  /** 关键帧拖动/提示用的吸附候选：播放头 + 片段两端（与片段拖动同一阈值 12px）。 */
+  const keyframeSnapCandidates = (clipId: string) => {
+    const location = findClipLocation(project, clipId)
+    if (!location) return [] as { time: number; label: string }[]
+    return [
+      { time: playhead, label: '播放头' },
+      { time: location.segment.start, label: '片段起点' },
+      { time: location.segment.end, label: '片段终点' },
+    ]
+  }
+
+  /** 选中关键帧共有的缓动；不一致时返回 null（浮层不高亮任何项）。 */
+  const commonEasing = (target: { clipId: string; refs: KeyframeRef[] }): Easing | null => {
+    const location = findClipLocation(project, target.clipId)
+    if (!location) return null
+    const eases = target.refs
+      .map((ref) => keyframeAt(location.clip.anim, ref.prop, ref.t)?.ease ?? null)
+      .filter((ease): ease is Easing => ease !== null)
+    if (eases.length === 0) return null
+    return eases.every((ease) => ease === eases[0]) ? eases[0] : null
+  }
+
   const openCoverPanel = useEditorStore((state) => state.openCoverPanel)
   const setCoverPreview = useEditorStore((state) => state.setCoverPreview)
   const setPlaying = useEditorStore((state) => state.setPlaying)
@@ -154,6 +203,15 @@ export function Timeline({ onPickFile }: TimelineProps) {
   const [clipDrag, setClipDrag] = useState<ClipDrag | null>(null)
   const [popover, setPopover] = useState<MarkerPopoverState | null>(null)
   const [clipMenu, setClipMenu] = useState<ClipMenuState | null>(null)
+  /** 关键帧选中态：属于哪个片段 + 选中的 {prop,t} 列表（不进草稿、不进撤销栈）。 */
+  const [keySelection, setKeySelection] = useState<{ clipId: string; refs: KeyframeRef[] } | null>(null)
+  const [keyMenu, setKeyMenu] = useState<{ x: number; y: number; clipId: string; refs: KeyframeRef[] } | null>(null)
+  const [easingPopover, setEasingPopover] = useState<{
+    x: number
+    y: number
+    clipId: string
+    refs: KeyframeRef[]
+  } | null>(null)
   const [hoverTime, setHoverTime] = useState<number | null>(null)
   const [playheadDrag, setPlayheadDrag] = useState<{ pointerId: number } | null>(null)
   /** 空白处拖拽框选：先在空白 pointerdown 记录起点，移动超过阈值才真正进入框选。 */
@@ -1514,6 +1572,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
                           }`}
                           data-clip-id={clip.id}
                           data-track-id={track.id}
+                          onPointerDown={() => setKeySelection(null)}
                           style={{ left: pad + segment.start * pps + 1, width }}
                           role="option"
                           aria-selected={isSelected}
@@ -1542,17 +1601,23 @@ export function Timeline({ onPickFile }: TimelineProps) {
                               <Icon name="freeze" size={12} />
                             </span>
                           )}
-                          {(() => {
-                            const frames = animationFrameTimes(clip)
-                            if (frames.length === 0) return null
-                            return (
-                              <span className="clip-keyframe-row" aria-hidden="true">
-                                {frames.map((fraction) => (
-                                  <span key={fraction} className="clip-keyframe-tick" style={{ left: fraction * 100 + '%' }} />
-                                ))}
-                              </span>
-                            )
-                          })()}
+                          <ClipKeyframeBand
+                            clip={clip}
+                            clipStart={segment.start}
+                            duration={segment.duration}
+                            pps={pps}
+                            selected={keySelection?.clipId === clip.id ? keySelection.refs : []}
+                            snapCandidates={keyframeSnapCandidates(clip.id)}
+                            autoSnap={timelineSettings.autoSnap}
+                            onSelect={(refs, additive) => selectKeyframes(clip.id, refs, additive)}
+                            onCommitMove={(refs, deltaT) => commitKeyframeMove(clip.id, refs, deltaT)}
+                            onRequestEasing={(refs, x, y) =>
+                              setEasingPopover({ x, y, clipId: clip.id, refs })
+                            }
+                            onRequestMenu={(refs, x, y) =>
+                              setKeyMenu({ x, y, clipId: clip.id, refs })
+                            }
+                          />
                           <span className="clip-copy">
                             <span className="clip-kind">叠加</span>
                             {clipSpeedValue(clip) !== 1 && (
@@ -1703,6 +1768,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
                   }`}
                   data-clip-id={clip.id}
                   data-track-id="base"
+                  onPointerDown={() => setKeySelection(null)}
                   style={{ left: pad + renderStart * pps + 1, width }}
                   role="option"
                   aria-selected={isSelected}
@@ -1733,17 +1799,19 @@ export function Timeline({ onPickFile }: TimelineProps) {
                       <Icon name="freeze" size={13} />
                     </span>
                   )}
-                  {(() => {
-                    const frames = animationFrameTimes(clip)
-                    if (frames.length === 0) return null
-                    return (
-                      <span className="clip-keyframe-row" aria-hidden="true">
-                        {frames.map((fraction) => (
-                          <span key={fraction} className="clip-keyframe-tick" style={{ left: fraction * 100 + '%' }} />
-                        ))}
-                      </span>
-                    )
-                  })()}
+                  <ClipKeyframeBand
+                    clip={clip}
+                    clipStart={segment.start}
+                    duration={segment.duration}
+                    pps={pps}
+                    selected={keySelection?.clipId === clip.id ? keySelection.refs : []}
+                    snapCandidates={keyframeSnapCandidates(clip.id)}
+                    autoSnap={timelineSettings.autoSnap}
+                    onSelect={(refs, additive) => selectKeyframes(clip.id, refs, additive)}
+                    onCommitMove={(refs, deltaT) => commitKeyframeMove(clip.id, refs, deltaT)}
+                    onRequestEasing={(refs, x, y) => setEasingPopover({ x, y, clipId: clip.id, refs })}
+                    onRequestMenu={(refs, x, y) => setKeyMenu({ x, y, clipId: clip.id, refs })}
+                  />
                   <span className="clip-copy">
                     <span className="clip-index">
                       {String(segment.index + 1).padStart(2, '0')}
@@ -1938,6 +2006,40 @@ export function Timeline({ onPickFile }: TimelineProps) {
             if (closeTimer.current) window.clearTimeout(closeTimer.current)
           }}
           onPointerLeave={markerLeave}
+        />
+      )}
+
+      {easingPopover && (
+        <EasingPopover
+          x={easingPopover.x}
+          y={easingPopover.y}
+          current={commonEasing(easingPopover)}
+          count={easingPopover.refs.length}
+          onPick={(ease: Easing) => setKeyframeEasing(easingPopover.refs, ease)}
+          onClose={() => setEasingPopover(null)}
+        />
+      )}
+
+      {keyMenu && (
+        <ContextMenu
+          x={keyMenu.x}
+          y={keyMenu.y}
+          ariaLabel="关键帧操作"
+          items={[
+            {
+              label: '缓动…',
+              onSelect: () => setEasingPopover({ ...keyMenu }),
+            },
+            {
+              label: '删除关键帧',
+              danger: true,
+              onSelect: () => {
+                deleteKeyframes(keyMenu.clipId, keyMenu.refs)
+                setKeySelection(null)
+              },
+            },
+          ]}
+          onClose={() => setKeyMenu(null)}
         />
       )}
 

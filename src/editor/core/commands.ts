@@ -82,7 +82,15 @@ import type { RemoveAssetClipsOptions } from './operations'
 import type { ColorAdjustments } from './color'
 import type { AudioAttrs, VisualAttrs } from './attributeClipboard'
 import type { AnimatableProperty, Easing, ProjectCover } from './types'
-import { removeKeyframeInProject, setKeyframeInProject } from './keyframes'
+import {
+  clearPropertyKeyframesInProject,
+  moveKeyframesInProject,
+  removeKeyframeInProject,
+  setKeyframeEasingInProject,
+  setKeyframeInProject,
+  removeKeyframesInProject,
+} from './keyframes'
+import type { KeyframeRef } from './keyframeEdit'
 import { normalizeTransitionType, transitionLabel } from './transition'
 import { relinkCaptions } from './captionLink'
 import { normalizeBackground, withClipBackground } from './background'
@@ -176,6 +184,60 @@ export function createSetColorAllCommand(color: ColorAdjustments): EditorCommand
     label: '调色应用到全部片段',
     execute(project) {
       return applyColorToAllClips(project, color).project
+    },
+  }
+}
+
+/** 多选整体平移关键帧（1 步撤销）；夹取后无变化或产生重复时返回原 project。 */
+export function createMoveKeyframesCommand(
+  clipId: string,
+  selected: readonly KeyframeRef[],
+  delta: number,
+): EditorCommand {
+  return {
+    label: '移动关键帧',
+    execute(project) {
+      return moveKeyframesInProject(project, clipId, selected, delta) ?? project
+    },
+  }
+}
+
+/** 批量删除关键帧（1 步撤销）。 */
+export function createRemoveKeyframesCommand(
+  clipId: string,
+  refs: readonly KeyframeRef[],
+): EditorCommand {
+  return {
+    label: '删除关键帧',
+    execute(project) {
+      return removeKeyframesInProject(project, clipId, refs) ?? project
+    },
+  }
+}
+
+/** 批量设置选中关键帧的缓动（1 步撤销）。 */
+export function createSetKeyframeEasingCommand(
+  clipId: string,
+  selected: readonly KeyframeRef[],
+  ease: Easing,
+): EditorCommand {
+  return {
+    label: '设置缓动',
+    execute(project) {
+      return setKeyframeEasingInProject(project, clipId, selected, ease) ?? project
+    },
+  }
+}
+
+/** 清空某个属性的全部关键帧（1 步撤销）。 */
+export function createClearPropertyKeyframesCommand(
+  clipId: string,
+  prop: AnimatableProperty,
+): EditorCommand {
+  return {
+    label: '清空该属性的关键帧',
+    execute(project) {
+      return clearPropertyKeyframesInProject(project, clipId, prop) ?? project
     },
   }
 }

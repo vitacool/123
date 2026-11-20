@@ -5728,27 +5728,6 @@
   box-sizing: border-box;
 }
 
-/* ===== 关键帧：时间轴刻度 ===== */
-.clip-keyframe-row {
-  position: absolute;
-  right: 0;
-  bottom: 6px;
-  left: 0;
-  height: 6px;
-  pointer-events: none;
-}
-
-.clip-keyframe-tick {
-  position: absolute;
-  top: 0;
-  width: 6px;
-  height: 6px;
-  margin-left: -3px;
-  border: 1px solid rgba(20, 18, 15, 0.55);
-  background: #fdfaf3;
-  transform: rotate(45deg);
-  border-radius: 1px;
-}
 
 /* ===== 关键帧：属性行菱形按钮 ===== */
 .keyframe-row {
@@ -5832,4 +5811,192 @@
   border: 2px solid var(--fc-accent-deep);
   border-radius: 1px;
   transform: rotate(45deg);
+}
+
+/* ===== 关键帧带（片段条底部 8px，可交互） ===== */
+.clip-keyframe-band {
+  position: absolute;
+  right: 10px;
+  bottom: 0;
+  left: 10px;
+  z-index: 4;
+  border-radius: 3px 3px 0 0;
+  background: rgba(0, 0, 0, 0.22);
+  cursor: default;
+}
+
+.clip-keyframe-dot {
+  position: absolute;
+  top: 0;
+  margin-left: -3.5px;
+  padding: 0;
+  border: 1px solid rgba(20, 18, 15, 0.55);
+  border-radius: 1px;
+  background: var(--fc-accent);
+  transform: rotate(45deg);
+  cursor: ew-resize;
+  transition: box-shadow 0.1s ease;
+}
+
+.clip-keyframe-dot:hover {
+  box-shadow: 0 0 0 2px rgba(196, 122, 55, 0.45);
+}
+
+/* 多选：金色描边 */
+.clip-keyframe-dot.is-selected {
+  border-color: var(--fc-gold);
+  box-shadow: 0 0 0 2px var(--fc-gold);
+}
+
+.clip-keyframe-dot.is-dragging {
+  z-index: 2;
+  background: #fff6e6;
+  border-color: var(--fc-gold);
+}
+
+.clip-keyframe-drag-badge {
+  position: absolute;
+  bottom: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(20, 18, 15, 0.86);
+  color: #fdfaf3;
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: nowrap;
+  transform: translateX(-50%);
+  pointer-events: none;
+  z-index: 6;
+}
+
+/* ===== 关键帧浮层（缓动 / 曲线） ===== */
+.kf-popover {
+  z-index: 150;
+  padding: 10px;
+  border: 1px solid var(--fc-line);
+  border-radius: var(--fc-radius-lg);
+  background: #faf7f0;
+  box-shadow: 0 16px 44px rgba(25, 23, 19, 0.24);
+}
+
+.kf-popover-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 8px;
+  color: var(--fc-ink-soft);
+  font-size: var(--fc-text-xs);
+  font-weight: 600;
+}
+
+.kf-easing-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.kf-easing-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--fc-radius-sm);
+  background: transparent;
+  color: var(--fc-accent-deep);
+  cursor: pointer;
+  text-align: left;
+}
+
+.kf-easing-option:hover {
+  border-color: rgba(196, 122, 55, 0.4);
+  background: rgba(196, 122, 55, 0.1);
+}
+
+.kf-easing-option.is-active {
+  border-color: var(--fc-accent);
+  background: rgba(196, 122, 55, 0.16);
+}
+
+.kf-easing-curve {
+  flex: none;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.kf-easing-name {
+  flex: none;
+  color: var(--fc-ink);
+  font-size: var(--fc-text-xs);
+  font-weight: 600;
+}
+
+.kf-easing-hint {
+  color: var(--fc-muted);
+  font-size: 10px;
+}
+
+.kf-curve-popover {
+  width: 292px;
+}
+
+.kf-curve {
+  display: block;
+  border-radius: 6px;
+}
+
+.kf-curve-meta {
+  color: var(--fc-muted);
+  font-weight: 400;
+}
+
+.kf-curve-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.kf-curve-range {
+  color: var(--fc-muted);
+  font-size: 10px;
+}
+
+/* 属性行：曲线按钮 + 基值提示 */
+.kf-curve-button {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fc-accent-deep);
+  cursor: pointer;
+}
+
+.kf-curve-button:disabled {
+  color: var(--fc-faint);
+  opacity: 0.5;
+  cursor: default;
+}
+
+.kf-curve-button:hover:not(:disabled) {
+  border-color: rgba(196, 122, 55, 0.45);
+  background: rgba(196, 122, 55, 0.12);
+}
+
+.kf-animated-base {
+  color: var(--fc-muted);
+  font-size: 10px;
+  white-space: nowrap;
 }

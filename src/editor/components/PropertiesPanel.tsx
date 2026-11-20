@@ -28,7 +28,9 @@ import { ClipSpeedSection } from './ClipSpeedSection'
 import { TextPropertiesPanel } from './TextPropertiesPanel'
 import { CaptionListPanel } from './CaptionListPanel'
 import { Icon } from './Icon'
+import { AnimatedValueHint } from './AnimatedValueHint'
 import { KeyframeButton } from './KeyframeButton'
+import { KeyframeCurveButton } from './KeyframeCurveButton'
 import { PanelSection } from './PanelSection'
 
 const round = (value: number, digits = 2): number => Number(value.toFixed(digits))
@@ -588,7 +590,9 @@ export function PropertiesPanel() {
               onPreview={(value) => preview({ rotation: value })}
               onCommit={commitRotation}
             />
-            <KeyframeButton prop="rotation" clip={clip} />
+            <KeyframeCurveButton prop="rotation" clip={clip} />
+              <KeyframeButton prop="rotation" clip={clip} />
+              <AnimatedValueHint prop="rotation" clip={clip} />
           </div>
           <div className="inline-actions">
             <button
@@ -693,7 +697,9 @@ export function PropertiesPanel() {
               onPreview={(value) => preview({ scale: value / 100 })}
               onCommit={(value) => commitScale(value / 100)}
             />
-            <KeyframeButton prop="scale" clip={clip} />
+            <KeyframeCurveButton prop="scale" clip={clip} />
+              <KeyframeButton prop="scale" clip={clip} />
+              <AnimatedValueHint prop="scale" clip={clip} />
           </div>
           <div className="inline-actions">
             <button
@@ -748,7 +754,9 @@ export function PropertiesPanel() {
                 }
                 onCommit={(value) => commitPosition(value, clip.position.y * 100)}
               />
+              <KeyframeCurveButton prop="position.x" clip={clip} />
               <KeyframeButton prop="position.x" clip={clip} />
+              <AnimatedValueHint prop="position.x" clip={clip} />
             </label>
             <label>
               <span>垂直偏移</span>
@@ -765,7 +773,9 @@ export function PropertiesPanel() {
                 }
                 onCommit={(value) => commitPosition(clip.position.x * 100, value)}
               />
+              <KeyframeCurveButton prop="position.y" clip={clip} />
               <KeyframeButton prop="position.y" clip={clip} />
+              <AnimatedValueHint prop="position.y" clip={clip} />
             </label>
           </div>
           </PanelSection>

@@ -1,7 +1,17 @@
 import { clamp } from './timeline'
 import { evalAnimation } from './animation'
 import { clipOpacity } from './blend'
-import type { AnimatableProperty, Clip, Easing, Keyframe, Project } from './types'
+import {
+  KEYFRAME_MIN_GAP,
+  clampGroupDrag,
+  clearPropertyKeyframes,
+  findDuplicateProperty,
+  keyframeAt,
+  moveKeyframes,
+  setEasingOnKeyframes,
+  type KeyframeRef,
+} from './keyframeEdit'
+import type { AnimatableProperty, AnimationMap, Clip, Easing, Keyframe, Project } from './types'
 
 /** 属性对应的片段基础值（新增关键帧时默认取当前生效值）。 */
 export function propertyBaseValue(clip: Clip, prop: AnimatableProperty): number {
@@ -128,4 +138,84 @@ export function animationFrameTimes(clip: Pick<Clip, 'anim'>): number[] {
     for (const key of keys ?? []) times.add(Math.round(key.t * 1e6) / 1e6)
   }
   return [...times].sort((a, b) => a - b)
+}
+
+/** 多选整体平移关键帧；夹取后若有同属性重复则返回 null（调用方 Toast 并放弃）。 */
+export function moveKeyframesInProject(
+  project: Project,
+  clipId: string,
+  selected: readonly KeyframeRef[],
+  delta: number,
+): Project | null {
+  const location = findClipAnywhere(project, clipId)
+  if (!location || !location.clip.anim) return null
+  const clamped = clampGroupDrag(location.clip.anim, selected, delta)
+  if (Math.abs(clamped) < 1e-9) return null
+  const moved = moveKeyframes(location.clip.anim, selected, clamped)
+  if (!moved) return null
+  if (findDuplicateProperty(moved)) return null
+  const updated = withAnimValue(location.clip, moved)
+  return replaceClip(project, location, updated)
+}
+
+/** 批量设置选中关键帧的缓动。 */
+export function setKeyframeEasingInProject(
+  project: Project,
+  clipId: string,
+  selected: readonly KeyframeRef[],
+  ease: Easing,
+): Project | null {
+  const location = findClipAnywhere(project, clipId)
+  if (!location || !location.clip.anim) return null
+  const next = setEasingOnKeyframes(location.clip.anim, selected, ease)
+  if (!next) return null
+  let changed = false
+  for (const ref of selected) {
+    const before = keyframeAt(location.clip.anim, ref.prop, ref.t)
+    if (before && before.ease !== ease) changed = true
+  }
+  if (!changed) return null
+  return replaceClip(project, location, withAnimValue(location.clip, next))
+}
+
+/** 清空某个属性的全部关键帧。 */
+export function clearPropertyKeyframesInProject(
+  project: Project,
+  clipId: string,
+  prop: AnimatableProperty,
+): Project | null {
+  const location = findClipAnywhere(project, clipId)
+  if (!location || !location.clip.anim?.[prop]) return null
+  const next = clearPropertyKeyframes(location.clip.anim, prop)
+  return replaceClip(project, location, withAnimValue(location.clip, next))
+}
+
+/** 把 anim 写回片段；undefined 表示移除该字段。 */
+function withAnimValue(clip: Clip, anim: AnimationMap | undefined): Clip {
+  if (anim && Object.keys(anim).length > 0) return { ...clip, anim }
+  if (!('anim' in clip)) return clip
+  const { anim: _omit, ...rest } = clip
+  return rest as Clip
+}
+
+/** 批量删除关键帧（一次命令，1 步撤销）。 */
+export function removeKeyframesInProject(
+  project: Project,
+  clipId: string,
+  refs: readonly KeyframeRef[],
+): Project | null {
+  const location = findClipAnywhere(project, clipId)
+  if (!location || !location.clip.anim) return null
+  let current = location.clip
+  let removed = 0
+  for (const ref of refs) {
+    const keys = current.anim?.[ref.prop]
+    if (!keys) continue
+    const next = keys.filter((key) => Math.abs(key.t - ref.t) >= KEYFRAME_MIN_GAP / 2)
+    if (next.length === keys.length) continue
+    removed += keys.length - next.length
+    current = withAnimValue(current, next.length > 0 ? { ...current.anim, [ref.prop]: next } : clearPropertyKeyframes(current.anim, ref.prop))
+  }
+  if (removed === 0) return null
+  return replaceClip(project, location, current)
 }
