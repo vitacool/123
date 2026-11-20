@@ -1,0 +1,20 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`无动画项目的导出图（验收 #7 回归保护） > 滤镜图与「动画功能引入前」的基线完全一致 > static-project-graph 1`] = `
+"[0:v]split=2[vsrc0_0][vsrc0_1];
+[vsrc0_0]trim=start=0:end=4,setpts=PTS-STARTPTS,fps=30,trim=duration=4,setpts=PTS-STARTPTS,crop=1920:1080:0:0,scale=853:480:in_range=full:out_range=limited:flags=lanczos,format=rgba,crop=853:480:0:0,pad=854:480:1:0:black,format=yuv420p,setsar=1[vu0];
+color=c=black:s=854x480:r=30:d=0.5,format=yuv420p,setsar=1[vu1];
+[vsrc0_1]trim=start=4:end=8,setpts=PTS-STARTPTS,fps=30,trim=duration=4,setpts=PTS-STARTPTS,crop=1920:1080:0:0,scale=853:480:in_range=full:out_range=limited:flags=lanczos,format=rgba,crop=853:480:0:0,pad=854:480:1:0:black,format=yuv420p,setsar=1[vu2];
+[vu0][vu1][vu2]concat=n=3:v=1:a=0[basev];
+[0:a]asplit=2[asrc0_0][asrc0_1];
+[asrc0_0]atrim=start=0:end=4,asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_dur=4,atrim=duration=4,asetpts=PTS-STARTPTS[au0];
+anullsrc=r=48000:cl=stereo,atrim=duration=0.5,asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[au1];
+[asrc0_1]atrim=start=4:end=8,asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_dur=4,atrim=duration=4,asetpts=PTS-STARTPTS[au2];
+[au0][au1][au2]concat=n=3:v=0:a=1[basea];
+[1:v]trim=start=0:end=3,setpts=PTS-STARTPTS,fps=30,trim=duration=3,setpts=PTS-STARTPTS,crop=1920:1080:0:0,format=rgba,scale=427:240:in_range=full:out_range=limited:flags=lanczos,format=rgba,crop=427:240:0:0,pad=854:480:384:168:color=0x00000000,format=rgba,setsar=1,setpts=PTS+0/TB[ov0];
+[basev][ov0]overlay=0:0:eof_action=pass:format=auto:enable='between(t,0,3)'[outv];
+[basea]apad=whole_dur=8.5,atrim=duration=8.5[maina];
+[1:a]atrim=start=0:end=3,asetpts=PTS-STARTPTS,volume=1,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[ac0];
+[maina][ac0]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[amix];
+[amix]apad=whole_dur=8.5,atrim=duration=8.5[outa]"
+`;
