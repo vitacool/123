@@ -5763,29 +5763,34 @@
   min-width: 0;
 }
 
+/* 关键帧按钮：之前 11px / 1px 边框 / faint 灰，在米白面板上几乎看不见。
+   现在常驻用强调色 + 更大的菱形 + hover 底色，保证「一眼能发现」。 */
 .keyframe-button {
   display: flex;
   flex: none;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 22px;
+  height: 22px;
   padding: 0;
-  border: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
   background: transparent;
-  color: var(--fc-faint);
+  color: var(--fc-accent-deep);
   cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
 }
 
 .keyframe-button:hover {
-  color: var(--fc-accent-deep);
+  border-color: rgba(196, 122, 55, 0.45);
+  background: rgba(196, 122, 55, 0.12);
 }
 
 .keyframe-diamond {
-  width: 8px;
-  height: 8px;
-  border: 1.5px solid currentColor;
-  border-radius: 1px;
+  width: 11px;
+  height: 11px;
+  border: 2px solid currentColor;
+  border-radius: 1.5px;
   transform: rotate(45deg);
 }
 
@@ -5804,7 +5809,27 @@
 
 .keyframe-count {
   flex: none;
-  color: var(--fc-muted);
+  color: var(--fc-accent-deep);
   font-size: var(--fc-text-xs);
   white-space: nowrap;
+}
+
+/* 画面 tab 顶部的一句引导：告诉用户行尾的菱形是什么 */
+.keyframe-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 0;
+  color: var(--fc-ink-soft);
+  font-size: var(--fc-text-xs);
+  line-height: 1.5;
+}
+
+.keyframe-hint-diamond {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--fc-accent-deep);
+  border-radius: 1px;
+  transform: rotate(45deg);
 }

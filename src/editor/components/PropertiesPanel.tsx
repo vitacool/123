@@ -550,6 +550,13 @@ export function PropertiesPanel() {
         )}
 
         {tab === 'picture' && (
+          <p className="control-note keyframe-hint">
+            <span className="keyframe-hint-diamond" aria-hidden="true" />
+            行尾的 ◆ 可在当前播放头给该属性打关键帧（位置 / 缩放 / 旋转在各行，不透明度在「合成」）
+          </p>
+        )}
+
+        {tab === 'picture' && (
           <PanelSection
             title="旋转"
             hint={`${round(clip.rotation, 0)}°`}
