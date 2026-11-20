@@ -2239,6 +2239,23 @@ export function createEditorStore() {
             }
             return
           }
+          if (target.kind === 'text') {
+            if (!target.trackId) return
+            const patch =
+              prop === 'position.x'
+                ? { x: value }
+                : prop === 'position.y'
+                  ? { y: value }
+                  : prop === 'scale'
+                    ? { scale: value }
+                    : prop === 'opacity'
+                      ? { opacity: value }
+                      : null
+            if (patch) {
+              state.updateTextClip(target.trackId, target.clipId, patch, '调整文本属性')
+            }
+            return
+          }
           switch (prop) {
             case 'scale':
               state.setScale(value)

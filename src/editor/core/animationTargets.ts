@@ -1,6 +1,7 @@
 import { clipVolume } from './clipAudio'
 import { audioClipDuration, findAudioClipLocation } from './audio'
 import { clipOpacity } from './blend'
+import { findTextClipLocation, resolveCaptionStyle, textClipDuration } from './text'
 import { findClipLocation } from './timeline'
 import type {
   AnimatableProperty,
@@ -8,30 +9,42 @@ import type {
   AudioClip,
   Clip,
   Project,
+  TextClip,
 } from './types'
+
+/** 文本/字幕允许的关键帧属性（与 UI 一致，不含旋转/音量）。 */
+export const TEXT_ANIMATABLE_PROPERTIES: AnimatableProperty[] = [
+  'position.x',
+  'position.y',
+  'scale',
+  'opacity',
+]
 
 /**
  * 关键帧编辑的统一目标：视频片段（主轨/叠加轨）与音频片段。
  *
  * 关键帧时间始终是「该对象在自身所属轨道上的本地归一化时间 0…1」：
  * - 视频：findClipLocation 给出的 segment.start / segment.duration（含 gap/变速）；
- * - 音频：clip.start / audioClipDuration。
+ * - 音频：clip.start / audioClipDuration；
+ * - 文本/字幕：clip.start / (clip.end − clip.start)。link 只重算 start/end，
+ *   不改 anim.t，所以不需要额外按 link 源区间重映射。
  *
- * 这样 UI、命令、预览与导出都共用同一套时间基准；commit 2 的文本/字幕目标
- * 也沿用这个结构。
+ * 这样 UI、命令、预览与导出都共用同一套时间基准。
  */
-export type AnimationTargetKind = 'clip' | 'audio'
+export type AnimationTargetKind = 'clip' | 'audio' | 'text'
 
 export interface AnimationTarget {
   kind: AnimationTargetKind
   clipId: string
-  clip: Clip | AudioClip
-  /** 视频主轨为 null；叠加轨/音频轨为对应轨道 id。 */
+  clip: Clip | AudioClip | TextClip
+  /** 视频主轨为 null；叠加轨/音频轨/文本轨为对应轨道 id。 */
   trackId: string | null
   /** 在时间线上的起点（秒）。 */
   start: number
   /** 时间线时长（秒）。 */
   duration: number
+  /** 文本/字幕合并组样式后的生效值；其它目标缺省。 */
+  textStyle?: TextClip
 }
 
 export function findAnimationTarget(
@@ -62,6 +75,18 @@ export function findAnimationTarget(
       duration,
     }
   }
+  const text = findTextClipLocation(project, id)
+  if (text) {
+    return {
+      kind: 'text',
+      clipId: id,
+      clip: text.clip,
+      trackId: text.track.id,
+      start: text.clip.start,
+      duration: textClipDuration(text.clip),
+      textStyle: resolveCaptionStyle(text.clip, text.track.captionStyle),
+    }
+  }
   return null
 }
 
@@ -71,6 +96,7 @@ export function isPropertyAnimatizable(
   prop: AnimatableProperty,
 ): boolean {
   if (target.kind === 'audio') return prop === 'volume'
+  if (target.kind === 'text') return TEXT_ANIMATABLE_PROPERTIES.includes(prop)
   return true
 }
 
@@ -80,6 +106,21 @@ export function animationBaseValue(
   prop: AnimatableProperty,
 ): number {
   if (target.kind === 'audio') return clipVolume(target.clip as AudioClip)
+  if (target.kind === 'text') {
+    const style = target.textStyle ?? (target.clip as TextClip)
+    switch (prop) {
+      case 'position.x':
+        return style.x
+      case 'position.y':
+        return style.y
+      case 'scale':
+        return style.scale ?? 1
+      case 'opacity':
+        return Math.max(0, Math.min(1, style.opacity ?? 1))
+      default:
+        return 1
+    }
+  }
   const clip = target.clip as Clip
   switch (prop) {
     case 'position.x':
@@ -116,7 +157,7 @@ export function animationLocalSeconds(target: AnimationTarget, playhead: number)
 export function replaceAnimationTarget(
   project: Project,
   target: AnimationTarget,
-  updated: Clip | AudioClip,
+  updated: Clip | AudioClip | TextClip,
 ): Project | null {
   if (target.kind === 'clip') {
     if (target.trackId === null) {
@@ -138,6 +179,24 @@ export function replaceAnimationTarget(
               ...track,
               clips: track.clips.map((clip) =>
                 clip.id === target.clipId ? (updated as Clip) : clip,
+              ),
+            }
+          : track,
+      ),
+    }
+  }
+
+  if (target.kind === 'text') {
+    const tracks = project.textTracks ?? []
+    if (!tracks.some((track) => track.id === target.trackId)) return null
+    return {
+      ...project,
+      textTracks: tracks.map((track) =>
+        track.id === target.trackId
+          ? {
+              ...track,
+              clips: track.clips.map((clip) =>
+                clip.id === target.clipId ? (updated as TextClip) : clip,
               ),
             }
           : track,
@@ -170,6 +229,14 @@ export function sanitizeTargetAnimation(
   if (!anim) return undefined
   if (target.kind === 'audio') {
     return anim.volume?.length ? { volume: anim.volume } : undefined
+  }
+  if (target.kind === 'text') {
+    const next: AnimationMap = {}
+    for (const prop of TEXT_ANIMATABLE_PROPERTIES) {
+      const keys = anim[prop]
+      if (keys?.length) next[prop] = keys
+    }
+    return Object.keys(next).length > 0 ? next : undefined
   }
   return anim
 }

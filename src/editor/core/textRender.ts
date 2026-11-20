@@ -24,18 +24,35 @@ function wrapParagraph(
   return lines
 }
 
+/** 文本层在某一时刻的动画覆盖值（与 drawClipFrame 的 overrides 同构）。 */
+export interface TextRenderOverrides {
+  /** 画布百分比中心位置。 */
+  position?: { x: number; y: number }
+  /** 在 fontSize 之上的缩放倍数。 */
+  scale?: number
+  /** 整体不透明度 0–1。 */
+  opacity?: number
+}
+
 /** Shared text renderer for preview canvas and exported PNG overlays. */
 export function drawTextClip(
   context: CanvasRenderingContext2D,
   clip: TextClip,
   width: number,
   height: number,
+  overrides: TextRenderOverrides = {},
 ): void {
   if (!clip.text.trim()) return
-  const fontSize = Math.max(10, clip.fontSize * height)
+  const scale = Math.max(0.01, overrides.scale ?? clip.scale ?? 1)
+  const opacity = Math.max(0, Math.min(1, overrides.opacity ?? clip.opacity ?? 1))
+  if (opacity <= 0.0001) return
+  const fontSize = Math.max(10, clip.fontSize * height * scale)
+  const x = overrides.position?.x ?? clip.x
+  const y = overrides.position?.y ?? clip.y
   const family = clip.fontFamily ?? DEFAULT_FONT
   const weight = clip.bold ? 700 : 400
   context.save()
+  context.globalAlpha = opacity
   context.font = `${weight} ${fontSize}px ${family}`
   context.textBaseline = 'middle'
   const maxWidth = width * 0.86
@@ -50,8 +67,8 @@ export function drawTextClip(
   const padY = fontSize * 0.28
   const boxWidth = Math.min(maxWidth + padX * 2, widest + padX * 2)
   const boxHeight = totalHeight + padY * 2
-  const centerX = clip.x * width
-  const centerY = clip.y * height
+  const centerX = x * width
+  const centerY = y * height
   const left =
     clip.align === 'left'
       ? centerX

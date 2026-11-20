@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { getOutputDimensions } from '../core/aspect'
 import { clipTimelineDuration } from '../core/clipTime'
 import { animationPerformanceHint } from '../core/animationExport'
+import { textAnimationPerformanceHint } from '../core/textAnimation'
 import { formatFileSize, formatPlayhead } from '../core/format'
 import type { ExportFps, ExportResolution } from '../core/types'
 import { useEditorStore } from '../store/EditorProvider'
@@ -126,6 +127,7 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
     return total
   }, [project.clips, project.overlayTracks, project.audioTracks, assets, source])
   const animationHint = animationPerformanceHint(project, project.exportQuality.fps)
+  const textAnimationHint = textAnimationPerformanceHint(project, project.exportQuality.fps)
   const memoryWarning = exportAssetBytes > MEMORY_WARN_BYTES
 
   /** 「关闭 / Esc / 点遮罩」的统一入口：导出中先取消，其余情况直接关闭。 */
@@ -325,6 +327,13 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
           <div className="export-warning export-animation-warning" role="status">
             <Icon name="warning" size={16} />
             <span>{animationHint}</span>
+          </div>
+        )}
+
+        {textAnimationHint && (
+          <div className="export-warning export-animation-warning" role="status">
+            <Icon name="warning" size={16} />
+            <span>{textAnimationHint}</span>
           </div>
         )}
 

@@ -5,6 +5,7 @@ import { useEditorStore } from '../store/EditorProvider'
 import { CommitNumber } from './Toast'
 import { CommitSlider } from './CommitSlider'
 import { Icon } from './Icon'
+import { KeyframeButton } from './KeyframeButton'
 
 interface TextPropertiesPanelProps {
   track: TextTrack
@@ -13,6 +14,7 @@ interface TextPropertiesPanelProps {
 
 export function TextPropertiesPanel({ track, clip }: TextPropertiesPanelProps) {
   const updateTextClip = useEditorStore((state) => state.updateTextClip)
+  const setAnimatableValue = useEditorStore((state) => state.setAnimatableValue)
   const updateCaptionStyle = useEditorStore((state) => state.updateCaptionStyle)
   const setCaptionStylePreview = useEditorStore((state) => state.setCaptionStylePreview)
   const deleteTextClip = useEditorStore((state) => state.deleteTextClip)
@@ -55,6 +57,8 @@ export function TextPropertiesPanel({ track, clip }: TextPropertiesPanelProps) {
 
   const duration = textClipDuration(clip)
   const hasBackground = style.background !== 'transparent'
+  const scalePercent = Math.round((clip.scale ?? 1) * 100)
+  const opacityPercent = Math.round((clip.opacity ?? 1) * 100)
 
   const commitText = () => {
     if (pendingRef.current !== null) {
@@ -64,6 +68,15 @@ export function TextPropertiesPanel({ track, clip }: TextPropertiesPanelProps) {
     if (text === committedRef.current) return
     committedRef.current = text
     commit({ text }, '修改文本内容')
+  }
+
+  /** 位置：已有关键帧时写当前关键帧；否则仍走组样式/单条覆盖的静态路径。 */
+  const commitPosition = (prop: 'position.x' | 'position.y', value: number) => {
+    if ((clip.anim?.[prop]?.length ?? 0) > 0) {
+      setAnimatableValue(prop, value)
+      return
+    }
+    commitStyle(prop === 'position.x' ? { x: value } : { y: value }, '调整文本位置')
   }
 
   const updateText = (value: string) => {
@@ -223,6 +236,64 @@ export function TextPropertiesPanel({ track, clip }: TextPropertiesPanelProps) {
 
         <section className="panel-section">
           <div className="section-title">
+            <span>字号 / 缩放</span>
+            <span className="section-hint">10% – 400%，叠加在字号上</span>
+          </div>
+          <div className="control-with-field">
+            <CommitSlider
+              value={scalePercent}
+              min={10}
+              max={400}
+              step={1}
+              ariaLabel="文本缩放"
+              onPreview={() => undefined}
+              onCommit={(value) => setAnimatableValue('scale', value / 100)}
+              format={(value) => `${Math.round(value)}%`}
+            />
+            <CommitNumber
+              value={scalePercent}
+              min={10}
+              max={400}
+              step={1}
+              unit="%"
+              ariaLabel="文本缩放百分比"
+              onCommit={(value) => setAnimatableValue('scale', value / 100)}
+            />
+            <KeyframeButton prop="scale" clip={clip} />
+          </div>
+        </section>
+
+        <section className="panel-section">
+          <div className="section-title">
+            <span>不透明度</span>
+            <span className="section-hint">0 – 100%</span>
+          </div>
+          <div className="control-with-field">
+            <CommitSlider
+              value={opacityPercent}
+              min={0}
+              max={100}
+              step={1}
+              ariaLabel="文本不透明度"
+              onPreview={() => undefined}
+              onCommit={(value) => setAnimatableValue('opacity', value / 100)}
+              format={(value) => `${Math.round(value)}%`}
+            />
+            <CommitNumber
+              value={opacityPercent}
+              min={0}
+              max={100}
+              step={1}
+              unit="%"
+              ariaLabel="文本不透明度百分比"
+              onCommit={(value) => setAnimatableValue('opacity', value / 100)}
+            />
+            <KeyframeButton prop="opacity" clip={clip} />
+          </div>
+        </section>
+
+        <section className="panel-section">
+          <div className="section-title">
             <span>颜色</span>
             <span className="section-hint">文字 / 背景</span>
           </div>
@@ -339,27 +410,33 @@ export function TextPropertiesPanel({ track, clip }: TextPropertiesPanelProps) {
           <div className="position-grid">
             <label>
               <span>水平</span>
-              <CommitNumber
-                value={Math.round(style.x * 1000) / 10}
-                min={0}
-                max={100}
-                step={0.5}
-                unit="%"
-                ariaLabel="文本水平位置"
-                onCommit={(value) => commitStyle({ x: value / 100 }, '调整文本位置')}
-              />
+              <span className="text-position-control">
+                <CommitNumber
+                  value={Math.round(style.x * 1000) / 10}
+                  min={0}
+                  max={100}
+                  step={0.5}
+                  unit="%"
+                  ariaLabel="文本水平位置"
+                  onCommit={(value) => commitPosition('position.x', value / 100)}
+                />
+                <KeyframeButton prop="position.x" clip={clip} />
+              </span>
             </label>
             <label>
               <span>垂直</span>
-              <CommitNumber
-                value={Math.round(style.y * 1000) / 10}
-                min={0}
-                max={100}
-                step={0.5}
-                unit="%"
-                ariaLabel="文本垂直位置"
-                onCommit={(value) => commitStyle({ y: value / 100 }, '调整文本位置')}
-              />
+              <span className="text-position-control">
+                <CommitNumber
+                  value={Math.round(style.y * 1000) / 10}
+                  min={0}
+                  max={100}
+                  step={0.5}
+                  unit="%"
+                  ariaLabel="文本垂直位置"
+                  onCommit={(value) => commitPosition('position.y', value / 100)}
+                />
+                <KeyframeButton prop="position.y" clip={clip} />
+              </span>
             </label>
           </div>
           <div className="inline-actions">

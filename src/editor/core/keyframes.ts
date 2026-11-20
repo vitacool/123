@@ -28,9 +28,10 @@ import type {
   Easing,
   Keyframe,
   Project,
+  TextClip,
 } from './types'
 
-type AnimatableClip = Clip | AudioClip
+type AnimatableClip = Clip | AudioClip | TextClip
 
 /** 属性对应的片段基础值（新增关键帧时默认取当前生效值）。 */
 export function propertyBaseValue(clip: Clip, prop: AnimatableProperty): number {

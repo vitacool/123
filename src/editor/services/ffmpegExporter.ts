@@ -8,12 +8,18 @@ import { drawTextClip } from '../core/textRender'
 import { buildCoverJpeg, buildCoverPng, coverFrameSeconds } from '../core/cover'
 import { animationFrameCount, animatedClips, bakeAnimatedClip, hasAnyAnimation } from '../core/animationExport'
 import { hasAnimation } from '../core/animation'
+import {
+  TEXT_ANIMATION_CHUNK_FRAMES,
+  buildTextOverlayRenderSegments,
+  hasAnyTextAnimation,
+  resolveTextOverrides,
+} from '../core/textAnimation'
 import { renderAnimatedClipToFile } from './animationRenderer'
 import { clipTimelineDuration } from '../core/clipTime'
 import { findSegmentAt } from '../core/timeline'
-import { resolveCaptionStyle } from '../core/text'
+import { resolveCaptionStyle, textClipDuration } from '../core/text'
 import { buildTextOverlayTimeline } from '../core/textOverlay'
-import type { CaptionStyle, Clip, Project, SourceInfo } from '../core/types'
+import type { CaptionStyle, Clip, Project, SourceInfo, TextClip } from '../core/types'
 
 export type RuntimeMode = 'multi-thread' | 'single-thread'
 
@@ -354,6 +360,10 @@ interface TextOverlayLayer {
   listContent: string
   /** Index of the text input in the `-i` order (after all media inputs). */
   inputIndex: number
+  /** 动画文本已经把中间片段/list 直接写进 FFmpeg 虚拟文件系统。 */
+  prewritten?: boolean
+  /** 动画文本的中间片段等额外清理项。 */
+  cleanupFiles?: string[]
 }
 
 /**
@@ -407,6 +417,242 @@ async function renderTextOverlayLayer(
     listFile: 'text-overlay-list.txt',
     listContent: `${list.join('\n')}\n`,
     inputIndex,
+  }
+}
+
+/**
+ * Render an animated text layer as a sequence of alpha-preserving intermediate
+ * MOV clips (PNG codec) and concatenate them with the existing ffconcat demuxer.
+ *
+ * Why not one PNG per display state anymore: text animation makes the state
+ * continuous. Per animated span we redraw every frame, but a static span still
+ * renders one PNG and encodes a one-frame MOV; the concat `duration` directive
+ * plus the layer's `fps` filter repeat it for that span. A long static caption
+ * therefore never produces hundreds of identical PNGs. Frames are drawn on one
+ * full-canvas offscreen canvas in the same order as the existing static layer,
+ * preserving text z-order.
+ *
+ * Every `TEXT_ANIMATION_CHUNK_FRAMES` frames become one MOV segment; the PNGs
+ * for that batch are deleted immediately after encoding. Static spans become one
+ * one-frame segment plus a concat duration. All segments are concatenated so the
+ * final graph still has a single text input (applyTextOverlayGraph is unchanged).
+ */
+async function renderAnimatedTextOverlayLayer(
+  project: Project,
+  width: number,
+  height: number,
+  totalDuration: number,
+  fps: number,
+  inputIndex: number,
+  ffmpeg: FFmpeg,
+  signal: AbortSignal | null,
+  onStatus?: (message: string) => void,
+): Promise<TextOverlayLayer | null> {
+  const intervals = buildTextOverlayTimeline(project, { duration: totalDuration })
+  if (intervals.length === 0) return null
+  const segments = buildTextOverlayRenderSegments(intervals, totalDuration, fps)
+  if (segments.length === 0) return null
+
+  const styleByClipId = new Map<string, TextClip>()
+  for (const track of project.textTracks ?? []) {
+    for (const clip of track.clips) {
+      styleByClipId.set(clip.id, resolveCaptionStyle(clip, track.captionStyle))
+    }
+  }
+
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const context = canvas.getContext('2d')
+  if (!context) throw new Error('无法创建动画字幕渲染画布。')
+
+  const concat: string[] = ['ffconcat version 1.0']
+  const cleanupFiles: string[] = []
+  const temporaryPngs = new Set<string>()
+  let segmentIndex = 0
+  /** 最后一个静态片段的 chunk；concat 的最后一个 duration 会被忽略，需要重复一次。 */
+  let lastStaticChunk: string | null = null
+
+  const drawFrame = (clips: TextClip[], timeSeconds: number, animated: boolean): void => {
+    context.clearRect(0, 0, width, height)
+    for (const clip of clips) {
+      const style = styleByClipId.get(clip.id)
+      if (!style) continue
+      if (animated) {
+        const local = Math.max(
+          0,
+          Math.min(textClipDuration(clip), timeSeconds - clip.start),
+        )
+        drawTextClip(
+          context,
+          style,
+          width,
+          height,
+          resolveTextOverrides(clip, local, style),
+        )
+      } else {
+        drawTextClip(context, style, width, height)
+      }
+    }
+  }
+
+  const canvasPng = async (): Promise<Uint8Array> => {
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob((result) => resolve(result), 'image/png'),
+    )
+    if (!blob) throw new Error('动画字幕帧渲染失败。')
+    return new Uint8Array(await blob.arrayBuffer())
+  }
+
+  const encodeChunk = async (args: string[], chunkFile: string): Promise<void> => {
+    throwIfAborted(signal)
+    const code = await raceWithAbort(
+      ffmpeg.exec(['-hide_banner', '-y', ...args, chunkFile]),
+      signal,
+    )
+    if (code !== 0) {
+      throw new Error(`动画字幕中间片段编码失败（退出码 ${code}）。`)
+    }
+  }
+
+  const deleteFiles = async (files: Iterable<string>): Promise<void> => {
+    for (const file of files) {
+      try {
+        await ffmpeg.deleteFile(file)
+      } catch {
+        // Best-effort cleanup.
+      }
+    }
+  }
+
+  try {
+    for (const segment of segments) {
+      throwIfAborted(signal)
+      const safeFps = Math.max(1, fps)
+      if (!segment.animated) {
+        // Static state: one PNG → one-frame MOV, duration supplied by concat.
+        const png = `text-static-${segmentIndex}.png`
+        const chunk = `text-static-${segmentIndex}.mov`
+        segmentIndex += 1
+        drawFrame(
+          segment.clips,
+          segment.start + segment.frames / (2 * safeFps),
+          false,
+        )
+        await ffmpeg.writeFile(png, await canvasPng())
+        temporaryPngs.add(png)
+        try {
+          // 只编码 1 帧；时长由 concat 的 duration 指令给出，最终图里的 fps 滤镜
+          // 负责把这一帧复制到整个静态区间。这样静态字幕仍只渲染 1 张 PNG。
+          await encodeChunk(
+            [
+              '-loop',
+              '1',
+              '-framerate',
+              String(safeFps),
+              '-i',
+              png,
+              '-frames:v',
+              '1',
+              '-r',
+              String(safeFps),
+              '-video_track_timescale',
+              '90000',
+              '-c:v',
+              'png',
+              '-pix_fmt',
+              'rgba',
+              '-an',
+            ],
+            chunk,
+          )
+        } finally {
+          temporaryPngs.delete(png)
+          await deleteFiles([png])
+        }
+        concat.push(
+          `file '${chunk}'`,
+          `duration ${(segment.frames / safeFps).toFixed(6)}`,
+        )
+        cleanupFiles.push(chunk)
+        lastStaticChunk = chunk
+        continue
+      }
+
+      onStatus?.(
+        `正在渲染动画字幕（${segment.start.toFixed(1)}–${segment.end.toFixed(1)}s）…`,
+      )
+      lastStaticChunk = null
+      let frame = segment.startFrame
+      while (frame < segment.endFrame) {
+        const batchStart = frame
+        const batchCount = Math.min(
+          TEXT_ANIMATION_CHUNK_FRAMES,
+          segment.endFrame - frame,
+        )
+        const prefix = `text-anim-${segmentIndex}-${batchStart}-`
+        const chunk = `text-anim-${segmentIndex}-${batchStart}.mov`
+        const pngs: string[] = []
+        for (let index = 0; index < batchCount; index += 1) {
+          throwIfAborted(signal)
+          drawFrame(segment.clips, (batchStart + index) / safeFps, true)
+          const png = `${prefix}${String(index).padStart(5, '0')}.png`
+          await ffmpeg.writeFile(png, await canvasPng())
+          pngs.push(png)
+          temporaryPngs.add(png)
+        }
+        try {
+          await encodeChunk(
+            [
+              '-framerate',
+              String(safeFps),
+              '-start_number',
+              '0',
+              '-i',
+              `${prefix}%05d.png`,
+              '-frames:v',
+              String(batchCount),
+              '-r',
+              String(safeFps),
+              '-video_track_timescale',
+              '90000',
+              '-c:v',
+              'png',
+              '-pix_fmt',
+              'rgba',
+              '-an',
+            ],
+            chunk,
+          )
+        } finally {
+          for (const png of pngs) temporaryPngs.delete(png)
+          await deleteFiles(pngs)
+        }
+        concat.push(`file '${chunk}'`)
+        cleanupFiles.push(chunk)
+        frame += batchCount
+      }
+      segmentIndex += 1
+    }
+
+    const listFile = 'text-overlay-list.txt'
+    // concat demuxer 忽略最后一条 duration；若末尾是静态片段，重复一次让
+    // 上一个 duration 生效（与原来的静态 PNG 序列做法一致）。
+    if (lastStaticChunk) concat.push(`file '${lastStaticChunk}'`)
+    const listContent = `${concat.join('\n')}\n`
+    await ffmpeg.writeFile(listFile, listContent)
+    cleanupFiles.push(listFile)
+    return {
+      assets: [],
+      listFile,
+      listContent,
+      inputIndex,
+      prewritten: true,
+      cleanupFiles,
+    }
+  } catch (error) {
+    await deleteFiles([...temporaryPngs, ...cleanupFiles])
+    throw error
   }
 }
 
@@ -611,7 +857,7 @@ async function writeTextOverlayLayer(
   ffmpeg: FFmpeg,
   layer: TextOverlayLayer | null,
 ): Promise<void> {
-  if (!layer) return
+  if (!layer || layer.prewritten) return
   for (const asset of layer.assets) {
     await ffmpeg.writeFile(asset.file, asset.data)
   }
@@ -683,14 +929,32 @@ export async function exportProject(
   }
 
   const capabilities = getRuntimeCapabilities()
-  const renderTextLayer = () =>
-    renderTextOverlayLayer(
+  const renderTextLayer = async (
+    instance: FFmpeg,
+    signal: AbortSignal | null,
+  ): Promise<TextOverlayLayer | null> => {
+    // 无文本动画：完全走原有「按状态变化生成 PNG」路径，零改动。
+    if (!hasAnyTextAnimation(project)) {
+      return renderTextOverlayLayer(
+        project,
+        plan.width,
+        plan.height,
+        plan.totalDuration,
+        plan.inputs.length,
+      )
+    }
+    return renderAnimatedTextOverlayLayer(
       project,
       plan.width,
       plan.height,
       plan.totalDuration,
+      plan.fps,
       plan.inputs.length,
+      instance,
+      signal,
+      onStatus,
     )
+  }
   onStage?.('loading-core')
   onStatus?.(capabilities.multiThread ? '正在加载多线程 FFmpeg…' : '正在加载 FFmpeg…')
   // 封面：first-frame 模式需要把封面渲染成 PNG 作为额外输入；separate 模式只在收尾时出图。
@@ -754,7 +1018,16 @@ export async function exportProject(
       }
     }
   }
-  let textLayer = await renderTextLayer()
+  // 动画字幕的中间片段同样需要 exec；本环境多线程 core 的 exec 会挂起，
+  // 因此在生成逐帧字幕前主动切到单线程（与视觉动画预处理一致）。
+  if (hasAnyTextAnimation(project) && mode === 'multi-thread') {
+    onStatus?.('动画字幕需要单线程 FFmpeg 核心，正在切换…')
+    loaded = await fallbackToSingleThread('动画字幕渲染需要单线程 FFmpeg 核心。')
+    ffmpeg = loaded.ffmpeg
+    mode = loaded.mode
+    warning = loaded.warning
+  }
+  let textLayer = await renderTextLayer(ffmpeg, signal)
   // 封面 overlay 的输入序号：媒体输入 + 文本层（若存在）之后。
   const coverInputIndex = plan.inputs.length + (textLayer ? 1 : 0)
 
@@ -798,7 +1071,7 @@ export async function exportProject(
         // input before writing it into the new file system.
         onStage?.('writing-inputs')
         await writeInputs(ffmpeg, resolvedInputs, onStatus, onProgress, signal)
-        textLayer = await renderTextLayer()
+        textLayer = await renderTextLayer(ffmpeg, signal)
         await writeTextOverlayLayer(ffmpeg, textLayer)
         coverPng = await renderCoverPng()
         if (coverPng) await ffmpeg.writeFile(coverFileName, coverPng)
@@ -888,6 +1161,7 @@ export async function exportProject(
     const cleanup = [
       ...resolvedInputs.map((input) => input.file),
       ...(textLayer ? textLayer.assets.map((asset) => asset.file) : []),
+      ...(textLayer?.cleanupFiles ?? []),
       graphName,
       outputName,
       coverFileName,

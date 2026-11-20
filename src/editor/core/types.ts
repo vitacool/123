@@ -238,6 +238,13 @@ export interface TextClip {
   y: number
   /** Font size as a fraction of canvas height. */
   fontSize: number
+  /**
+   * 缩放倍数，作用在 fontSize 之上；缺省 1（旧草稿无此字段）。
+   * 与 fontSize 分开，便于独立做缩放关键帧而不改字号基线。
+   */
+  scale?: number
+  /** 不透明度 0–1；缺省 1（旧草稿无此字段）。 */
+  opacity?: number
   color: string
   /** CSS colour; transparent means no backdrop. */
   background: string
@@ -253,6 +260,12 @@ export interface TextClip {
   words?: CaptionWord[]
   /** When set, the caption follows the linked clip through edits. */
   link?: CaptionLink
+  /**
+   * 文本关键帧：position.x / position.y / scale / opacity。
+   * 时间基准是该文本片段自身的 start/end（归一化 0…1）；link 只改 start/end，
+   * 不会重写关键帧，因此不需要也不应该再按 link 源区间重映射。
+   */
+  anim?: AnimationMap
   /** True once the user manually changed this caption's text (re-align keeps it). */
   edited?: boolean
 }

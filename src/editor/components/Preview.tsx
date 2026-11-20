@@ -20,8 +20,9 @@ import {
   isTextLocked,
   isTextTrackVisible,
 } from '../core/tracks'
-import { findTextClipLocation, resolveCaptionStyle } from '../core/text'
+import { findTextClipLocation, resolveCaptionStyle, textClipDuration } from '../core/text'
 import { drawTextClip } from '../core/textRender'
+import { resolveTextOverrides } from '../core/textAnimation'
 import { formatPlayhead } from '../core/format'
 import { hasAnimation, resolveClipOverrides } from '../core/animation'
 import { drawClipFrame } from '../core/clipRender'
@@ -505,7 +506,12 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
                 display = { ...display, x: textDrag.x, y: textDrag.y }
               }
             }
-            drawTextClip(context, display, width, height)
+            const local = Math.max(
+              0,
+              Math.min(textClipDuration(clip), state.playhead - clip.start),
+            )
+            const overrides = resolveTextOverrides(clip, local, display)
+            drawTextClip(context, display, width, height, overrides)
           }
         }
       }
