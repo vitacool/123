@@ -60,3 +60,61 @@ export function unusedAssets<T extends { id: string; url: string }>(
   }
   return assets.filter((asset) => !usedUrls.has(asset.url) && !usedAssetIds.has(asset.id))
 }
+// ===================== 分类与搜索（素材库三个 Tab / 搜索共用） =====================
+
+/** 素材分类（视频 / 图片 / 音频）。 */
+export type AssetKind = 'video' | 'image' | 'audio'
+
+const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'gif']
+
+/** 取路径/文件名的扩展名（小写，不含点）。 */
+function extensionOf(value: string | undefined): string {
+  if (!value) return ''
+  const clean = value.split('?')[0].split('#')[0]
+  const dot = clean.lastIndexOf('.')
+  if (dot < 0 || dot === clean.length - 1) return ''
+  return clean.slice(dot + 1).toLowerCase()
+}
+
+/**
+ * 素材分类的唯一判定入口：三个 Tab、搜索角标、拖拽落点都走它。
+ *
+ * 优先用 `asset.kind`；旧草稿（以及手改的工程文件）可能没有这个字段
+ * （`SourceInfo.kind` 本身是可选的，toDraftAsset / restoreDraft 都是原样拷贝），
+ * 按以下顺序兜底：
+ *   1) 宽高都为 0 → 音频（音频文件探测不到画面尺寸）
+ *   2) url 或 name 的扩展名命中图片格式 → 图片
+ *   3) 其余 → 视频
+ */
+export function assetKindOf(
+  asset: Pick<MediaAsset, 'kind' | 'width' | 'height' | 'url' | 'name'>,
+): AssetKind {
+  const kind = asset.kind
+  if (kind === 'video' || kind === 'image' || kind === 'audio') return kind
+  if ((asset.width ?? 0) === 0 && (asset.height ?? 0) === 0) return 'audio'
+  const byName = extensionOf(asset.name)
+  const byUrl = extensionOf(asset.url)
+  if (IMAGE_EXTENSIONS.includes(byName) || IMAGE_EXTENSIONS.includes(byUrl)) return 'image'
+  return 'video'
+}
+
+/** 分类的中文标签。 */
+export const ASSET_KIND_LABELS: Record<AssetKind, string> = {
+  video: '视频',
+  image: '图片',
+  audio: '音频',
+}
+
+/** 按分类统计素材数量（保持导入顺序，仅做计数）。 */
+export function countAssetKinds(assets: readonly MediaAsset[]): Record<AssetKind, number> {
+  const counts: Record<AssetKind, number> = { video: 0, image: 0, audio: 0 }
+  for (const asset of assets) counts[assetKindOf(asset)] += 1
+  return counts
+}
+
+/** 搜索匹配：对 name 做大小写不敏感的 includes；空查询视为无搜索。 */
+export function matchesAssetName(asset: Pick<MediaAsset, 'name'>, query: string): boolean {
+  const keyword = query.trim().toLowerCase()
+  if (keyword.length === 0) return true
+  return asset.name.toLowerCase().includes(keyword)
+}

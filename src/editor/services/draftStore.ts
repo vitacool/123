@@ -1,4 +1,5 @@
 import type { MediaAsset, Project } from '../core/types'
+import { assetKindOf } from '../core/assets'
 import {
   migrateCaptionLinks,
   normalizeProjectColors,
@@ -130,7 +131,8 @@ export async function restoreDraft(snapshot: DraftSnapshot): Promise<RestoredDra
       duration: meta.duration,
       width: meta.width,
       height: meta.height,
-      kind: meta.kind,
+      // 旧草稿可能没有 kind：用统一判定补回，避免「音频被加到主轨 / 跑进视频 Tab」。
+      kind: assetKindOf(meta),
       hasAudio: meta.hasAudio,
       thumbnail: meta.thumbnail,
       file: blob instanceof File ? blob : undefined,
