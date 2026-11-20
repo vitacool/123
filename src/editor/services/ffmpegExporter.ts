@@ -698,6 +698,16 @@ export async function exportProject(
   // 动画片段预处理：只对带动画的片段生效；没有动画时这一步完全跳过（导出路径与原来一致）。
   const animationUrls: string[] = []
   if (hasAnyAnimation(project)) {
+    // 关键：动画渲染要在**单线程**核心上做。多线程 core 在本环境的 exec 会挂起
+    // （导出流程本来也会在自检后降级），而这一步发生在自检之前，若沿用多线程实例
+    // 会卡死在图像序列编码上。这里先主动降级，代价是本次导出使用单线程编码。
+    if (mode === 'multi-thread') {
+      onStatus?.('动画片段需要单线程 FFmpeg 核心，正在切换…')
+      loaded = await fallbackToSingleThread('动画片段渲染需要单线程 FFmpeg 核心。')
+      ffmpeg = loaded.ffmpeg
+      mode = loaded.mode
+      warning = loaded.warning
+    }
     const prepared = await prepareAnimatedProject({
       project,
       assets: [...assets],
