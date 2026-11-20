@@ -191,7 +191,17 @@ export async function renderAnimatedClipToFile(
     }
 
     throwIfAborted(signal)
-    const code = await ffmpeg.exec([
+    // 编码超时兜底：wasm 里若卡住，宁可报错也不要让导出无限挂起。
+    const encodeTimeoutMs = 180000
+    let timeoutId: number | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutId = window.setTimeout(
+        () => reject(new Error('动画片段编码超时（超过 3 分钟），请减少动画片段时长或稍后重试。')),
+        encodeTimeoutMs,
+      )
+    })
+    const code = await Promise.race([
+      ffmpeg.exec([
       '-hide_banner',
       '-y',
       '-framerate',
@@ -206,8 +216,12 @@ export async function renderAnimatedClipToFile(
       '18',
       '-pix_fmt',
       'yuv420p',
-      outputName,
-    ])
+        outputName,
+      ]),
+      timeout,
+    ]).finally(() => {
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId)
+    })
     if (code !== 0) throw new Error(`动画片段编码失败（退出码 ${code}）。`)
     const data = await ffmpeg.readFile(outputName)
     if (typeof data === 'string') throw new Error('动画片段编码返回了文本数据。')

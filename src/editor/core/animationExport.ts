@@ -60,3 +60,30 @@ export function animationPerformanceHint(project: Project, fps: number): string 
   if (heavyClip) parts.push(`单个片段最长 ${perClip} 帧`)
   return parts.join('；')
 }
+/**
+ * 把「带动画的片段」烘焙成指向中间视频的普通片段：
+ * 几何/不透明度/调色/动画都已烘进画面，因此这里把相关字段全部重置为默认值，
+ * 让 exportPlan 把它当成一段普通素材处理（exportPlan 一行都不用改）。
+ */
+export function bakeAnimatedClip(clip: Clip, sourceUrl: string, duration: number): Clip {
+  return {
+    ...clip,
+    sourceUrl,
+    type: 'video',
+    sourceStart: 0,
+    sourceEnd: duration,
+    speed: 1,
+    keepPitch: true,
+    crop: { x: 0, y: 0, w: 1, h: 1 },
+    scale: 1,
+    position: { x: 0, y: 0 },
+    rotation: 0,
+    flipH: false,
+    flipV: false,
+    opacity: 1,
+    blendMode: 'normal',
+    background: undefined,
+    color: undefined,
+    anim: undefined,
+  }
+}

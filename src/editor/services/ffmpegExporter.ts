@@ -6,7 +6,7 @@ import {
 } from '../core/exportPlan'
 import { drawTextClip } from '../core/textRender'
 import { buildCoverJpeg, buildCoverPng, coverFrameSeconds } from '../core/cover'
-import { animationFrameCount, animatedClips, hasAnyAnimation } from '../core/animationExport'
+import { animationFrameCount, animatedClips, bakeAnimatedClip, hasAnyAnimation } from '../core/animationExport'
 import { renderAnimatedClipToFile } from './animationRenderer'
 import { clipTimelineDuration } from '../core/clipTime'
 import { resolveCaptionStyle } from '../core/text'
@@ -500,28 +500,8 @@ async function prepareAnimatedProject(args: {
       file,
       hasAudio: false,
     }
-    // 几何/不透明度/调色/动画已经烘焙进中间视频：这里全部重置为默认值，
-    // 让 exportPlan 把它当成一段普通素材。
-    const baked: Clip = {
-      ...ref.clip,
-      sourceUrl: url,
-      type: 'video',
-      sourceStart: 0,
-      sourceEnd: duration,
-      speed: 1,
-      keepPitch: true,
-      crop: { x: 0, y: 0, w: 1, h: 1 },
-      scale: 1,
-      position: { x: 0, y: 0 },
-      rotation: 0,
-      flipH: false,
-      flipV: false,
-      opacity: 1,
-      blendMode: 'normal',
-      background: undefined,
-      color: undefined,
-      anim: undefined,
-    }
+    // 几何/不透明度/调色/动画已经烘焙进中间视频：重置为普通素材（见 bakeAnimatedClip）。
+    const baked: Clip = bakeAnimatedClip(ref.clip, url, duration)
     replacements.set(ref.clip.id, { clip: baked, source })
   }
 
