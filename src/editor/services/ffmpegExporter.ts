@@ -6,9 +6,12 @@ import {
 } from '../core/exportPlan'
 import { drawTextClip } from '../core/textRender'
 import { buildCoverJpeg, buildCoverPng, coverFrameSeconds } from '../core/cover'
+import { animationFrameCount, animatedClips, hasAnyAnimation } from '../core/animationExport'
+import { renderAnimatedClipToFile } from './animationRenderer'
+import { clipTimelineDuration } from '../core/clipTime'
 import { resolveCaptionStyle } from '../core/text'
 import { buildTextOverlayTimeline } from '../core/textOverlay'
-import type { CaptionStyle, Project, SourceInfo } from '../core/types'
+import type { CaptionStyle, Clip, Project, SourceInfo } from '../core/types'
 
 export type RuntimeMode = 'multi-thread' | 'single-thread'
 
@@ -33,7 +36,12 @@ export interface ExportResult {
 }
 
 /** 导出阶段：加载核心 → 写入素材 → 编码 → 收尾。 */
-export type ExportStage = 'loading-core' | 'writing-inputs' | 'rendering' | 'finalizing'
+export type ExportStage =
+  | 'loading-core'
+  | 'rendering-animations'
+  | 'writing-inputs'
+  | 'rendering'
+  | 'finalizing'
 
 export interface ExportCallbacks {
   onStatus?: (message: string) => void
@@ -422,6 +430,121 @@ function applyTextOverlayGraph(
 }
 
 /**
+ * 动画片段预处理：逐帧渲染 → 编码中间视频 → 把片段的 sourceUrl 换成中间文件。
+ *
+ * 逐片段独立进行，渲染完一个片段立刻删除它的帧文件（renderer 内部负责），
+ * 只把最终的 File 留在内存里作为导出输入。
+ *
+ * 取舍（重要）：几何/不透明度/调色/动画全部烘焙进中间视频，因此 exportPlan 不需要任何改动；
+ * 代价是该片段多了一次 H.264 重编码（crf 18 / veryfast）。
+ * 叠加轨片段用「背景烘焙」代替真透明（libx264 的 yuva420p 兼容性太差）：
+ * 该片段下方如果还有动态画面，中间视频里的背景会盖住它。
+ */
+async function prepareAnimatedProject(args: {
+  project: Project
+  assets: SourceInfo[]
+  width: number
+  height: number
+  fps: number
+  ffmpeg: FFmpeg
+  signal: AbortSignal | null
+  onStage?: (stage: ExportStage) => void
+  onStatus?: (message: string) => void
+  onProgress?: (progress: number) => void
+}): Promise<{ project: Project; sources: SourceInfo[]; urls: string[] } | null> {
+  const { project, assets, width, height, fps, ffmpeg, signal, onStage, onStatus, onProgress } = args
+  const refs = animatedClips(project)
+  if (refs.length === 0) return null
+  onStage?.('rendering-animations')
+
+  const replacements = new Map<string, { clip: Clip; source: SourceInfo }>()
+  const urls: string[] = []
+  let current = 0
+
+  for (let index = 0; index < refs.length; index += 1) {
+    const ref = refs[index]
+    throwIfAborted(signal)
+    const asset = assets.find((item) => item.url === ref.clip.sourceUrl)
+    if (!asset) continue
+    const total = animationFrameCount(ref.clip, fps)
+    onStatus?.(
+      `正在渲染动画片段 ${index + 1}/${refs.length}（${total} 帧）`,
+    )
+    const file = await renderAnimatedClipToFile({
+      clip: ref.clip,
+      asset,
+      trackId: ref.trackId,
+      project,
+      width,
+      height,
+      fps,
+      index,
+      ffmpeg,
+      signal,
+      onFrame: (done) => {
+        current = done
+        onProgress?.(Math.min(0.99, (index + done / total) / refs.length))
+      },
+    })
+    const url = URL.createObjectURL(file)
+    urls.push(url)
+    const duration = clipTimelineDuration(ref.clip)
+    const source: SourceInfo = {
+      url,
+      name: file.name,
+      size: file.size,
+      duration,
+      width: Math.max(2, Math.round(width / 2) * 2),
+      height: Math.max(2, Math.round(height / 2) * 2),
+      kind: 'video',
+      file,
+      hasAudio: false,
+    }
+    // 几何/不透明度/调色/动画已经烘焙进中间视频：这里全部重置为默认值，
+    // 让 exportPlan 把它当成一段普通素材。
+    const baked: Clip = {
+      ...ref.clip,
+      sourceUrl: url,
+      type: 'video',
+      sourceStart: 0,
+      sourceEnd: duration,
+      speed: 1,
+      keepPitch: true,
+      crop: { x: 0, y: 0, w: 1, h: 1 },
+      scale: 1,
+      position: { x: 0, y: 0 },
+      rotation: 0,
+      flipH: false,
+      flipV: false,
+      opacity: 1,
+      blendMode: 'normal',
+      background: undefined,
+      color: undefined,
+      anim: undefined,
+    }
+    replacements.set(ref.clip.id, { clip: baked, source })
+  }
+
+  if (replacements.size === 0) return null
+  void current
+
+  const applyClip = (clip: Clip): Clip => replacements.get(clip.id)?.clip ?? clip
+  const nextProject: Project = {
+    ...project,
+    clips: project.clips.map(applyClip),
+    overlayTracks: project.overlayTracks?.map((track) => ({
+      ...track,
+      clips: track.clips.map(applyClip),
+    })),
+  }
+  return {
+    project: nextProject,
+    sources: [...replacements.values()].map((item) => item.source),
+    urls,
+  }
+}
+
+/**
  * 把封面 PNG 作为「额外一路输入」接到 [outv] 上，只覆盖首帧。
  * 与文本层一致：先改名最终标签，再追加 overlay，因此对 contiguous / gapped / overlay
  * 三条构建路径同时生效，且不影响音频与总时长（eof_action=pass，图案 EOF 后直接透传底图）。
@@ -573,7 +696,6 @@ export async function exportProject(
       plan.totalDuration,
       plan.inputs.length,
     )
-  let textLayer = await renderTextLayer()
   onStage?.('loading-core')
   onStatus?.(capabilities.multiThread ? '正在加载多线程 FFmpeg…' : '正在加载 FFmpeg…')
   // 封面：first-frame 模式需要把封面渲染成 PNG 作为额外输入；separate 模式只在收尾时出图。
@@ -583,7 +705,6 @@ export async function exportProject(
     coverPng = await buildCoverPng(plan.width, plan.height, cover)
   }
   const coverFileName = 'framecut-cover.png'
-  const coverInputIndex = plan.inputs.length + (textLayer ? 1 : 0)
   // 多线程降级后输入要重新写入，封面 PNG 也按需重算。
   const renderCoverPng = async (): Promise<Uint8Array | null> =>
     cover && cover.mode === 'first-frame' ? buildCoverPng(plan.width, plan.height, cover) : null
@@ -593,6 +714,44 @@ export async function exportProject(
   let ffmpeg = loaded.ffmpeg
   let mode = loaded.mode
   let warning = loaded.warning
+
+  // 动画片段预处理：只对带动画的片段生效；没有动画时这一步完全跳过（导出路径与原来一致）。
+  const animationUrls: string[] = []
+  if (hasAnyAnimation(project)) {
+    const prepared = await prepareAnimatedProject({
+      project,
+      assets: [...assets],
+      width: plan.width,
+      height: plan.height,
+      fps: plan.fps,
+      ffmpeg,
+      signal,
+      onStage,
+      onStatus,
+      onProgress,
+    })
+    if (prepared) {
+      animationUrls.push(...prepared.urls)
+      project = prepared.project
+      sources.push(...prepared.sources)
+      plan = buildExportPlan(project, sources, true)
+      sourceByUrl.clear()
+      for (const item of sources) sourceByUrl.set(item.url, item)
+      resolvedInputs.length = 0
+      seenFiles.clear()
+      for (const input of plan.inputs) {
+        if (seenFiles.has(input.file)) continue
+        seenFiles.add(input.file)
+        resolvedInputs.push({
+          file: input.file,
+          source: sourceByUrl.get(input.url) ?? primary,
+        })
+      }
+    }
+  }
+  let textLayer = await renderTextLayer()
+  // 封面 overlay 的输入序号：媒体输入 + 文本层（若存在）之后。
+  const coverInputIndex = plan.inputs.length + (textLayer ? 1 : 0)
 
   const outputName = 'framecut-output.mp4'
   const graphName = 'framecut-filtergraph.txt'
@@ -735,6 +894,14 @@ export async function exportProject(
         await ffmpeg.deleteFile(file)
       } catch {
         // Best-effort cleanup.
+      }
+    }
+    // 动画中间视频的 objectURL：导出结束（含取消/失败）后统一回收。
+    for (const url of animationUrls) {
+      try {
+        URL.revokeObjectURL(url)
+      } catch {
+        // 已失效的 URL 忽略。
       }
     }
   }

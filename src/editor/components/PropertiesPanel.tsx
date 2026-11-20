@@ -3,11 +3,12 @@ import { clipFreezeFrame, clipTimelineDuration } from '../core/clipTime'
 import { useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { FREEZE_DEFAULT_DURATION, FREEZE_MAX_DURATION, FREEZE_MIN_DURATION } from '../core/constants'
 import { clipVolume } from '../core/clipAudio'
+import { animatedProps } from '../core/animation'
 import { clipOpacity } from '../core/blend'
 import { findAudioClipLocation } from '../core/audio'
 import { findTextClipLocation } from '../core/text'
 import { findClipLocation } from '../core/timeline'
-import type { Clip, TextClip, TextTrack } from '../core/types'
+import type { AnimatableProperty, Clip, TextClip, TextTrack } from '../core/types'
 import { useEditorStore } from '../store/EditorProvider'
 import { CommitNumber } from './Toast'
 import { CommitSlider } from './CommitSlider'
@@ -28,6 +29,7 @@ import { ClipSpeedSection } from './ClipSpeedSection'
 import { TextPropertiesPanel } from './TextPropertiesPanel'
 import { CaptionListPanel } from './CaptionListPanel'
 import { Icon } from './Icon'
+import { KeyframeButton } from './KeyframeButton'
 import { PanelSection } from './PanelSection'
 
 const round = (value: number, digits = 2): number => Number(value.toFixed(digits))
@@ -43,12 +45,21 @@ const PANEL_TABS: readonly { id: PanelTab; label: string }[] = [
 ]
 
 /** 每个 section 的「恢复默认值」补丁：一次命令提交，1 步撤销。 */
+const ANIMATABLE_ROWS: readonly { prop: AnimatableProperty; label: string }[] = [
+  { prop: 'position.x', label: '位置 X' },
+  { prop: 'position.y', label: '位置 Y' },
+  { prop: 'scale', label: '缩放' },
+  { prop: 'rotation', label: '旋转' },
+  { prop: 'opacity', label: '不透明度' },
+]
+
 const SECTION_DEFAULTS: Record<string, Partial<Clip>> = {
   rotation: { rotation: 0 },
   mirror: { flipH: false, flipV: false },
   transform: { scale: 1, position: { x: 0, y: 0 } },
   crop: { crop: { x: 0, y: 0, w: 1, h: 1 } },
   compositing: { opacity: 1, blendMode: 'normal' },
+  keyframes: { anim: undefined },
   speed: { speed: 1, keepPitch: true },
   audio: { volume: 1, fadeIn: 0, fadeOut: 0 },
 }
@@ -260,12 +271,11 @@ export function PropertiesPanel() {
   const cropSession = useEditorStore((state) => state.cropSession)
   const selectClip = useEditorStore((state) => state.selectClip)
   const setRotation = useEditorStore((state) => state.setRotation)
+  const setAnimatableValue = useEditorStore((state) => state.setAnimatableValue)
   const toggleFlipH = useEditorStore((state) => state.toggleFlipH)
   const toggleFlipV = useEditorStore((state) => state.toggleFlipV)
-  const setScale = useEditorStore((state) => state.setScale)
   const fitSelected = useEditorStore((state) => state.fitSelected)
   const fillSelected = useEditorStore((state) => state.fillSelected)
-  const setPosition = useEditorStore((state) => state.setPosition)
   const resetPosition = useEditorStore((state) => state.resetPosition)
   const beginCrop = useEditorStore((state) => state.beginCrop)
   const resizeFreeze = useEditorStore((state) => state.resizeFreeze)
@@ -376,18 +386,22 @@ export function PropertiesPanel() {
 
   const clearPreview = () => setPreviewPatch(null)
 
+  // 可动画属性统一走 setAnimatableValue：有关键帧时改关键帧，否则改基础值（Toast 区分）。
   const commitRotation = (angle: number) => {
-    setRotation(angle)
+    setAnimatableValue('rotation', angle)
     clearPreview()
   }
 
   const commitScale = (scale: number) => {
-    setScale(scale)
+    setAnimatableValue('scale', scale)
     clearPreview()
   }
 
   const commitPosition = (xPercent: number, yPercent: number) => {
-    setPosition(xPercent / 100, yPercent / 100)
+    const x = xPercent / 100
+    const y = yPercent / 100
+    setAnimatableValue('position.x', x)
+    setAnimatableValue('position.y', y)
     clearPreview()
   }
 
@@ -773,6 +787,29 @@ export function PropertiesPanel() {
               onBlendMode={(mode) => setClipBlendMode(clip.id, mode)}
               onPreviewOpacity={(value) => preview({ opacity: value })}
             />
+          </PanelSection>
+        )}
+
+        {tab === 'picture' && (
+          <PanelSection
+            title="关键帧"
+            hint={animatedProps(clip).length > 0 ? `${animatedProps(clip).length} 个属性` : '无动画'}
+            collapsed={isCollapsed('keyframes')}
+            onToggle={() => toggleSection('keyframes')}
+            onReset={() => resetSection('keyframes', '关键帧')}
+            resetDisabled={disabled}
+          >
+            <ul className="keyframe-list">
+              {ANIMATABLE_ROWS.map((row) => (
+                <li key={row.prop} className="keyframe-list-row">
+                  <span className="keyframe-list-label">{row.label}</span>
+                  <KeyframeButton prop={row.prop} clip={clip} />
+                </li>
+              ))}
+            </ul>
+            <p className="control-note">
+              点击菱形在当前播放头添加 / 删除关键帧；有关键帧的属性在导出时会逐帧烘焙。
+            </p>
           </PanelSection>
         )}
 

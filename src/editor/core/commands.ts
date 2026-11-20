@@ -81,7 +81,8 @@ import type { TransitionAllOptions } from './operations'
 import type { RemoveAssetClipsOptions } from './operations'
 import type { ColorAdjustments } from './color'
 import type { AudioAttrs, VisualAttrs } from './attributeClipboard'
-import type { ProjectCover } from './types'
+import type { AnimatableProperty, Easing, ProjectCover } from './types'
+import { removeKeyframeInProject, setKeyframeInProject } from './keyframes'
 import { normalizeTransitionType, transitionLabel } from './transition'
 import { relinkCaptions } from './captionLink'
 import { normalizeBackground, withClipBackground } from './background'
@@ -175,6 +176,36 @@ export function createSetColorAllCommand(color: ColorAdjustments): EditorCommand
     label: '调色应用到全部片段',
     execute(project) {
       return applyColorToAllClips(project, color).project
+    },
+  }
+}
+
+/** 添加 / 更新一个关键帧（1 步撤销）；片段不存在时返回原 project。 */
+export function createSetKeyframeCommand(
+  clipId: string,
+  prop: AnimatableProperty,
+  t: number,
+  value: number,
+  ease: Easing = 'linear',
+): EditorCommand {
+  return {
+    label: '设置关键帧',
+    execute(project) {
+      return setKeyframeInProject(project, clipId, prop, t, value, ease) ?? project
+    },
+  }
+}
+
+/** 删除一个关键帧（1 步撤销）。 */
+export function createRemoveKeyframeCommand(
+  clipId: string,
+  prop: AnimatableProperty,
+  t: number,
+): EditorCommand {
+  return {
+    label: '删除关键帧',
+    execute(project) {
+      return removeKeyframeInProject(project, clipId, prop, t) ?? project
     },
   }
 }

@@ -44,6 +44,8 @@ import {
   createRemoveAssetClipsCommand,
   createSetCoverCommand,
   createClearCoverCommand,
+  createSetKeyframeCommand,
+  createRemoveKeyframeCommand,
   createSplitOverlayClipCommand,
   createSplitTextClipCommand,
   createTrimAudioClipCommand,
@@ -107,6 +109,7 @@ import {
 import { isSameColor, normalizeColor, type ColorAdjustments } from '../core/color'
 import { isAssetReferenced, unusedAssets } from '../core/assets'
 import { captureCoverFrame, coverTargetSize, readCoverImage } from '../core/cover'
+import { propertyValueAt } from '../core/keyframes'
 import { deleteMediaBlob } from '../services/draftStore'
 import {
   captureAudioAttrs,
@@ -185,6 +188,7 @@ import {
   TIMELINE_MIN_ZOOM,
 } from '../core/constants'
 import type {
+  AnimatableProperty,
   AspectRatioPreset,
   AudioClip,
   BlendMode,
@@ -299,6 +303,10 @@ export interface EditorState {
   colorClipboard: ColorAdjustments | null
   /** 预览是否临时显示封面（hover / 点击封面块）。 */
   coverPreview: boolean
+  /** 在当前播放头处切换某个属性的关键帧（有则删、无则按当前值加）。 */
+  toggleKeyframe: (prop: AnimatableProperty) => void
+  /** 可视化属性的统一写入入口：有关键帧时改关键帧，否则改基础值。 */
+  setAnimatableValue: (prop: AnimatableProperty, value: number) => void
   /** 封面设置浮层是否打开。 */
   coverPanelOpen: boolean
   openCoverPanel: () => void
@@ -2120,6 +2128,76 @@ export function createEditorStore() {
         const state = get()
         if (!state.project.cover) return
         if (run(createClearCoverCommand())) state.notify('已移除封面', 'info')
+      },
+
+      toggleKeyframe: (prop) => {
+        const state = get()
+        const clipId = state.selectedClipId
+        if (!clipId) return
+        const location = findClipLocation(state.project, clipId)
+        if (!location) return
+        const duration = location.segment.duration
+        const local = Math.max(0, state.playhead - location.segment.start)
+        const t = duration > 0 ? Math.min(1, local / duration) : 0
+        const clip = location.clip
+        const keys = clip.anim?.[prop] ?? []
+        const exists = keys.some((key) => Math.abs(key.t - t) <= 1e-4)
+        if (exists) {
+          if (run(createRemoveKeyframeCommand(clip.id, prop, t))) {
+            get().notify('已删除关键帧', 'info')
+          }
+          return
+        }
+        const value = propertyValueAt(clip, prop, t)
+        if (run(createSetKeyframeCommand(clip.id, prop, t, value))) {
+          get().notify('已添加关键帧', 'success')
+        }
+      },
+
+      setAnimatableValue: (prop, value) => {
+        const state = get()
+        const clipId = state.selectedClipId
+        if (!clipId) return
+        const location = findClipLocation(state.project, clipId)
+        if (!location) return
+        const clip = location.clip
+        const applyBase = () => {
+          switch (prop) {
+            case 'scale':
+              state.setScale(value)
+              return
+            case 'rotation':
+              state.setRotation(value)
+              return
+            case 'opacity':
+              state.setClipOpacity(clip.id, value)
+              return
+            case 'position.x':
+              state.setPosition(value, clip.position.y)
+              return
+            case 'position.y':
+              state.setPosition(clip.position.x, value)
+              return
+            default:
+          }
+        }
+        const keys = clip.anim?.[prop]
+        if (!keys || keys.length === 0) {
+          applyBase()
+          return
+        }
+        const duration = location.segment.duration
+        const local = Math.max(0, state.playhead - location.segment.start)
+        const t = duration > 0 ? Math.min(1, local / duration) : 0
+        const atKey = keys.some((key) => Math.abs(key.t - t) <= 1e-4)
+        if (atKey) {
+          if (run(createSetKeyframeCommand(clip.id, prop, t, value))) {
+            state.notify('已更新关键帧', 'info')
+          }
+          return
+        }
+        applyBase()
+        state.notify('该属性已启用动画，此修改只在无关键帧时生效', 'warning')
       },
 
       openCoverPanel: () => set({ coverPanelOpen: true }),

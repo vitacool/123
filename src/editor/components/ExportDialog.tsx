@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { getOutputDimensions } from '../core/aspect'
 import { clipTimelineDuration } from '../core/clipTime'
+import { animationPerformanceHint } from '../core/animationExport'
 import { formatFileSize, formatPlayhead } from '../core/format'
 import type { ExportFps, ExportResolution } from '../core/types'
 import { useEditorStore } from '../store/EditorProvider'
@@ -25,6 +26,7 @@ type Phase = 'config' | 'running' | 'done' | 'error'
 /** 导出阶段的中文名（进度条上方一行小字）。 */
 const STAGE_LABELS: Record<ExportStage, string> = {
   'loading-core': '正在加载 FFmpeg 核心',
+  'rendering-animations': '正在渲染动画片段',
   'writing-inputs': '正在写入素材',
   rendering: '正在编码',
   finalizing: '正在收尾',
@@ -123,6 +125,7 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
     }
     return total
   }, [project.clips, project.overlayTracks, project.audioTracks, assets, source])
+  const animationHint = animationPerformanceHint(project, project.exportQuality.fps)
   const memoryWarning = exportAssetBytes > MEMORY_WARN_BYTES
 
   /** 「关闭 / Esc / 点遮罩」的统一入口：导出中先取消，其余情况直接关闭。 */
@@ -317,6 +320,13 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
             <Icon name="close" size={17} />
           </button>
         </header>
+
+        {animationHint && (
+          <div className="export-warning export-animation-warning" role="status">
+            <Icon name="warning" size={16} />
+            <span>{animationHint}</span>
+          </div>
+        )}
 
         {memoryWarning && (
           <div className="export-warning export-memory-warning" role="status">

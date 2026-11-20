@@ -5727,3 +5727,84 @@
 .media-search {
   box-sizing: border-box;
 }
+
+/* ===== 关键帧：时间轴刻度 ===== */
+.clip-keyframe-row {
+  position: absolute;
+  right: 0;
+  bottom: 6px;
+  left: 0;
+  height: 6px;
+  pointer-events: none;
+}
+
+.clip-keyframe-tick {
+  position: absolute;
+  top: 0;
+  width: 6px;
+  height: 6px;
+  margin-left: -3px;
+  border: 1px solid rgba(20, 18, 15, 0.55);
+  background: #fdfaf3;
+  transform: rotate(45deg);
+  border-radius: 1px;
+}
+
+/* ===== 关键帧：属性行菱形按钮 ===== */
+.keyframe-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.keyframe-row > .control-with-field,
+.keyframe-row > label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.keyframe-button {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--fc-faint);
+  cursor: pointer;
+}
+
+.keyframe-button:hover {
+  color: var(--fc-accent-deep);
+}
+
+.keyframe-diamond {
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid currentColor;
+  border-radius: 1px;
+  transform: rotate(45deg);
+}
+
+.keyframe-button.is-any .keyframe-diamond {
+  background: linear-gradient(90deg, currentColor 50%, transparent 50%);
+}
+
+.keyframe-button.is-at .keyframe-diamond {
+  background: currentColor;
+}
+
+.keyframe-button.is-any,
+.keyframe-button.is-at {
+  color: var(--fc-accent-deep);
+}
+
+.keyframe-count {
+  flex: none;
+  color: var(--fc-muted);
+  font-size: var(--fc-text-xs);
+  white-space: nowrap;
+}

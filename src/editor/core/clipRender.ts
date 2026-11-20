@@ -2,7 +2,7 @@ import { clipBlendMode, clipOpacity } from './blend'
 import { canvasCompositeOperation } from './blend'
 import { clipColor, cssColorFilter, isNeutralColor, temperatureTint } from './color'
 import { computeClipGeometry } from './geometry'
-import type { Clip, MediaAsset, Point } from './types'
+import type { Clip, Point, SourceInfo } from './types'
 
 /** 逐帧渲染单个片段时可被关键帧覆盖的属性。 */
 export interface ClipRenderOverrides {
@@ -17,7 +17,7 @@ export interface ClipRenderInput {
   clip: Clip
   /** 该片段在时间线上的本地时间（秒，从片段起点算）。 */
   localTime: number
-  asset: MediaAsset | undefined
+  asset: SourceInfo | undefined
   /** 画布像素尺寸（已含 DPR）。 */
   canvasW: number
   canvasH: number

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { hasTransitionPair, normalizeTransitionType, transitionLabel } from '../core/transition'
+import { animationFrameTimes } from '../core/keyframes'
 import { clipSpeedValue } from '../core/speed'
 import { idsInRect, type SelectableSpan } from '../core/selection'
 import type {
@@ -1541,6 +1542,17 @@ export function Timeline({ onPickFile }: TimelineProps) {
                               <Icon name="freeze" size={12} />
                             </span>
                           )}
+                          {(() => {
+                            const frames = animationFrameTimes(clip)
+                            if (frames.length === 0) return null
+                            return (
+                              <span className="clip-keyframe-row" aria-hidden="true">
+                                {frames.map((fraction) => (
+                                  <span key={fraction} className="clip-keyframe-tick" style={{ left: fraction * 100 + '%' }} />
+                                ))}
+                              </span>
+                            )
+                          })()}
                           <span className="clip-copy">
                             <span className="clip-kind">叠加</span>
                             {clipSpeedValue(clip) !== 1 && (
