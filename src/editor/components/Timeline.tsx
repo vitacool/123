@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { hasTransitionPair, normalizeTransitionType, transitionLabel } from '../core/transition'
 import { keyframeAt, type KeyframeRef } from '../core/keyframeEdit'
+import { findAnimationTarget } from '../core/animationTargets'
 import { ClipKeyframeBand } from './ClipKeyframeBand'
 import { EasingPopover } from './EasingPopover'
 import type { Easing } from '../core/types'
@@ -140,18 +141,18 @@ export function Timeline({ onPickFile }: TimelineProps) {
 
   /** 关键帧拖动/提示用的吸附候选：播放头 + 片段两端（与片段拖动同一阈值 12px）。 */
   const keyframeSnapCandidates = (clipId: string) => {
-    const location = findClipLocation(project, clipId)
-    if (!location) return [] as { time: number; label: string }[]
+    const target = findAnimationTarget(project, clipId)
+    if (!target) return [] as { time: number; label: string }[]
     return [
       { time: playhead, label: '播放头' },
-      { time: location.segment.start, label: '片段起点' },
-      { time: location.segment.end, label: '片段终点' },
+      { time: target.start, label: '片段起点' },
+      { time: target.start + target.duration, label: '片段终点' },
     ]
   }
 
   /** 选中关键帧共有的缓动；不一致时返回 null（浮层不高亮任何项）。 */
   const commonEasing = (target: { clipId: string; refs: KeyframeRef[] }): Easing | null => {
-    const location = findClipLocation(project, target.clipId)
+    const location = findAnimationTarget(project, target.clipId)
     if (!location) return null
     const eases = target.refs
       .map((ref) => keyframeAt(location.clip.anim, ref.prop, ref.t)?.ease ?? null)
@@ -1938,6 +1939,17 @@ export function Timeline({ onPickFile }: TimelineProps) {
           <AudioTracks
             pps={pps}
             onClipContextMenu={(event, clipId) => openClipMenu(event, 'audio', clipId)}
+            keySelection={keySelection}
+            onSelectKeyframes={selectKeyframes}
+            onCommitKeyframeMove={commitKeyframeMove}
+            onRequestKeyframeEasing={(clipId, refs, x, y) =>
+              setEasingPopover({ x, y, clipId, refs })
+            }
+            onRequestKeyframeMenu={(clipId, refs, x, y) =>
+              setKeyMenu({ x, y, clipId, refs })
+            }
+            keyframeSnapCandidates={keyframeSnapCandidates}
+            autoSnap={timelineSettings.autoSnap}
           />
 
           <TextTracks

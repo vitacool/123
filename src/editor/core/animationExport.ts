@@ -1,6 +1,6 @@
 import { clipTimelineDuration } from './clipTime'
 import { getTimeline } from './timeline'
-import { hasAnimation } from './animation'
+import { hasVisualAnimation } from './animation'
 import type { Clip, Project } from './types'
 
 export interface AnimatedClipRef {
@@ -12,17 +12,17 @@ export interface AnimatedClipRef {
   start: number
 }
 
-/** 工程里所有带动画的片段（主轨在前，叠加轨按轨道顺序）。 */
+/** 工程里所有带视觉动画的片段（主轨在前，叠加轨按轨道顺序）。 */
 export function animatedClips(project: Project): AnimatedClipRef[] {
   const list: AnimatedClipRef[] = []
   for (const segment of getTimeline(project.clips)) {
-    if (hasAnimation(segment.clip)) {
+    if (hasVisualAnimation(segment.clip)) {
       list.push({ clip: segment.clip, trackId: null, index: segment.index, start: segment.start })
     }
   }
   for (const track of project.overlayTracks ?? []) {
     for (const segment of getTimeline(track.clips)) {
-      if (hasAnimation(segment.clip)) {
+      if (hasVisualAnimation(segment.clip)) {
         list.push({ clip: segment.clip, trackId: track.id, index: segment.index, start: segment.start })
       }
     }
@@ -30,7 +30,10 @@ export function animatedClips(project: Project): AnimatedClipRef[] {
   return list
 }
 
-/** 是否有任何动画片段（没有就走原来的导出路径，零额外开销）。 */
+/**
+ * 是否有任何需要逐帧烘焙画面的动画片段。
+ * 音量关键帧不触发视觉烘焙（否则会平白多一次 H.264 重编码，还会丢失音频动画）。
+ */
 export function hasAnyAnimation(project: Project): boolean {
   return animatedClips(project).length > 0
 }
@@ -91,6 +94,7 @@ export function bakeAnimatedClip(clip: Clip, sourceUrl: string, duration: number
     blendMode: 'normal',
     background: undefined,
     color: undefined,
-    anim: undefined,
+    // 视觉动画已烘进画面；音量关键帧仍必须留给 exportPlan 的音频链使用。
+    anim: clip.anim?.volume?.length ? { volume: clip.anim.volume } : undefined,
   }
 }

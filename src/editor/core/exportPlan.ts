@@ -1,4 +1,6 @@
 import { getOutputDimensions } from './aspect'
+import { buildVolumeExpression, maxVolumeKeyValue } from './animationExpr'
+import { hasVolumeAnimation } from './animation'
 import { clipFadeIn, clipFadeOut, clipVolume } from './clipAudio'
 import {
   backgroundBlurPx,
@@ -362,8 +364,19 @@ function audioChain(clip: Clip, sourceLabel: string | null): string {
     'asetpts=PTS-STARTPTS',
     ...speedFilters,
   ]
-  // 片段增益与淡入淡出：与预览共用同一套包络（clipGainAt）。
-  if (gain !== 1) parts.push(`volume=${num(gain)}`)
+  // 音量关键帧的 `t` 以片段本地时间为基准。这里 volume 位于 atrim/asetpts 与
+  // 变速滤镜**之后**、afade 之前：
+  // - atrim/asetpts 把时间轴重新从 0 开始；
+  // - atempo 只改变内容速度，不改变「片段本地时间」语义（输出时长 = 时间轴时长）；
+  // - 因此 `t` 正好是 0…clipTimelineDuration 的本地时间，不需要减任何 offset。
+  // 音量曲线必须在变速之后，否则曲线会被 atempo 的时间缩放拉偏。
+  if (hasVolumeAnimation(clip)) {
+    const expression = buildVolumeExpression(clip.anim!.volume!, duration)
+    if (expression) parts.push(`volume='${expression}':eval=frame`)
+  } else if (gain !== 1) {
+    parts.push(`volume=${num(gain)}`)
+  }
+  // 淡入淡出始终叠加在音量曲线上：先 volume（含关键帧），再 afade。
   if (fadeIn > 0.001) parts.push(`afade=t=in:st=0:d=${num(fadeIn)}`)
   if (fadeOut > 0.001) {
     parts.push(`afade=t=out:st=${num(Math.max(0, duration - fadeOut))}:d=${num(fadeOut)}`)
@@ -935,7 +948,13 @@ function applyAudioTracks(
       const duration = audioClipDuration(clip)
       if (duration <= 0.02) continue
       const gain = track.volume * clip.volume
-      if (gain <= 0.0001) continue
+      const volumeKeys = clip.anim?.volume
+      if (volumeKeys && volumeKeys.length > 0) {
+        // 全部关键帧为 0 时整段无声，直接跳过分支即可。
+        if (track.volume * maxVolumeKeyValue(volumeKeys) <= 0.0001) continue
+      } else if (gain <= 0.0001) {
+        continue
+      }
       const source = resolveSource(clip.sourceUrl)
       if (!source) continue
       const input = ensureAudioInput(source)
@@ -949,8 +968,18 @@ function applyAudioTracks(
       const filters = [
         `[${input}:a]atrim=start=${num(start)}:end=${num(end)}`,
         'asetpts=PTS-STARTPTS',
-        `volume=${num(gain)}`,
       ]
+      if (volumeKeys && volumeKeys.length > 0) {
+        // volume 在 adelay 之前：t 从 atrim 后的 0 开始，是片段本地时间；
+        // 轨道 gain 乘进表达式，因为这条分支没有第二次 volume 滤镜。
+        const expression = buildVolumeExpression(volumeKeys, duration, {
+          scale: track.volume,
+        })
+        if (expression) filters.push(`volume='${expression}':eval=frame`)
+      } else {
+        filters.push(`volume=${num(gain)}`)
+      }
+      // 淡入淡出在音量曲线之后叠加（顺序不可反）。
       if (clip.fadeIn > 0.001) {
         filters.push(`afade=t=in:st=0:d=${num(Math.min(clip.fadeIn, duration))}`)
       }
@@ -978,7 +1007,12 @@ function applyAudioTracks(
       if (clip.type === 'freeze') continue
       const duration = clamp(clipTimelineDuration(clip), 0.02, 3600)
       const gain = clipVolume(clip)
-      if (gain <= 0.0001) continue
+      const volumeKeys = clip.anim?.volume
+      if (volumeKeys && volumeKeys.length > 0) {
+        if (maxVolumeKeyValue(volumeKeys) <= 0.0001) continue
+      } else if (gain <= 0.0001) {
+        continue
+      }
       const source = resolveSource(clip.sourceUrl)
       if (!source) continue
       const input = ensureAudioInput(source)
@@ -992,8 +1026,15 @@ function applyAudioTracks(
       const filters = [
         `[${input}:a]atrim=start=${num(start)}:end=${num(end)}`,
         'asetpts=PTS-STARTPTS',
-        `volume=${num(gain)}`,
       ]
+      if (volumeKeys && volumeKeys.length > 0) {
+        // 同样在 adelay 之前，t = 片段本地时间；叠加轨没有轨道级增益。
+        const expression = buildVolumeExpression(volumeKeys, duration)
+        if (expression) filters.push(`volume='${expression}':eval=frame`)
+      } else {
+        filters.push(`volume=${num(gain)}`)
+      }
+      // 音量曲线在前，淡入淡出在后。
       const fadeIn = clipFadeIn(clip)
       const fadeOut = clipFadeOut(clip)
       if (fadeIn > 0.001) filters.push(`afade=t=in:st=0:d=${num(Math.min(fadeIn, duration))}`)

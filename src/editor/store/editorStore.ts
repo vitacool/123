@@ -113,7 +113,9 @@ import {
 import { isSameColor, normalizeColor, type ColorAdjustments } from '../core/color'
 import { isAssetReferenced, unusedAssets } from '../core/assets'
 import { captureCoverFrame, coverTargetSize, readCoverImage } from '../core/cover'
-import { moveKeyframesInProject, propertyValueAt } from '../core/keyframes'
+import { animationContextAt, moveKeyframesInProject } from '../core/keyframes'
+import { animationBaseValue, isPropertyAnimatizable } from '../core/animationTargets'
+import { evalAnimation } from '../core/animation'
 import type { KeyframeRef } from '../core/keyframeEdit'
 import { deleteMediaBlob } from '../services/draftStore'
 import {
@@ -205,6 +207,7 @@ import type {
   CoverMode,
   CropRect,
   ExportQuality,
+  Keyframe,
   Marker,
   MediaAsset,
   Project,
@@ -2193,13 +2196,15 @@ export function createEditorStore() {
         const state = get()
         const clipId = state.selectedClipId
         if (!clipId) return
-        const location = findClipLocation(state.project, clipId)
-        if (!location) return
-        const duration = location.segment.duration
-        const local = Math.max(0, state.playhead - location.segment.start)
-        const t = duration > 0 ? Math.min(1, local / duration) : 0
-        const clip = location.clip
-        const keys = clip.anim?.[prop] ?? []
+        const context = animationContextAt(state.project, clipId, state.playhead)
+        if (!context) return
+        const { target, t } = context
+        if (!isPropertyAnimatizable(target, prop)) {
+          state.notify('该属性不支持关键帧', 'warning')
+          return
+        }
+        const clip = target.clip
+        const keys = (clip.anim?.[prop] ?? []) as Keyframe[]
         const exists = keys.some((key) => Math.abs(key.t - t) <= 1e-4)
         if (exists) {
           if (run(createRemoveKeyframeCommand(clip.id, prop, t))) {
@@ -2207,7 +2212,7 @@ export function createEditorStore() {
           }
           return
         }
-        const value = propertyValueAt(clip, prop, t)
+        const value = evalAnimation(keys, t, animationBaseValue(target, prop))
         if (run(createSetKeyframeCommand(clip.id, prop, t, value))) {
           get().notify('已添加关键帧', 'success')
         }
@@ -2217,10 +2222,23 @@ export function createEditorStore() {
         const state = get()
         const clipId = state.selectedClipId
         if (!clipId) return
-        const location = findClipLocation(state.project, clipId)
-        if (!location) return
-        const clip = location.clip
+        const context = animationContextAt(state.project, clipId, state.playhead)
+        if (!context) return
+        const { target, t } = context
+        if (!isPropertyAnimatizable(target, prop)) return
+        const clip = target.clip
         const applyBase = () => {
+          if (target.kind === 'audio') {
+            if (target.trackId) {
+              state.updateAudioClip(
+                target.trackId,
+                target.clipId,
+                { volume: value },
+                '调整音频音量',
+              )
+            }
+            return
+          }
           switch (prop) {
             case 'scale':
               state.setScale(value)
@@ -2232,22 +2250,22 @@ export function createEditorStore() {
               state.setClipOpacity(clip.id, value)
               return
             case 'position.x':
-              state.setPosition(value, clip.position.y)
+              state.setPosition(value, (clip as Clip).position.y)
               return
             case 'position.y':
-              state.setPosition(clip.position.x, value)
+              state.setPosition((clip as Clip).position.x, value)
+              return
+            case 'volume':
+              state.setClipAudio(clip.id, { volume: value }, '调整片段音量')
               return
             default:
           }
         }
-        const keys = clip.anim?.[prop]
-        if (!keys || keys.length === 0) {
+        const keys = (clip.anim?.[prop] ?? []) as Keyframe[]
+        if (keys.length === 0) {
           applyBase()
           return
         }
-        const duration = location.segment.duration
-        const local = Math.max(0, state.playhead - location.segment.start)
-        const t = duration > 0 ? Math.min(1, local / duration) : 0
         const atKey = keys.some((key) => Math.abs(key.t - t) <= 1e-4)
         if (atKey) {
           if (run(createSetKeyframeCommand(clip.id, prop, t, value))) {

@@ -163,6 +163,11 @@ export interface AudioClip {
   volume: number
   fadeIn: number
   fadeOut: number
+  /**
+   * 音量关键帧；缺省表示静态音量（旧草稿无此字段）。
+   * 本期只允许 `volume`，时间基准是该音频片段的本地归一化时间 0…1。
+   */
+  anim?: AnimationMap
 }
 
 export interface AudioTrack {
@@ -344,6 +349,8 @@ export type AnimatableProperty =
   | 'scale'
   | 'rotation'
   | 'opacity'
+  /** 音频增益 0…2；Clip（视频片段自身音轨）与 AudioClip 共用。 */
+  | 'volume'
 
 /** 关键帧缓动。 */
 export type Easing = 'linear' | 'easeIn' | 'easeOut' | 'easeInOut' | 'hold'

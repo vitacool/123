@@ -1,8 +1,11 @@
+import { hasVolumeAnimation } from '../core/animation'
 import { clipFadeIn, clipFadeOut, clipVolume } from '../core/clipAudio'
 import { clipTimelineDuration } from '../core/clipTime'
 import type { Clip } from '../core/types'
+import { useEditorStore } from '../store/EditorProvider'
 import { CommitNumber } from './Toast'
 import { CommitSlider } from './CommitSlider'
+import { KeyframeButton } from './KeyframeButton'
 
 interface ClipAudioSectionProps {
   clip: Clip
@@ -32,6 +35,9 @@ export function ClipAudioSection({
   const duration = clipTimelineDuration(clip)
   const maxFade = Math.max(0, Math.round(Math.min(duration, 10) * 10) / 10)
   const volumePercent = Math.round(clipVolume(clip) * 100)
+  const setAnimatableValue = useEditorStore((state) => state.setAnimatableValue)
+  const hasVolumeCurve = hasVolumeAnimation(clip)
+  const fadeEnabled = clipFadeIn(clip) > 0.001 || clipFadeOut(clip) > 0.001
 
   return (
     <>
@@ -50,7 +56,7 @@ export function ClipAudioSection({
             step={1}
             ariaLabel="片段音量"
             onPreview={(value) => onPreview?.({ volume: value / 100 })}
-            onCommit={(value) => onCommit({ volume: value / 100 }, '调整片段音量')}
+            onCommit={(value) => setAnimatableValue('volume', value / 100)}
             format={(value) => `${Math.round(value)}%`}
           />
           <CommitNumber
@@ -61,9 +67,15 @@ export function ClipAudioSection({
             unit="%"
             ariaLabel="片段音量百分比"
             onPreview={(value) => onPreview?.({ volume: value / 100 })}
-            onCommit={(value) => onCommit({ volume: value / 100 }, '调整片段音量')}
+            onCommit={(value) => setAnimatableValue('volume', value / 100)}
           />
+          <KeyframeButton prop="volume" clip={clip} />
         </div>
+        {hasVolumeCurve && fadeEnabled && (
+          <p className="control-note keyframe-fade-warning">
+            淡入淡出会叠加在音量曲线上
+          </p>
+        )}
       </section>
 
       <section className={`panel-section${bare ? ' is-bare' : ''}`}>

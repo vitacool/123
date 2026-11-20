@@ -7,6 +7,7 @@ export const ANIMATABLE_LABELS: Record<AnimatableProperty, string> = {
   scale: '缩放',
   rotation: '旋转',
   opacity: '不透明度',
+  volume: '音量',
 }
 
 /** 把一组属性名连成「位置X、不透明度」。 */

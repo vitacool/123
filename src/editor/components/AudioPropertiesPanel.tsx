@@ -1,4 +1,5 @@
 import { FREEZE_MAX_DURATION } from '../core/constants'
+import { hasVolumeAnimation } from '../core/animation'
 import { audioClipDuration, getAudioActionAvailability } from '../core/audio'
 import { formatClock } from '../core/format'
 import type { AudioClip, AudioTrack } from '../core/types'
@@ -6,6 +7,7 @@ import { useEditorStore } from '../store/EditorProvider'
 import { CommitNumber } from './Toast'
 import { CommitSlider } from './CommitSlider'
 import { Icon } from './Icon'
+import { KeyframeButton } from './KeyframeButton'
 
 interface AudioPropertiesPanelProps {
   track: AudioTrack
@@ -20,6 +22,7 @@ export function AudioPropertiesPanel({ track, clip }: AudioPropertiesPanelProps)
   const trimLeftAtPlayhead = useEditorStore((state) => state.trimLeftAtPlayhead)
   const trimRightAtPlayhead = useEditorStore((state) => state.trimRightAtPlayhead)
   const updateAudioClip = useEditorStore((state) => state.updateAudioClip)
+  const setAnimatableValue = useEditorStore((state) => state.setAnimatableValue)
   const setAudioTrackVolume = useEditorStore((state) => state.setAudioTrackVolume)
   const deleteAudioClip = useEditorStore((state) => state.deleteAudioClip)
   const selectClip = useEditorStore((state) => state.selectClip)
@@ -29,6 +32,8 @@ export function AudioPropertiesPanel({ track, clip }: AudioPropertiesPanelProps)
   const duration = audioClipDuration(clip)
   const availability = getAudioActionAvailability(project, clip.id, playhead)
   const maxFade = Math.max(0.1, Math.min(FREEZE_MAX_DURATION, duration))
+  const hasVolumeCurve = hasVolumeAnimation(clip)
+  const fadeEnabled = clip.fadeIn > 0.001 || clip.fadeOut > 0.001
   const commit = (update: Partial<Omit<AudioClip, 'id'>>, label: string) => {
     updateAudioClip(track.id, clip.id, update, label)
   }
@@ -135,7 +140,7 @@ export function AudioPropertiesPanel({ track, clip }: AudioPropertiesPanelProps)
               onPreview={(value) =>
                 setPreviewPatch({ clipId: clip.id, patch: { volume: value / 100 } })
               }
-              onCommit={(value) => commit({ volume: value / 100 }, '调整音频音量')}
+              onCommit={(value) => setAnimatableValue('volume', value / 100)}
               format={(value) => `${Math.round(value)}%`}
             />
             <CommitNumber
@@ -148,9 +153,15 @@ export function AudioPropertiesPanel({ track, clip }: AudioPropertiesPanelProps)
               onPreview={(value) =>
                 setPreviewPatch({ clipId: clip.id, patch: { volume: value / 100 } })
               }
-              onCommit={(value) => commit({ volume: value / 100 }, '调整音频音量')}
+              onCommit={(value) => setAnimatableValue('volume', value / 100)}
             />
+            <KeyframeButton prop="volume" clip={clip} />
           </div>
+          {hasVolumeCurve && fadeEnabled && (
+            <p className="control-note keyframe-fade-warning">
+              淡入淡出会叠加在音量曲线上
+            </p>
+          )}
         </section>
 
         <section className="panel-section">

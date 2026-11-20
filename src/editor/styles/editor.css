@@ -5736,6 +5736,10 @@
   gap: 6px;
 }
 
+.keyframe-fade-warning {
+  color: var(--fc-accent-deep);
+}
+
 .keyframe-row > .control-with-field,
 .keyframe-row > label {
   flex: 1 1 auto;

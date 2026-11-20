@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { audioClipDuration } from '../core/audio'
+import type { KeyframeRef } from '../core/keyframeEdit'
 import { isAudioLocked } from '../core/tracks'
 import { clamp } from '../core/timeline'
 import type { AudioClip, AudioTrack } from '../core/types'
 import { useEditorStore, useEditorStoreApi } from '../store/EditorProvider'
+import { ClipKeyframeBand, type SnapCandidate } from './ClipKeyframeBand'
 import { Icon } from './Icon'
 import { CommitSlider } from './CommitSlider'
 import { AudioWaveform } from './AudioWaveform'
@@ -95,10 +97,35 @@ function AudioTrackHead({ track }: { track: AudioTrack }) {
 export function AudioTracks({
   pps,
   onClipContextMenu,
+  keySelection,
+  onSelectKeyframes,
+  onCommitKeyframeMove,
+  onRequestKeyframeEasing,
+  onRequestKeyframeMenu,
+  keyframeSnapCandidates,
+  autoSnap,
 }: {
   pps: number
   /** 右键片段：由 Timeline 统一弹菜单（这里只上报目标）。 */
   onClipContextMenu?: (event: ReactMouseEvent<HTMLElement>, clipId: string) => void
+  /** 复用主轨/叠加轨的 ClipKeyframeBand 交互与选中状态。 */
+  keySelection?: { clipId: string; refs: KeyframeRef[] } | null
+  onSelectKeyframes?: (clipId: string, refs: KeyframeRef[], additive: boolean) => void
+  onCommitKeyframeMove?: (clipId: string, refs: KeyframeRef[], deltaT: number) => void
+  onRequestKeyframeEasing?: (
+    clipId: string,
+    refs: KeyframeRef[],
+    x: number,
+    y: number,
+  ) => void
+  onRequestKeyframeMenu?: (
+    clipId: string,
+    refs: KeyframeRef[],
+    x: number,
+    y: number,
+  ) => void
+  keyframeSnapCandidates?: (clipId: string) => readonly SnapCandidate[]
+  autoSnap?: boolean
 }) {
   const store = useEditorStoreApi()
   const audioTracks = useEditorStore((state) => state.project.audioTracks)
@@ -307,6 +334,27 @@ export function AudioTracks({
                     {width > 90 && (asset?.name ?? '音频')}
                   </span>
                   <span className="audio-clip-duration">{duration.toFixed(1)}s</span>
+                  <ClipKeyframeBand
+                    clip={clip}
+                    clipStart={start}
+                    duration={visibleDuration}
+                    pps={pps}
+                    selected={keySelection?.clipId === clip.id ? keySelection.refs : []}
+                    snapCandidates={keyframeSnapCandidates?.(clip.id) ?? []}
+                    autoSnap={autoSnap ?? false}
+                    onSelect={(refs, additive) =>
+                      onSelectKeyframes?.(clip.id, refs, additive)
+                    }
+                    onCommitMove={(refs, deltaT) =>
+                      onCommitKeyframeMove?.(clip.id, refs, deltaT)
+                    }
+                    onRequestEasing={(refs, x, y) =>
+                      onRequestKeyframeEasing?.(clip.id, refs, x, y)
+                    }
+                    onRequestMenu={(refs, x, y) =>
+                      onRequestKeyframeMenu?.(clip.id, refs, x, y)
+                    }
+                  />
                   <span
                     className="clip-trim-handle is-left"
                     role="separator"

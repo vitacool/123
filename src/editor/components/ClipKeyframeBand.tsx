@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react'
 import { keyframeUnion, refsAtTime, clampGroupDrag, type KeyframeRef } from '../core/keyframeEdit'
 import { labelList } from './keyframeLabels'
-import type { Clip } from '../core/types'
+import type { AnimationMap } from '../core/types'
 
 export interface SnapCandidate {
   time: number
@@ -9,7 +9,7 @@ export interface SnapCandidate {
 }
 
 export interface ClipKeyframeBandProps {
-  clip: Clip
+  clip: { id: string; anim?: AnimationMap }
   /** 片段在时间线上的起点（秒）与时长（秒）。 */
   clipStart: number
   duration: number

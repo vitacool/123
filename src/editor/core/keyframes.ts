@@ -1,6 +1,15 @@
 import { clamp } from './timeline'
 import { evalAnimation } from './animation'
 import { clipOpacity } from './blend'
+import { clipVolume } from './clipAudio'
+import {
+  animationTimeAt,
+  findAnimationTarget,
+  isPropertyAnimatizable,
+  replaceAnimationTarget,
+  sanitizeTargetAnimation,
+  type AnimationTarget,
+} from './animationTargets'
 import {
   KEYFRAME_MIN_GAP,
   clampGroupDrag,
@@ -11,7 +20,17 @@ import {
   setEasingOnKeyframes,
   type KeyframeRef,
 } from './keyframeEdit'
-import type { AnimatableProperty, AnimationMap, Clip, Easing, Keyframe, Project } from './types'
+import type {
+  AnimatableProperty,
+  AnimationMap,
+  AudioClip,
+  Clip,
+  Easing,
+  Keyframe,
+  Project,
+} from './types'
+
+type AnimatableClip = Clip | AudioClip
 
 /** 属性对应的片段基础值（新增关键帧时默认取当前生效值）。 */
 export function propertyBaseValue(clip: Clip, prop: AnimatableProperty): number {
@@ -24,6 +43,8 @@ export function propertyBaseValue(clip: Clip, prop: AnimatableProperty): number 
       return clip.scale
     case 'rotation':
       return clip.rotation
+    case 'volume':
+      return clipVolume(clip)
     case 'opacity':
     default:
       return clipOpacity(clip)
@@ -42,17 +63,17 @@ const sameTime = (a: number, b: number): boolean => Math.abs(a - b) <= TIME_EPSI
 
 /** 用新的关键帧列表替换某个属性的动画；空列表时移除该属性。 */
 function withPropertyKeys(
-  clip: Clip,
+  clip: AnimatableClip,
   prop: AnimatableProperty,
   keys: Keyframe[],
-): Clip {
-  const anim = { ...(clip.anim ?? {}) }
+): AnimatableClip {
+  const anim: AnimationMap = { ...(clip.anim ?? {}) }
   if (keys.length === 0) delete anim[prop]
   else anim[prop] = keys
   const hasAny = Object.keys(anim).length > 0
   if (!hasAny) {
     const { anim: _omit, ...rest } = clip
-    return rest as Clip
+    return rest as AnimatableClip
   }
   return { ...clip, anim }
 }
@@ -66,9 +87,9 @@ export function setKeyframeInProject(
   value: number,
   ease: Easing = 'linear',
 ): Project | null {
-  const location = findClipAnywhere(project, clipId)
-  if (!location) return null
-  const clip = location.clip
+  const target = findAnimationTarget(project, clipId)
+  if (!target || !isPropertyAnimatizable(target, prop)) return null
+  const clip = target.clip
   const time = clamp(t, 0, 1)
   const keys = [...(clip.anim?.[prop] ?? [])]
   const index = keys.findIndex((key) => sameTime(key.t, time))
@@ -77,7 +98,7 @@ export function setKeyframeInProject(
   else keys.push(next)
   keys.sort((a, b) => a.t - b.t)
   const updated = withPropertyKeys(clip, prop, keys)
-  return replaceClip(project, location, updated)
+  return replaceAnimationTarget(project, target, updated)
 }
 
 /** 删除某个时间点的关键帧。 */
@@ -87,50 +108,19 @@ export function removeKeyframeInProject(
   prop: AnimatableProperty,
   t: number,
 ): Project | null {
-  const location = findClipAnywhere(project, clipId)
-  if (!location) return null
-  const clip = location.clip
+  const target = findAnimationTarget(project, clipId)
+  if (!target) return null
+  const clip = target.clip
   const keys = clip.anim?.[prop] ?? []
   const time = clamp(t, 0, 1)
   const next = keys.filter((key) => !sameTime(key.t, time))
   if (next.length === keys.length) return null
   const updated = withPropertyKeys(clip, prop, next)
-  return replaceClip(project, location, updated)
+  return replaceAnimationTarget(project, target, updated)
 }
 
-interface ClipLocation {
-  clip: Clip
-  trackId: string | null
-}
-
-function findClipAnywhere(project: Project, clipId: string): ClipLocation | null {
-  const main = project.clips.find((clip) => clip.id === clipId)
-  if (main) return { clip: main, trackId: null }
-  for (const track of project.overlayTracks ?? []) {
-    const clip = track.clips.find((item) => item.id === clipId)
-    if (clip) return { clip, trackId: track.id }
-  }
-  return null
-}
-
-function replaceClip(project: Project, location: ClipLocation, updated: Clip): Project {
-  if (location.trackId === null) {
-    return {
-      ...project,
-      clips: project.clips.map((clip) => (clip.id === updated.id ? updated : clip)),
-    }
-  }
-  return {
-    ...project,
-    overlayTracks: (project.overlayTracks ?? []).map((track) =>
-      track.id === location.trackId
-        ? { ...track, clips: track.clips.map((clip) => (clip.id === updated.id ? updated : clip)) }
-        : track,
-    ),
-  }
-}
 /** 片段所有属性上的关键帧时间点（去重排序），用于时间轴刻度。 */
-export function animationFrameTimes(clip: Pick<Clip, 'anim'>): number[] {
+export function animationFrameTimes(clip: { anim?: AnimationMap }): number[] {
   const anim = clip.anim
   if (!anim) return []
   const times = new Set<number>()
@@ -147,15 +137,15 @@ export function moveKeyframesInProject(
   selected: readonly KeyframeRef[],
   delta: number,
 ): Project | null {
-  const location = findClipAnywhere(project, clipId)
-  if (!location || !location.clip.anim) return null
-  const clamped = clampGroupDrag(location.clip.anim, selected, delta)
+  const target = findAnimationTarget(project, clipId)
+  if (!target || !target.clip.anim) return null
+  const clamped = clampGroupDrag(target.clip.anim, selected, delta)
   if (Math.abs(clamped) < 1e-9) return null
-  const moved = moveKeyframes(location.clip.anim, selected, clamped)
+  const moved = moveKeyframes(target.clip.anim, selected, clamped)
   if (!moved) return null
   if (findDuplicateProperty(moved)) return null
-  const updated = withAnimValue(location.clip, moved)
-  return replaceClip(project, location, updated)
+  const updated = withAnimValue(target.clip, moved)
+  return replaceAnimationTarget(project, target, updated)
 }
 
 /** 批量设置选中关键帧的缓动。 */
@@ -165,17 +155,17 @@ export function setKeyframeEasingInProject(
   selected: readonly KeyframeRef[],
   ease: Easing,
 ): Project | null {
-  const location = findClipAnywhere(project, clipId)
-  if (!location || !location.clip.anim) return null
-  const next = setEasingOnKeyframes(location.clip.anim, selected, ease)
+  const target = findAnimationTarget(project, clipId)
+  if (!target || !target.clip.anim) return null
+  const next = setEasingOnKeyframes(target.clip.anim, selected, ease)
   if (!next) return null
   let changed = false
   for (const ref of selected) {
-    const before = keyframeAt(location.clip.anim, ref.prop, ref.t)
+    const before = keyframeAt(target.clip.anim, ref.prop, ref.t)
     if (before && before.ease !== ease) changed = true
   }
   if (!changed) return null
-  return replaceClip(project, location, withAnimValue(location.clip, next))
+  return replaceAnimationTarget(project, target, withAnimValue(target.clip, next))
 }
 
 /** 清空某个属性的全部关键帧。 */
@@ -184,18 +174,18 @@ export function clearPropertyKeyframesInProject(
   clipId: string,
   prop: AnimatableProperty,
 ): Project | null {
-  const location = findClipAnywhere(project, clipId)
-  if (!location || !location.clip.anim?.[prop]) return null
-  const next = clearPropertyKeyframes(location.clip.anim, prop)
-  return replaceClip(project, location, withAnimValue(location.clip, next))
+  const target = findAnimationTarget(project, clipId)
+  if (!target || !target.clip.anim?.[prop]) return null
+  const next = clearPropertyKeyframes(target.clip.anim, prop)
+  return replaceAnimationTarget(project, target, withAnimValue(target.clip, next))
 }
 
 /** 把 anim 写回片段；undefined 表示移除该字段。 */
-function withAnimValue(clip: Clip, anim: AnimationMap | undefined): Clip {
+function withAnimValue(clip: AnimatableClip, anim: AnimationMap | undefined): AnimatableClip {
   if (anim && Object.keys(anim).length > 0) return { ...clip, anim }
   if (!('anim' in clip)) return clip
   const { anim: _omit, ...rest } = clip
-  return rest as Clip
+  return rest as AnimatableClip
 }
 
 /** 批量删除关键帧（一次命令，1 步撤销）。 */
@@ -204,9 +194,9 @@ export function removeKeyframesInProject(
   clipId: string,
   refs: readonly KeyframeRef[],
 ): Project | null {
-  const location = findClipAnywhere(project, clipId)
-  if (!location || !location.clip.anim) return null
-  let current = location.clip
+  const target = findAnimationTarget(project, clipId)
+  if (!target || !target.clip.anim) return null
+  let current = target.clip
   let removed = 0
   for (const ref of refs) {
     const keys = current.anim?.[ref.prop]
@@ -214,8 +204,34 @@ export function removeKeyframesInProject(
     const next = keys.filter((key) => Math.abs(key.t - ref.t) >= KEYFRAME_MIN_GAP / 2)
     if (next.length === keys.length) continue
     removed += keys.length - next.length
-    current = withAnimValue(current, next.length > 0 ? { ...current.anim, [ref.prop]: next } : clearPropertyKeyframes(current.anim, ref.prop))
+    current = withAnimValue(
+      current,
+      next.length > 0
+        ? { ...current.anim, [ref.prop]: next }
+        : clearPropertyKeyframes(current.anim, ref.prop),
+    )
+    const cleaned = sanitizeTargetAnimation(target, current.anim)
+    current = withAnimValue(current, cleaned)
   }
   if (removed === 0) return null
-  return replaceClip(project, location, current)
+  return replaceAnimationTarget(project, target, current)
+}
+
+/**
+ * 目标在播放头处的归一化时间与基础值。
+ * 供 store / UI 复用，避免音频与视频各算一套时间。
+ */
+export function animationContextAt(
+  project: Project,
+  clipId: string,
+  playhead: number,
+): { target: AnimationTarget; t: number; localSeconds: number } | null {
+  const target = findAnimationTarget(project, clipId)
+  if (!target) return null
+  const localSeconds = Math.max(0, Math.min(target.duration, playhead - target.start))
+  return {
+    target,
+    t: animationTimeAt(target, playhead),
+    localSeconds,
+  }
 }

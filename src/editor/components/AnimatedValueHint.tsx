@@ -16,6 +16,8 @@ export function formatAnimatedValue(prop: AnimatableProperty, value: number): st
       return `${Math.round(value * 100)}%`
     case 'rotation':
       return `${Math.round(value)}°`
+    case 'volume':
+      return `${Math.round(value * 100)}%`
     case 'opacity':
     default:
       return `${Math.round(value * 100)}%`

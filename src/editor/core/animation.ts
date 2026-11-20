@@ -51,17 +51,37 @@ export function evalAnimation(
 }
 
 /** 该片段是否有任何关键帧。 */
-export function hasAnimation(clip: Pick<Clip, 'anim'>): boolean {
+export function hasAnimation(clip: { anim?: AnimationMap }): boolean {
   const anim = clip.anim
   if (!anim) return false
   return Object.values(anim).some((keys) => Array.isArray(keys) && keys.length > 0)
 }
 
+/** 该片段是否有需要逐帧烘焙画面的视觉动画（音量关键帧不算）。 */
+export function hasVisualAnimation(clip: { anim?: AnimationMap }): boolean {
+  const anim = clip.anim
+  if (!anim) return false
+  const visual: AnimatableProperty[] = ['position.x', 'position.y', 'scale', 'rotation', 'opacity']
+  return visual.some((prop) => (anim[prop]?.length ?? 0) > 0)
+}
+
+/** 该片段是否带音量关键帧。 */
+export function hasVolumeAnimation(clip: { anim?: AnimationMap }): boolean {
+  return (clip.anim?.volume?.length ?? 0) > 0
+}
+
 /** 该片段有哪些属性带关键帧（顺序固定，便于 UI 稳定渲染）。 */
-export function animatedProps(clip: Pick<Clip, 'anim'>): AnimatableProperty[] {
+export function animatedProps(clip: { anim?: AnimationMap }): AnimatableProperty[] {
   const anim = clip.anim
   if (!anim) return []
-  const order: AnimatableProperty[] = ['position.x', 'position.y', 'scale', 'rotation', 'opacity']
+  const order: AnimatableProperty[] = [
+    'position.x',
+    'position.y',
+    'scale',
+    'rotation',
+    'opacity',
+    'volume',
+  ]
   return order.filter((prop) => (anim[prop]?.length ?? 0) > 0)
 }
 

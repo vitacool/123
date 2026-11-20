@@ -3,7 +3,7 @@ import type { PointerEvent as ReactPointerEvent } from 'react'
 import { aspectValue } from '../core/aspect'
 import { audioClipDuration, audioFadeGain } from '../core/audio'
 import { clipFrameSourceAt } from '../core/clipTime'
-import { clipGainAt } from '../core/clipAudio'
+import { clipGainAt, clipVolumeAt } from '../core/clipAudio'
 import {
   BACKGROUND_FALLBACK,
   backgroundBlurPx,
@@ -666,7 +666,11 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
                 Math.max(
                   0,
                   effectiveTrackVolume(state, track) *
-                    effectiveClipVolume(state, clip) *
+                    clipVolumeAt(
+                      clip,
+                      Math.max(0, local),
+                      effectiveClipVolume(state, clip),
+                    ) *
                     audioFadeGain(clip, Math.max(0, local)),
                 ),
               )

@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
-import { findClipLocation } from '../core/timeline'
-import type { AnimatableProperty, Clip } from '../core/types'
+import { findAnimationTarget } from '../core/animationTargets'
+import type { AnimatableProperty, AnimationMap } from '../core/types'
 import { useEditorStore } from '../store/EditorProvider'
 
 /**
@@ -9,19 +9,27 @@ import { useEditorStore } from '../store/EditorProvider'
  * - 半实心：有关键帧但播放头处没有
  * - 实心：播放头处正好有关键帧
  * 点击在当前播放头处添加 / 删除关键帧（走命令，1 步撤销）。
+ *
+ * 只依赖 id + anim，因此视频片段、音频片段、文本片段共用同一个组件。
  */
-export function KeyframeButton({ prop, clip }: { prop: AnimatableProperty; clip: Clip }) {
+export function KeyframeButton({
+  prop,
+  clip,
+}: {
+  prop: AnimatableProperty
+  clip: { id: string; anim?: AnimationMap }
+}) {
   const project = useEditorStore((state) => state.project)
   const playhead = useEditorStore((state) => state.playhead)
   const toggleKeyframe = useEditorStore((state) => state.toggleKeyframe)
 
   const keys = clip.anim?.[prop] ?? []
   const t = useMemo(() => {
-    const location = findClipLocation(project, clip.id)
-    if (!location) return 0
-    const duration = location.segment.duration
+    const target = findAnimationTarget(project, clip.id)
+    if (!target) return 0
+    const duration = target.duration
     if (duration <= 0) return 0
-    const local = Math.max(0, playhead - location.segment.start)
+    const local = Math.max(0, playhead - target.start)
     return Math.min(1, local / duration)
   }, [project, clip.id, playhead])
 
