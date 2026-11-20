@@ -101,6 +101,8 @@ export interface Clip {
   transitionOut?: ClipTransition
   /** 片段级背景覆盖；缺省沿用工程级 canvasBackground。 */
   background?: CanvasBackground
+  /** 关键帧动画；缺省表示没有动画（旧草稿无此字段）。 */
+  anim?: AnimationMap
   /**
    * 调色参数：四项各 -100…100，缺省 0（旧草稿读取时统一归一化为 0）。
    * 预览用 Canvas filter/叠加层，导出用 FFmpeg eq/colorbalance。
@@ -335,3 +337,24 @@ export interface ActionAvailability {
   canFreeze: boolean
   hasSelection: boolean
 }
+/** 可做关键帧动画的视觉属性。 */
+export type AnimatableProperty =
+  | 'position.x'
+  | 'position.y'
+  | 'scale'
+  | 'rotation'
+  | 'opacity'
+
+/** 关键帧缓动。 */
+export type Easing = 'linear' | 'easeIn' | 'easeOut' | 'easeInOut' | 'hold'
+
+/** 单个关键帧：时间（片段本地，0…1 归一化）+ 值 + 到下一帧的缓动。 */
+export interface Keyframe {
+  /** 片段本地归一化时间 0…1（0 = 片段起点，1 = 片段终点），变速/裁剪时按比例重映射。 */
+  t: number
+  value: number
+  ease: Easing
+}
+
+/** 一个片段上的动画：按属性分组的关键帧列表。 */
+export type AnimationMap = Partial<Record<AnimatableProperty, Keyframe[]>>

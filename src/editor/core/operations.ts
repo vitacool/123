@@ -4,6 +4,12 @@ import { createId } from './ids'
 import { IMAGE_DEFAULT_DURATION, IMAGE_MAX_DURATION, IMAGE_MIN_DURATION } from './image'
 import { DEFAULT_TRACK_STATE, isMainLocked, isOverlayLocked } from './tracks'
 import {
+  baseValueOf,
+  leftTrimAnimation,
+  rightTrimAnimation,
+  splitAnimation,
+} from './animationEdit'
+import {
   clipFreezeFrame,
   clipSourceSpan,
   clipSpanSourceAt,
@@ -116,6 +122,44 @@ export function clampCrop(crop: CropRect): CropRect {
   return { x, y, w, h }
 }
 
+/** 编辑后按新时长重映射关键帧；集中走 core/animationEdit，操作里不自己算。 */
+function remapAnimAfterTrim(
+  clip: Clip,
+  edge: 'left' | 'right',
+  oldDuration: number,
+  newDuration: number,
+  delta: number,
+): Clip {
+  if (!clip.anim) return clip
+  const anim =
+    edge === 'left'
+      ? leftTrimAnimation(clip.anim, delta, oldDuration, newDuration)
+      : rightTrimAnimation(clip.anim, oldDuration, newDuration)
+  if (anim === clip.anim) return clip
+  if (!anim) {
+    const { anim: _omit, ...rest } = clip
+    return rest as Clip
+  }
+  return { ...clip, anim }
+}
+
+/** 分割后把关键帧分给左右两侧（各自补边界帧）。 */
+function remapAnimAfterSplit(
+  source: Clip,
+  fraction: number,
+): { left?: Clip['anim']; right?: Clip['anim'] } {
+  if (!source.anim) return {}
+  return splitAnimation(source.anim, fraction, baseValueOf(source))
+}
+
+/** 把 anim 写进片段；anim 为 undefined 时移除字段（避免留下空 map）。 */
+function withAnim(clip: Clip, anim: Clip['anim']): Clip {
+  if (anim && Object.keys(anim).length > 0) return { ...clip, anim }
+  if (!('anim' in clip)) return clip
+  const { anim: _omit, ...rest } = clip
+  return rest as Clip
+}
+
 export function splitProjectAt(
   project: Project,
   clipId: string,
@@ -134,14 +178,22 @@ export function splitProjectAt(
   if (offset < MIN_CLIP_DURATION || segment.duration - offset < MIN_CLIP_DURATION) return null
 
   const splitSourceTime = clipSpanSourceAt(segment.clip, offset)
-  const left: Clip = { ...segment.clip, sourceEnd: splitSourceTime }
-  const right: Clip = {
-    ...segment.clip,
-    id: rightId,
-    sourceStart: splitSourceTime,
-    sourceEnd: clipSourceSpan(segment.clip).end,
-    gapBefore: 0,
-  }
+  const fraction = segment.duration > 0 ? offset / segment.duration : 0.5
+  const splitAnim = remapAnimAfterSplit(segment.clip, fraction)
+  const left: Clip = withAnim(
+    { ...segment.clip, sourceEnd: splitSourceTime },
+    splitAnim.left,
+  )
+  const right: Clip = withAnim(
+    {
+      ...segment.clip,
+      id: rightId,
+      sourceStart: splitSourceTime,
+      sourceEnd: clipSourceSpan(segment.clip).end,
+      gapBefore: 0,
+    },
+    splitAnim.right,
+  )
   if (segment.clip.type === 'freeze') {
     const frame = clipFreezeFrame(segment.clip)
     left.freezeFrameTime = frame
@@ -167,11 +219,14 @@ export function trimProjectLeft(project: Project, clipId: string, time: number):
   if (clipSpanSourceAt(segment.clip, delta) >= clipSourceSpan(segment.clip).end - MIN_CLIP_DURATION) return null
 
   // Keep the right edge in place and leave a recoverable gap on the left.
-  const updated: Clip = {
-    ...segment.clip,
-    sourceStart: clipSpanSourceAt(segment.clip, delta),
-    gapBefore: (segment.clip.gapBefore ?? 0) + delta,
-  }
+  const updated: Clip = withAnim(
+    {
+      ...segment.clip,
+      sourceStart: clipSpanSourceAt(segment.clip, delta),
+      gapBefore: (segment.clip.gapBefore ?? 0) + delta,
+    },
+    remapAnimAfterTrim(segment.clip, 'left', segment.duration, segment.duration - delta, delta).anim,
+  )
   const clips = project.clips.map((clip) => (clip.id === clipId ? updated : clip))
   return { ...project, clips }
 }
@@ -193,7 +248,14 @@ export function trimProjectRight(project: Project, clipId: string, time: number)
   // behind a draggable right edge.
   const clips = project.clips.map((clip, index) => {
     if (clip.id === clipId) {
-      return { ...clip, sourceEnd: clipSpanSourceAt(clip, clipTimelineDuration(clip) - delta) }
+      const trimmed = {
+        ...clip,
+        sourceEnd: clipSpanSourceAt(clip, clipTimelineDuration(clip) - delta),
+      }
+      return withAnim(
+        trimmed,
+        remapAnimAfterTrim(clip, 'right', segment.duration, segment.duration - delta, delta).anim,
+      )
     }
     if (index === segment.index + 1) {
       return { ...clip, gapBefore: (clip.gapBefore ?? 0) + delta }
@@ -238,11 +300,14 @@ export function resizeClipEdge(
     const maxTrim = Math.max(0, duration - minDuration)
     const actual = clamp(delta, -maxRestore, maxTrim)
     if (Math.abs(actual) < 0.0001) return null
-    const updated: Clip = {
-      ...clip,
-      sourceStart: clipSpanSourceAt(clip, actual),
-      gapBefore: gap + actual,
-    }
+    const updated: Clip = withAnim(
+      {
+        ...clip,
+        sourceStart: clipSpanSourceAt(clip, actual),
+        gapBefore: gap + actual,
+      },
+      remapAnimAfterTrim(clip, 'left', duration, duration - actual, actual).anim,
+    )
     const clips = project.clips.map((item) => (item.id === clipId ? updated : item))
     return { ...project, clips }
   }
@@ -261,7 +326,14 @@ export function resizeClipEdge(
 
   const clips = project.clips.map((item, index) => {
     if (item.id === clipId) {
-      return { ...item, sourceEnd: clipSpanSourceAt(item, clipTimelineDuration(item) + actual) }
+      const resized = {
+        ...item,
+        sourceEnd: clipSpanSourceAt(item, clipTimelineDuration(item) + actual),
+      }
+      return withAnim(
+        resized,
+        remapAnimAfterTrim(item, 'right', duration, duration + actual, -actual).anim,
+      )
     }
     if (next && index === segment.index + 1) {
       return { ...item, gapBefore: Math.max(0, nextGap - actual) }
@@ -695,14 +767,19 @@ export function splitOverlayClipAt(
     return null
   }
   const splitSource = clipSpanSourceAt(segment.clip, offset)
-  const left: Clip = { ...segment.clip, sourceEnd: splitSource }
-  const right: Clip = {
-    ...segment.clip,
-    id: rightId,
-    sourceStart: splitSource,
-    sourceEnd: segment.clip.sourceEnd,
-    gapBefore: 0,
-  }
+  const splitFraction = segment.duration > 0 ? offset / segment.duration : 0.5
+  const overlaySplitAnim = remapAnimAfterSplit(segment.clip, splitFraction)
+  const left: Clip = withAnim({ ...segment.clip, sourceEnd: splitSource }, overlaySplitAnim.left)
+  const right: Clip = withAnim(
+    {
+      ...segment.clip,
+      id: rightId,
+      sourceStart: splitSource,
+      sourceEnd: segment.clip.sourceEnd,
+      gapBefore: 0,
+    },
+    overlaySplitAnim.right,
+  )
   if (segment.clip.type === 'freeze') {
     const frame = clipFreezeFrame(segment.clip)
     left.freezeFrameTime = frame
@@ -743,11 +820,14 @@ export function trimOverlayClipAt(
     }
     const clips = track.clips.map((clip) =>
       clip.id === clipId
-        ? {
-            ...clip,
-            sourceStart: clipSpanSourceAt(clip, delta),
-            gapBefore: (clip.gapBefore ?? 0) + delta,
-          }
+        ? withAnim(
+            {
+              ...clip,
+              sourceStart: clipSpanSourceAt(clip, delta),
+              gapBefore: (clip.gapBefore ?? 0) + delta,
+            },
+            remapAnimAfterTrim(clip, 'left', segment.duration, segment.duration - delta, delta).anim,
+          )
         : clip,
     )
     return {
@@ -762,7 +842,14 @@ export function trimOverlayClipAt(
   if (segment.duration - delta < MIN_CLIP_DURATION) return null
   const clips = track.clips.map((clip, index) => {
     if (clip.id === clipId) {
-      return { ...clip, sourceEnd: clipSpanSourceAt(clip, clipTimelineDuration(clip) - delta) }
+      const overlayTrimmed = {
+        ...clip,
+        sourceEnd: clipSpanSourceAt(clip, clipTimelineDuration(clip) - delta),
+      }
+      return withAnim(
+        overlayTrimmed,
+        remapAnimAfterTrim(clip, 'right', segment.duration, segment.duration - delta, delta).anim,
+      )
     }
     if (index === segment.index + 1) {
       return { ...clip, gapBefore: (clip.gapBefore ?? 0) + delta }
@@ -807,11 +894,14 @@ export function resizeOverlayClipEdge(
     if (Math.abs(actual) < 0.0001) return null
     const clips = track.clips.map((item) =>
       item.id === clipId
-        ? {
-            ...item,
-            sourceStart: clipSpanSourceAt(item, actual),
-            gapBefore: gap + actual,
-          }
+        ? withAnim(
+            {
+              ...item,
+              sourceStart: clipSpanSourceAt(item, actual),
+              gapBefore: gap + actual,
+            },
+            remapAnimAfterTrim(item, 'left', duration, duration - actual, actual).anim,
+          )
         : item,
     )
     return {
@@ -835,7 +925,14 @@ export function resizeOverlayClipEdge(
   if (Math.abs(actual) < 0.0001) return null
   const clips = track.clips.map((item, index) => {
     if (item.id === clipId) {
-      return { ...item, sourceEnd: clipSpanSourceAt(item, clipTimelineDuration(item) + actual) }
+      const overlayResized = {
+        ...item,
+        sourceEnd: clipSpanSourceAt(item, clipTimelineDuration(item) + actual),
+      }
+      return withAnim(
+        overlayResized,
+        remapAnimAfterTrim(item, 'right', duration, duration + actual, -actual).anim,
+      )
     }
     if (next && index === segment.index + 1) {
       return { ...item, gapBefore: Math.max(0, nextGap - actual) }

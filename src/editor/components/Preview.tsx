@@ -10,14 +10,6 @@ import {
   backgroundCssColor,
   clipBackground,
 } from '../core/background'
-import { canvasCompositeOperation, clipBlendMode, clipOpacity } from '../core/blend'
-import {
-  clipColor,
-  cssColorFilter,
-  isNeutralColor,
-  temperatureTint,
-  type ColorAdjustments,
-} from '../core/color'
 import { clampPlaybackRate, PLAYBACK_RATE_MIN, PLAYBACK_RATE_MAX } from '../core/speed'
 import {
   isAudioTrackActive,
@@ -31,13 +23,15 @@ import {
 import { findTextClipLocation, resolveCaptionStyle } from '../core/text'
 import { drawTextClip } from '../core/textRender'
 import { formatPlayhead } from '../core/format'
-import { computeClipGeometry, sourceFitRect } from '../core/geometry'
+import { hasAnimation, resolveClipOverrides } from '../core/animation'
+import { drawClipFrame } from '../core/clipRender'
+import { sourceFitRect } from '../core/geometry'
 import { findClipLocation, findSegmentAt, getProjectEnd, getTimeline, segmentsAt } from '../core/timeline'
 import {
   normalizeTransitionType,
   transitionProgress,
 } from '../core/transition'
-import type { TransitionType } from '../core/types'
+import type { MediaAsset, TransitionType } from '../core/types'
 import type { Clip, Project, SourceInfo } from '../core/types'
 import type { CropSession, PreviewPatch } from '../store/editorStore'
 import { useEditorStore, useEditorStoreApi } from '../store/EditorProvider'
@@ -65,33 +59,6 @@ interface SourceTarget {
  * filter 复位为 none、把 globalCompositeOperation / globalAlpha 复原，
  * 否则会污染后续绘制的背景、叠加轨与文本图层。
  */
-function drawSourceWithColor(
-  ctx: CanvasRenderingContext2D,
-  color: ColorAdjustments,
-  rect: { width: number; height: number },
-  draw: () => void,
-): void {
-  if (isNeutralColor(color)) {
-    draw()
-    return
-  }
-  const filter = cssColorFilter(color)
-  if (filter) ctx.filter = filter
-  draw()
-  if (filter) ctx.filter = 'none'
-
-  const tint = temperatureTint(color)
-  if (!tint) return
-  const savedAlpha = ctx.globalAlpha
-  const savedOperation = ctx.globalCompositeOperation
-  ctx.globalCompositeOperation = 'overlay'
-  ctx.globalAlpha = savedAlpha * tint.alpha
-  ctx.fillStyle = tint.color
-  ctx.fillRect(-rect.width / 2, -rect.height / 2, rect.width, rect.height)
-  ctx.globalAlpha = savedAlpha
-  ctx.globalCompositeOperation = savedOperation
-}
-
 function getSourceTarget(
   project: Project,
   playhead: number,
@@ -412,49 +379,31 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
       if (!clipSource) return
       const patch = state.previewPatch
       const effective = patch && patch.clipId === clip.id ? { ...clip, ...patch.patch } : clip
-      // 用素材真实像素尺寸参与几何计算（图片与视频共用同一套旋转/镜像/缩放/裁剪）。
-      const geometry = computeClipGeometry(
-        effective,
-        { ...clipSource, width: sourceWidth, height: sourceHeight },
-        width,
-        height,
-      )
-      const layerScale = geometry.rendered.w / Math.max(1, geometry.rotated.w)
-      const radians = (effective.rotation * Math.PI) / 180
-      const crop = geometry.source
-      context.save()
-      // 不透明度 + 混合模式：与导出侧的 colorchannelmixer / blend 对应。
-      context.globalAlpha = (alphaOverride ?? 1) * clipOpacity(effective)
-      context.globalCompositeOperation = canvasCompositeOperation(clipBlendMode(effective))
-      context.translate(
-        geometry.rendered.x + geometry.rendered.w / 2,
-        geometry.rendered.y + geometry.rendered.h / 2,
-      )
-      context.rotate(radians)
-      context.scale(
-        (effective.flipH ? -1 : 1) * layerScale,
-        (effective.flipV ? -1 : 1) * layerScale,
-      )
-      // 只对片段画面应用调色；背景/文本/字幕不经过这里。
-      drawSourceWithColor(
-        context,
-        clipColor(effective),
-        { width: crop.w, height: crop.h },
-        () => {
-          context.drawImage(
-            source,
-            crop.x,
-            crop.y,
-            crop.w,
-            crop.h,
-            -crop.w / 2,
-            -crop.h / 2,
-            crop.w,
-            crop.h,
-          )
-        },
-      )
-      context.restore()
+      // 关键帧：把片段本地时间换算成动画时间后求值；没有动画的片段不额外计算。
+      const located = hasAnimation(effective) ? findClipLocation(state.project, clip.id) : null
+      const overrides =
+        located && hasAnimation(effective)
+          ? resolveClipOverrides(
+              effective,
+              Math.max(0, state.playhead - located.segment.start),
+              located.segment.duration,
+            )
+          : undefined
+      // 几何变换 + 裁剪/翻转/旋转/缩放/位置 + 不透明度/混合模式 + 调色
+      // 全部收敛到 core/clipRender.drawClipFrame，预览与导出逐帧渲染共用同一份实现。
+      drawClipFrame({
+        ctx: context,
+        clip: effective,
+        localTime: 0,
+        asset: clipSource as MediaAsset,
+        canvasW: width,
+        canvasH: height,
+        source,
+        sourceWidth,
+        sourceHeight,
+        alphaScale: alphaOverride ?? 1,
+        overrides,
+      })
     }
 
     const paintClip = (clip: Clip, layerVideo: HTMLVideoElement | null) => {
