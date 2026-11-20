@@ -1733,6 +1733,17 @@ export function Timeline({ onPickFile }: TimelineProps) {
                       <Icon name="freeze" size={13} />
                     </span>
                   )}
+                  {(() => {
+                    const frames = animationFrameTimes(clip)
+                    if (frames.length === 0) return null
+                    return (
+                      <span className="clip-keyframe-row" aria-hidden="true">
+                        {frames.map((fraction) => (
+                          <span key={fraction} className="clip-keyframe-tick" style={{ left: fraction * 100 + '%' }} />
+                        ))}
+                      </span>
+                    )
+                  })()}
                   <span className="clip-copy">
                     <span className="clip-index">
                       {String(segment.index + 1).padStart(2, '0')}
