@@ -35,6 +35,8 @@ export function createPersistenceSlice(ctx: {
       set({
         project: draft.project,
         assets: draft.assets,
+        // 缺失素材（占位片段）：随工程/草稿一起恢复，刷新后片段不会消失。
+        missingAssets: draft.missingAssets ?? [],
         source: draft.source,
         selectedClipId: firstSelection,
         // 切项目必须重置多选集合（否则复制/删除会读到上一个项目的失效 id）。
@@ -80,6 +82,7 @@ export function createPersistenceSlice(ctx: {
       set({
         source: null,
         assets: [],
+        missingAssets: [],
         project: empty,
         // 空会话没有项目身份：首次导入素材时再分配。
         projectId: null,

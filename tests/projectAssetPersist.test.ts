@@ -157,8 +157,9 @@ describe('工程文件导入：素材要落盘', () => {
 
   it('VideoEditor 的工程文件导入在应用工程前调用共用落盘函数（防止再次漏写）', () => {
     const source = readFileSync(join(process.cwd(), 'src/editor/VideoEditor.tsx'), 'utf8')
-    const start = source.indexOf('const importProjectFile = async')
-    const end = source.indexOf('const handleProjectFileInput = async')
+    // 导入流程现在拆成「缺失素材对话框」+ finishProjectImport；落盘必须仍在应用工程之前。
+    const start = source.indexOf('const finishProjectImport = async')
+    const end = source.indexOf('const startProjectImport =')
     expect(start).toBeGreaterThan(-1)
     expect(end).toBeGreaterThan(start)
     const body = source.slice(start, end)

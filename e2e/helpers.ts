@@ -48,6 +48,44 @@ export async function splitIntoTwo(page: Page): Promise<void> {
 }
 
 /**
+ * 等待 IndexedDB 里至少有一条草稿记录（不要求有素材 blob）。
+ * 「全部跳过缺失素材」的项目只有占位片段，media store 可以是空的。
+ */
+export async function waitForDraftRecord(page: Page): Promise<void> {
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          () =>
+            new Promise<number>((resolve) => {
+              const request = indexedDB.open('framecut-drafts')
+              request.onerror = () => resolve(-1)
+              request.onsuccess = () => {
+                const db = request.result
+                if (!db.objectStoreNames.contains('draft')) {
+                  db.close()
+                  resolve(-1)
+                  return
+                }
+                const getAll = db.transaction('draft', 'readonly').objectStore('draft').getAll()
+                getAll.onerror = () => {
+                  db.close()
+                  resolve(-1)
+                }
+                getAll.onsuccess = () => {
+                  const count = getAll.result.length
+                  db.close()
+                  resolve(count)
+                }
+              }
+            }),
+        ),
+      { timeout: 60_000, intervals: [200, 300, 500] },
+    )
+    .toBeGreaterThan(0)
+}
+
+/**
  * 等待 IndexedDB 里同时有草稿记录与素材 blob（自动保存完成）。
  *
  * 注意不能写成 `page.waitForFunction(() => new Promise(...))`：Playwright 不会等待

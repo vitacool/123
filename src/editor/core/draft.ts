@@ -70,8 +70,19 @@ export function remapProjectUrls(project: Project, urlMap: Map<string, string>):
  * Drops clips whose media could not be restored. Empty overlay/audio/text
  * tracks are removed as well so the timeline does not show dead lanes. Caption
  * clips linked to a missing asset are dropped too.
+ *
+ * `keepUrls` 用来**保留占位片段**：导入工程时用户跳过、或本地已经没有 Blob 的素材，
+ * 其片段不再删除，而是留在时间轴上以「素材已移除」的占位形式显示（预览跳过、
+ * 导出用背景占位，见 frameCompose / exportPlan）。默认不传 = 旧行为（剔除）。
  */
-export function pruneProjectUrls(project: Project, available: Set<string>): Project {
+export function pruneProjectUrls(
+  project: Project,
+  available: Set<string>,
+  options: { keepUrls?: Iterable<string> } = {},
+): Project {
+  const kept = new Set(options.keepUrls ?? [])
+  /** 素材可用，或调用方明确要求保留（占位片段）。 */
+  const retained = (url: string): boolean => available.has(url) || kept.has(url)
   /** 背景图丢失时退回黑场，避免指向已失效的 blob URL。 */
   const pruneBackground = (
     background: CanvasBackground | undefined,
@@ -79,17 +90,17 @@ export function pruneProjectUrls(project: Project, available: Set<string>): Proj
     if (background?.type !== 'image' || !background.imageUrl) return background
     return available.has(background.imageUrl) ? background : { type: 'black' }
   }
-  const keepClip = (clip: Clip) => available.has(clip.sourceUrl)
+  const keepClip = (clip: Clip) => retained(clip.sourceUrl)
   const pruneClipBackground = (clip: Clip): Clip => {
     if (clip.background?.type !== 'image') return clip
     const background = pruneBackground(clip.background)
     return background === clip.background ? clip : { ...clip, background }
   }
-  const keepAudio = (clip: AudioClip) => available.has(clip.sourceUrl)
+  const keepAudio = (clip: AudioClip) => retained(clip.sourceUrl)
   const keepTextClip = (clip: TextClip): boolean => {
     const url = clip.link?.sourceUrl
     if (url === undefined) return true
-    return available.has(url)
+    return retained(url)
   }
   const overlayTracks = (project.overlayTracks ?? [])
     .map((track) => ({ ...track, clips: track.clips.filter(keepClip).map(pruneClipBackground) }))
@@ -436,6 +447,45 @@ export interface DraftAsset {
   reversedFrom?: ReverseAssetOrigin
 }
 
+/**
+ * 工程引用了、但这台机器上没有 Blob 的素材。
+ *
+ * 记录它是为了**占位片段能跨刷新保留**：导入工程时用户跳过（或读不出来）的素材，
+ * 片段继续显示在时间轴上（「素材已移除」），下次保存/恢复草稿时靠这份元信息把
+ * 这些片段重新保留下来，而不是被 `pruneProjectUrls` 当作丢失素材删掉。
+ */
+export interface MissingAsset {
+  /** 工程里片段引用的那个 url（通常是导出机器上的 blob: URL）。 */
+  url: string
+  /** 展示用名称；宿主 API 没有元信息时可能只有 url。 */
+  name?: string
+  kind?: DraftAssetKind
+  /** 原始时长（秒），仅用于对话框展示。 */
+  duration?: number
+}
+
+/** 宽容读取 missingAssets（旧快照 / 手改工程文件可能没有该字段或结构不合法）。 */
+export function normalizeMissingAssets(input: unknown): MissingAsset[] {
+  if (!Array.isArray(input)) return []
+  const result: MissingAsset[] = []
+  for (const item of input) {
+    if (!item || typeof item !== 'object') continue
+    const raw = item as Record<string, unknown>
+    if (typeof raw.url !== 'string' || raw.url.length === 0) continue
+    const kind =
+      raw.kind === 'video' || raw.kind === 'audio' || raw.kind === 'image' ? raw.kind : undefined
+    result.push({
+      url: raw.url,
+      ...(typeof raw.name === 'string' ? { name: raw.name } : {}),
+      ...(kind ? { kind } : {}),
+      ...(typeof raw.duration === 'number' && Number.isFinite(raw.duration)
+        ? { duration: raw.duration }
+        : {}),
+    })
+  }
+  return result
+}
+
 export interface DraftSettings {
   mainTrackMagnet: boolean
   autoSnap: boolean
@@ -476,6 +526,11 @@ export interface DraftSnapshot {
   version: number
   project: Project
   assets: DraftAsset[]
+  /**
+   * 工程引用、但本地没有 Blob 的素材（占位片段）。旧快照没有这个字段。
+   * 恢复时这些 url 的片段会被保留而不是剔除。
+   */
+  missingAssets?: MissingAsset[]
   sourceUrl: string | null
   timelineZoom: number
   timelineSettings: DraftSettings
@@ -569,6 +624,7 @@ export function migrateDraftSnapshot(input: unknown): DraftSnapshotMigrationResu
     version: DRAFT_SCHEMA_VERSION,
     project: (raw.project ?? null) as Project,
     assets: Array.isArray(raw.assets) ? (raw.assets as DraftAsset[]) : [],
+    missingAssets: normalizeMissingAssets(raw.missingAssets),
     sourceUrl: typeof raw.sourceUrl === 'string' ? raw.sourceUrl : null,
     timelineZoom: numberOr(raw.timelineZoom, 0),
     timelineSettings,

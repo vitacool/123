@@ -1,4 +1,5 @@
-import type { DraftAsset, DraftSettings, DraftSnapshot } from './core/draft'
+import type { DraftAsset, DraftSettings, DraftSnapshot, MissingAsset } from './core/draft'
+import { normalizeMissingAssets } from './core/draft'
 import type { Project } from './core/types'
 
 /** 工程文件（`.framecut.json`）的格式标记。 */
@@ -16,6 +17,11 @@ export interface ProjectFile {
   exportedAt: number
   project: Project
   assets: DraftAsset[]
+  /**
+   * 工程引用、但导出时本机就没有 Blob 的素材（占位片段）。
+   * 导入时这些素材不会再次要求选择，片段直接以占位形式打开。
+   */
+  missingAssets?: MissingAsset[]
   sourceUrl: string | null
   timelineZoom: number
   timelineSettings: DraftSettings
@@ -25,6 +31,7 @@ export interface ProjectFile {
 export interface ProjectFileSource {
   project: Project
   assets: DraftAsset[]
+  missingAssets?: MissingAsset[]
   sourceUrl: string | null
   timelineZoom: number
   timelineSettings: DraftSettings
@@ -47,6 +54,9 @@ export function createProjectFile(source: ProjectFileSource): ProjectFile {
     exportedAt: Date.now(),
     project: source.project,
     assets: source.assets,
+    ...(source.missingAssets && source.missingAssets.length > 0
+      ? { missingAssets: source.missingAssets }
+      : {}),
     sourceUrl: source.sourceUrl,
     timelineZoom: source.timelineZoom,
     timelineSettings: source.timelineSettings,
@@ -59,6 +69,7 @@ export function projectFileFromSnapshot(snapshot: DraftSnapshot): ProjectFile {
   return createProjectFile({
     project: snapshot.project,
     assets: snapshot.assets,
+    missingAssets: snapshot.missingAssets,
     sourceUrl: snapshot.sourceUrl,
     timelineZoom: snapshot.timelineZoom,
     timelineSettings: snapshot.timelineSettings,
@@ -99,6 +110,7 @@ export function parseProjectFile(text: string): ProjectFile {
     exportedAt: typeof data.exportedAt === 'number' ? data.exportedAt : Date.now(),
     project,
     assets: Array.isArray(data.assets) ? (data.assets as DraftAsset[]) : [],
+    missingAssets: normalizeMissingAssets(data.missingAssets),
     sourceUrl: typeof data.sourceUrl === 'string' ? data.sourceUrl : null,
     timelineZoom: typeof data.timelineZoom === 'number' ? data.timelineZoom : 92,
     timelineSettings: {

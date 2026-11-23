@@ -1,6 +1,8 @@
 import { getOutputDimensions } from './core/aspect'
 import { buildCoverJpeg } from './core/cover'
 import { projectMediaUrls, pruneProjectUrls, remapProjectUrls } from './core/draft'
+import type { MissingAsset } from './core/draft'
+import { filterReferencedMissingAssets } from './core/missingAssets'
 import { normalizeProject } from './core/normalizeProject'
 import { getProjectEnd } from './core/timeline'
 import { frameCaptureSize } from './core/frameCompose'
@@ -78,6 +80,11 @@ export interface ApplyProjectInput {
   playhead?: number
   /** 新项目的显示名；缺省取主素材名。 */
   projectName?: string
+  /**
+   * 工程引用、但这次没有提供文件的本地素材（占位片段）。
+   * 传了这些 url 的片段不会被剔除，而是以「素材已移除」占位保留。
+   */
+  missingAssets?: MissingAsset[]
 }
 
 export interface ApplyProjectResult {
@@ -85,6 +92,8 @@ export interface ApplyProjectResult {
   removedClips: number
   /** 实际载入的素材数。 */
   assetCount: number
+  /** 以占位形式保留的缺失素材数。 */
+  missingCount: number
 }
 
 const isLocalUrl = (url: string): boolean =>
@@ -130,8 +139,12 @@ export function applyProjectToStore(
   }
 
   const remapped = remapProjectUrls(sourceProject, urlMap)
-  const project = pruneProjectUrls(remapped, available)
+  const keepUrls = new Set((input.missingAssets ?? []).map((item) => item.url))
+  const project = pruneProjectUrls(remapped, available, { keepUrls })
   const removedClips = Math.max(0, countClips(remapped) - countClips(project))
+  // 只保留最终工程仍引用到的缺失素材，避免占位列表残留上一份工程的数据。
+  const missingAssets = filterReferencedMissingAssets(input.missingAssets ?? [], project)
+  const missingCount = missingAssets.length
 
   // 只保留这份工程真正用到的素材，避免把上一份工程的素材带进来。
   const usedUrls = projectMediaUrls(project)
@@ -152,11 +165,13 @@ export function applyProjectToStore(
   // 先把当前项目保存到 IndexedDB，再用新的项目 id / 名字接管会话。
   state.adoptProject(
     createId('project'),
-    input.projectName ?? projectNameFromSource(source?.name ?? assets[0]?.name),
+    input.projectName ??
+      projectNameFromSource(source?.name ?? assets[0]?.name ?? missingAssets[0]?.name),
   )
   state.hydrateDraft({
     project,
     assets,
+    missingAssets,
     source,
     timelineZoom: state.timelineZoom,
     timelineSettings: {
@@ -171,7 +186,7 @@ export function applyProjectToStore(
     playhead: Math.max(0, input.playhead ?? 0),
   })
 
-  return { removedClips, assetCount: assets.length }
+  return { removedClips, assetCount: assets.length, missingCount }
 }
 
 /** 把宿主给的文件按工程里引用的素材 URL 依次配上去（文件名优先，数量一致时按顺序）。 */
@@ -225,13 +240,26 @@ export function createFrameCutApi({
       // 重新选择出来的素材 Blob 必须立刻落盘：工程本身只有元信息，
       // 否则刷新后 restoreDraft 找不到素材，会把这些片段全部剔除。
       await persistImportedAssets(extraAssets, { notify: store.getState().notify })
+      // 没有提供文件的本地素材：片段保留为占位，不再悄悄删掉。
+      const providedUrls = new Set(pairs.map((pair) => pair.url))
+      const missingAssets: MissingAsset[] = [...projectMediaUrls(project)]
+        .filter((url) => isLocalUrl(url) && !providedUrls.has(url))
+        .map((url) => ({ url, name: remoteName(url) }))
       const result = applyProjectToStore(store, {
         project,
         urlMap,
         extraAssets,
+        missingAssets,
         playhead: 0,
       })
-      if (result.removedClips > 0) {
+      if (result.missingCount > 0) {
+        store
+          .getState()
+          .notify(
+            `有 ${result.missingCount} 个素材缺失，相关片段以占位形式保留（预览跳过、导出为背景）`,
+            'warning',
+          )
+      } else if (result.removedClips > 0) {
         store
           .getState()
           .notify(`有 ${result.removedClips} 个片段缺少素材，已从工程中移除`, 'warning')

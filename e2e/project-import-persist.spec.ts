@@ -43,14 +43,20 @@ test('导入工程文件 → 刷新 → 片段数量不变', async ({ page, brow
   try {
     await openEditor(other)
 
-    // 导入工程文件
+    // 导入工程文件 → 弹出「缺失素材」对话框（不再逐个弹系统选择框）
     await other.locator('input[data-project-file-input]').setInputFiles(projectPath)
-    // 导入会为每个本地素材弹一次选择：等它准备好（data-asset-id 已写入）再给文件
-    await other.waitForFunction(() => {
-      const input = document.querySelector('input[data-project-asset-input]')
-      return input instanceof HTMLInputElement && Boolean(input.dataset.assetId)
-    })
-    await other.locator('input[data-project-asset-input]').setInputFiles(FIXTURE)
+    const dialog = other.locator('[role="dialog"][aria-label="缺失素材"]')
+    await expect(dialog).toBeVisible()
+
+    // 用户点某一行的「选择文件」→ 选择框由这个手势触发（用 filechooser API 接管）
+    const chooserPromise = other.waitForEvent('filechooser')
+    await dialog.locator('button[data-action="pick"]').first().click()
+    const chooser = await chooserPromise
+    await chooser.setFiles(FIXTURE)
+    // 选择后对话框显示「已选择：clip.mp4」
+    await expect(dialog.locator('.project-missing-status').first()).toContainText('已选择')
+
+    await dialog.getByRole('button', { name: /打开工程/ }).click()
     await expectClipCount(other, 2)
 
     // 关键一步：素材 Blob 必须已经落盘，否则刷新后素材和片段都会消失

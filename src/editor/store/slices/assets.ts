@@ -12,7 +12,7 @@ import type { StoreGet, StoreInternals, StoreSet } from '../internal'
 
 
 /** assets slice：素材库、主素材、待回收素材与倒放任务状态 */
-export type AssetsSlice = Pick<EditorState, 'source' | 'assets' | 'pendingReclaim' | 'reverseJob' | 'loadSource' | 'addAssets' | 'removeAsset' | 'cleanupUnusedAssets' | 'disposePendingAssets' | 'addAssetToTimeline' | 'updateSourceMeta' | 'cancelReverse'>
+export type AssetsSlice = Pick<EditorState, 'source' | 'assets' | 'missingAssets' | 'pendingReclaim' | 'reverseJob' | 'loadSource' | 'addAssets' | 'removeAsset' | 'cleanupUnusedAssets' | 'disposePendingAssets' | 'addAssetToTimeline' | 'updateSourceMeta' | 'cancelReverse'>
 
 export function createAssetsSlice(ctx: {
   get: StoreGet
@@ -25,6 +25,7 @@ export function createAssetsSlice(ctx: {
   return {
     source: null,
     assets: [],
+    missingAssets: [],
     pendingReclaim: {},
     reverseJob: null,
     loadSource: (source) => {
@@ -35,6 +36,8 @@ export function createAssetsSlice(ctx: {
       set({
         source: asset,
         assets: [asset],
+        // 新会话没有占位素材（占位只在「载入工程」时由缺失素材产生）。
+        missingAssets: [],
         project,
         // 新会话 = 新项目：分配 id，项目名取主素材名。
         projectId: createId('project'),
@@ -79,6 +82,7 @@ export function createAssetsSlice(ctx: {
         set({
           source: primary,
           assets: merged,
+          missingAssets: [],
           project,
           // 第一次导入素材即成为新项目：分配 id，名字跟随主素材。
           projectId: current.projectId ?? createId('project'),

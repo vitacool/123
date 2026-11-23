@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type {
   ChangeEvent, DragEvent as ReactDragEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, } from 'react'
 import { MAX_RECOMMENDED_FILE_BYTES } from './core/constants'
@@ -15,6 +15,14 @@ import {
   createFrameCutApi, applyProjectToStore, type FrameCutApi, } from './api'
 import {
   countLocalAssets, createProjectFile, downloadProjectFile, isLocalAsset, parseProjectFile, type ProjectFile, } from './projectFile'
+import { projectMediaUrls, type DraftAsset, type MissingAsset } from './core/draft'
+import { assetKindOf } from './core/assets'
+import {
+  applyPickOutcome, countClipReferences, emptyMissingAssetsSelection, mergeMissingAssets,
+  missingAssetFromDraft, missingAssetsForUnpicked, missingSelectionSummary, pendingMissingAssets,
+  skipAllMissingAssets, skipMissingAsset, type MissingAssetsSelection } from './core/missingAssets'
+import { pickFilesWithCancel } from './services/assetPicker'
+import { MissingAssetsDialog, type MissingAssetRow } from './components/MissingAssetsDialog'
 import {
   captureThumbnail, isSupportedMedia, readAssetFile, remoteName, waitForVideoMetadata, } from './services/assetReader'
 import { configureFFmpegAssets } from './services/ffmpegExporter'
@@ -25,6 +33,7 @@ import {
 import {
   PROJECT_LIMIT,
   projectLimitReached,
+  projectNameFromSource,
   type DraftProjectRecord,
 } from './core/projectLibrary'
 import { TopBar } from './components/TopBar'
@@ -84,6 +93,14 @@ export interface VideoEditorProps {
   theme?: FrameCutTheme
   /** 受控模式下，用户点击主题按钮时回调（由宿主决定是否改变 theme）。 */
   onThemeChange?: (theme: FrameCutTheme) => void
+}
+
+/** 导入工程时的「缺失素材」选择状态。 */
+interface ProjectImportState {
+  file: ProjectFile
+  /** 需要用户提供文件的素材（工程文件里的本地素材）。 */
+  items: DraftAsset[]
+  selection: MissingAssetsSelection
 }
 
 function useSourceLoader(
@@ -219,6 +236,8 @@ interface EditorShellProps {
   themePreference: FrameCutTheme
   /** 用户通过顶部按钮切换主题。 */
   onSelectTheme: (theme: FrameCutTheme) => void
+  /** 追加在 root 内的浮层（弹窗）；保证样式作用域仍在 `.framecut-root` 下。 */
+  overlay?: ReactNode
 }
 
 function EditorShell({
@@ -241,6 +260,7 @@ function EditorShell({
   theme,
   themePreference,
   onSelectTheme,
+  overlay,
 }: EditorShellProps) {
   const [autoCaptionOpen, setAutoCaptionOpen] = useState(false)
   const [backgroundOpen, setBackgroundOpen] = useState(false)
@@ -618,6 +638,7 @@ function EditorShell({
           </div>
         </div>
       )}
+      {overlay}
       <Toast />
       <ReverseJobBanner />
       {dragActive && (
@@ -678,7 +699,13 @@ export function VideoEditor({
   const subtitleInputRef = useRef<HTMLInputElement | null>(null)
   const projectFileInputRef = useRef<HTMLInputElement | null>(null)
   const assetPickInputRef = useRef<HTMLInputElement | null>(null)
-  const assetPickResolverRef = useRef<((files: File[]) => void) | null>(null)
+  /** 缺失素材对话框当前状态（ref 供 await 之后读最新值）。 */
+  const projectImportRef = useRef<ProjectImportState | null>(null)
+  const [projectImport, setProjectImport] = useState<ProjectImportState | null>(null)
+  // 渲染提交后再同步 ref：异步回调总能读到最新状态，而 setState updater 保持纯函数。
+  useEffect(() => {
+    projectImportRef.current = projectImport
+  }, [projectImport])
   const importedUrlsRef = useRef<string[]>([])
   const restoringRef = useRef(true)
   // 宿主回调放进 ref：内联箭头函数不应导致重新订阅/重复触发 onReady。
@@ -1096,6 +1123,8 @@ export function VideoEditor({
       project: state.project,
       // 只保留素材元信息（DraftAsset 本身不含 Blob）。
       assets: state.assets.map(toDraftAsset),
+      // 占位片段引用的缺失素材：随工程文件带走，导入时不必再次要求选择。
+      missingAssets: state.missingAssets,
       sourceUrl: state.source?.url ?? null,
       timelineZoom: state.timelineZoom,
       timelineSettings: { ...state.timelineSettings, captionFollow: state.captionFollow },
@@ -1123,49 +1152,119 @@ export function VideoEditor({
     input.click()
   }
 
-  /** 导入时为「每个本地素材」弹一次文件选择，按 asset.id 匹配（cancel 则跳过该素材）。 */
-  const pickAssetFile = (meta: { id: string; name: string; kind?: string }): Promise<File[]> =>
-    new Promise((resolve) => {
-      const input = assetPickInputRef.current
-      if (!input) {
-        resolve([])
-        return
-      }
-      input.accept =
-        meta.kind === 'audio'
-          ? 'audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac'
-          : meta.kind === 'image'
-            ? 'image/*,.jpg,.jpeg,.png,.webp,.gif'
-            : 'video/*,audio/*,image/*'
-      input.dataset.assetId = meta.id
-      input.value = ''
-      assetPickResolverRef.current = resolve
-      store.getState().notify(`请选择工程需要的素材「${meta.name}」`, 'info')
-      input.click()
-    })
-
-  const handleAssetPickInput = (event: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files ?? [])
-    event.target.value = ''
-    const resolve = assetPickResolverRef.current
-    assetPickResolverRef.current = null
-    resolve?.(files)
+  /** 对话框状态的唯一写入口。ref 在 effect 里同步（await 之后要读最新值）。 */
+  const updateProjectImport = (
+    updater: (current: ProjectImportState | null) => ProjectImportState | null,
+  ): void => {
+    setProjectImport(updater)
   }
 
-  const importProjectFile = async (file: ProjectFile) => {
-    const localAssets = file.assets.filter((asset) => isLocalAsset(asset))
+  /** 导入/读取工程失败：复位加载态并给出可见提示（不留未处理的 rejection）。 */
+  const reportProjectImportFailure = (error: unknown): void => {
+    setLoading(false)
+    setLoadingLabel(null)
+    const message = error instanceof Error ? error.message : String(error)
+    setError(`工程导入失败：${message}`)
+    store.getState().notify('工程加载失败', 'warning')
+  }
+
+  /**
+   * 导入工程时按「缺失素材」逐个/批量选择文件；取消选择不会挂起流程：
+   * - 单行「选择文件」被取消 → 该素材标记为跳过；
+   * - 「一次多选」被取消 → 结束这次选择，状态不变。
+   * 选择框必须由用户点击触发（本函数只从按钮 onClick 里调用）。
+   */
+  const pickMissingAsset = async (targetId?: string): Promise<void> => {
+    const current = projectImportRef.current
+    const input = assetPickInputRef.current
+    if (!current || !input) return
+    const pending = pendingMissingAssets(current.items, current.selection)
+    const targets = targetId ? pending.filter((item) => item.id === targetId) : pending
+    if (targets.length === 0) return
+    const kinds = new Set(targets.map((item) => assetKindOf(item)))
+    input.accept =
+      kinds.size === 1 && kinds.has('audio')
+        ? 'audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac'
+        : kinds.size === 1 && kinds.has('image')
+          ? 'image/*,.jpg,.jpeg,.png,.webp,.gif'
+          : 'video/*,audio/*,image/*'
+    input.value = ''
+    input.dataset.assetId = targetId ?? ''
+    // 先挂监听、再 click：两者都发生在用户手势里（Safari 对手势要求更严格）。
+    const picked = pickFilesWithCancel(input, { focusTarget: window })
+    input.click()
+    const outcome = await picked
+    const latest = projectImportRef.current
+    if (!latest) return
+    const applied = applyPickOutcome(latest.selection, latest.items, outcome, targetId)
+    if (applied.selection === latest.selection) return
+    updateProjectImport((state) => state && { ...state, selection: applied.selection })
+    if (applied.unmatched.length > 0) {
+      store
+        .getState()
+        .notify(`有 ${applied.unmatched.length} 个文件没有匹配到缺失素材，已忽略`, 'warning')
+    }
+  }
+
+  const skipProjectAsset = (id: string): void => {
+    updateProjectImport(
+      (state) => state && { ...state, selection: skipMissingAsset(state.selection, id) },
+    )
+  }
+
+  const cancelProjectImport = (): void => {
+    updateProjectImport(() => null)
+    store.getState().notify('已取消导入工程文件', 'info')
+  }
+
+  /** 「全部跳过并打开」：一次标记所有缺失素材为跳过，并立刻打开工程。 */
+  const skipAllAndOpenProject = (): void => {
+    const current = projectImportRef.current
+    if (!current) return
+    updateProjectImport(() => null)
+    const selection = skipAllMissingAssets(
+      current.selection,
+      current.items.map((item) => item.id),
+    )
+    const missing = mergeMissingAssets(
+      current.file.missingAssets,
+      missingAssetsForUnpicked(current.items, selection),
+    )
+    void finishProjectImport(current.file, [...selection.picked.entries()], missing).catch(
+      reportProjectImportFailure,
+    )
+  }
+
+  /** 用户确认「打开工程」：把已选文件与跳过项一起应用。 */
+  const confirmProjectImport = (): void => {
+    const current = projectImportRef.current
+    if (!current) return
+    updateProjectImport(() => null)
+    const picked = [...current.selection.picked.entries()]
+    const missing = mergeMissingAssets(
+      current.file.missingAssets,
+      missingAssetsForUnpicked(current.items, current.selection),
+    )
+    void finishProjectImport(current.file, picked, missing).catch(reportProjectImportFailure)
+  }
+
+  /** 读取选中的文件（必要时转码）、落盘，然后打开工程（缺失素材保留为占位）。 */
+  const finishProjectImport = async (
+    file: ProjectFile,
+    picked: [string, File][],
+    initialMissing: MissingAsset[],
+  ): Promise<void> => {
+    setError(null)
+    setLoading(true)
+    setLoadingLabel(null)
     const urlMap = new Map<string, string>()
     const extraAssets: MediaAsset[] = []
-    let cancelledAssets = 0
-
-    for (const meta of localAssets) {
-      const [picked] = await pickAssetFile(meta)
-      if (!picked) {
-        cancelledAssets += 1
-        continue
-      }
+    const missing = [...initialMissing]
+    for (const [id, pickedFile] of picked) {
+      const meta = file.assets.find((asset) => asset.id === id)
+      if (!meta) continue
       try {
-        const asset = await readAssetFile(picked, {
+        const asset = await readAssetFile(pickedFile, {
           allowTranscode: true,
           onTranscodeStatus: (message) => setLoadingLabel(message),
           onTranscodeProgress: (progress) =>
@@ -1175,10 +1274,12 @@ export function VideoEditor({
         importedUrlsRef.current.push(asset.url)
         extraAssets.push(asset)
         urlMap.set(meta.url, asset.url)
-      } catch {
-        cancelledAssets += 1
+      } catch (error) {
+        missing.push(missingAssetFromDraft(meta))
+        console.warn(`[FrameCut] 无法读取工程素材：${meta.name}`, error)
       }
     }
+    setLoading(false)
     setLoadingLabel(null)
 
     // 工程文件里只有素材元信息：重新选好的素材必须立刻写进 IndexedDB，
@@ -1189,29 +1290,50 @@ export function VideoEditor({
       project: file.project,
       urlMap,
       extraAssets,
+      // 跳过 / 读不出来的素材保留为占位片段（不再悄悄删掉）。
+      missingAssets: mergeMissingAssets(missing),
       sourceUrl: file.sourceUrl,
       playhead: file.playhead,
+      projectName: projectNameFromSource(file.assets[0]?.name ?? file.missingAssets?.[0]?.name ?? null),
     })
     if (Number.isFinite(file.timelineZoom)) store.getState().setTimelineZoom(file.timelineZoom)
-
-    if (result.assetCount === 0) {
-      setError('工程里引用的素材都还没有提供，时间线为空。请重新提供素材后再导入。')
-      store.getState().notify('工程没有可用素材', 'warning')
-      return
-    }
     setError(null)
-    if (result.removedClips > 0) {
+    if (result.missingCount > 0) {
       store
         .getState()
         .notify(
-          `已载入工程；${result.removedClips} 个片段因为缺少素材被移除${
-            cancelledAssets > 0 ? `（${cancelledAssets} 个素材未提供）` : ''
-          }`,
+          `已载入工程；${result.missingCount} 个素材缺失，相关片段以占位显示（重新导入工程可补素材）`,
+          'warning',
+        )
+    } else if (result.removedClips > 0) {
+      store
+        .getState()
+        .notify(
+          `已载入工程；${result.removedClips} 个片段因为缺少素材被移除`,
           'warning',
         )
     } else {
       store.getState().notify('已载入工程文件', 'success')
     }
+  }
+
+  /** 解析完工程文件后：有本地素材先弹「缺失素材」对话框，否则直接打开。 */
+  const startProjectImport = (file: ProjectFile): void => {
+    const knownMissing = new Set(mergeMissingAssets(file.missingAssets).map((item) => item.url))
+    // 只对「工程真正引用到」的本地素材要求重新选择；没进时间轴的素材本来就会丢弃。
+    const referenced = projectMediaUrls(file.project)
+    const items = file.assets
+      .filter((asset) => isLocalAsset(asset))
+      .filter((asset) => referenced.has(asset.url))
+      .filter((asset) => !knownMissing.has(asset.url))
+    if (items.length === 0) {
+      void finishProjectImport(file, [], mergeMissingAssets(file.missingAssets)).catch(
+        reportProjectImportFailure,
+      )
+      return
+    }
+    setError(null)
+    updateProjectImport(() => ({ file, items, selection: emptyMissingAssetsSelection() }))
   }
 
   const handleProjectFileInput = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -1220,13 +1342,31 @@ export function VideoEditor({
     if (!file) return
     try {
       const parsed = parseProjectFile(await file.text())
-      await importProjectFile(parsed)
+      startProjectImport(parsed)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       setError(`工程导入失败：${message}`)
       store.getState().notify('工程文件无法读取', 'warning')
     }
   }
+
+  const missingAssetRows: MissingAssetRow[] = projectImport
+    ? projectImport.items.map((item) => {
+        const pickedFile = projectImport.selection.picked.get(item.id)
+        return {
+          id: item.id,
+          name: item.name,
+          kind: assetKindOf(item),
+          duration: item.duration,
+          references: countClipReferences(projectImport.file.project, item.url),
+          pickedName: pickedFile?.name,
+          skipped: !pickedFile && projectImport.selection.skipped.has(item.id),
+        }
+      })
+    : []
+  const missingAssetSummary = projectImport
+    ? missingSelectionSummary(projectImport.items, projectImport.selection)
+    : { picked: 0, skipped: 0, pending: 0 }
 
   return (
     <EditorStoreProvider store={store}>
@@ -1247,6 +1387,20 @@ export function VideoEditor({
           theme={resolvedTheme}
           themePreference={themePreference}
           onSelectTheme={selectTheme}
+          overlay={
+            projectImport ? (
+              <MissingAssetsDialog
+                rows={missingAssetRows}
+                pending={missingAssetSummary.pending}
+                onPick={(id) => void pickMissingAsset(id)}
+                onPickMany={() => void pickMissingAsset()}
+                onSkip={skipProjectAsset}
+                onSkipAll={skipAllAndOpenProject}
+                onConfirm={confirmProjectImport}
+                onCancel={cancelProjectImport}
+              />
+            ) : null
+          }
           onOpenProjects={
             libraryEnabled
               ? () => {
@@ -1298,14 +1452,13 @@ export function VideoEditor({
           tabIndex={-1}
           onChange={handleProjectFileInput}
         />
-        {/* 导入工程时为每个本地素材弹一次选择（按 asset.id 匹配） */}
+        {/* 缺失素材对话框里「选择文件 / 一次多选」共用的选择框（监听在 pickFilesWithCancel 里） */}
         <input
           ref={assetPickInputRef}
           type="file"
           className="hidden-file-input"
           data-project-asset-input="true"
           tabIndex={-1}
-          onChange={handleAssetPickInput}
         />
       </div>
     </EditorStoreProvider>

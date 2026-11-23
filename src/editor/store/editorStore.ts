@@ -4,7 +4,7 @@ import { createStore } from 'zustand/vanilla'
 import { type CropPresetId } from '../core/constants'
 import type { EditorCommand } from '../core/commands'
 import type { TrackOrderKind } from '../core/operations'
-import type { DraftSettings } from '../core/draft'
+import type { DraftSettings, MissingAsset } from '../core/draft'
 import {
   type FrameCutTheme,
   type ResolvedTheme,
@@ -106,6 +106,11 @@ export interface EditorState {
   project: Project
   source: SourceInfo | null
   assets: MediaAsset[]
+  /**
+   * 工程引用、但本地没有 Blob 的素材（占位片段）。
+   * 它们在素材库里不显示，只用于把缺失片段保留在时间轴上，并随草稿一起持久化。
+   */
+  missingAssets: MissingAsset[]
   /**
    * 待回收素材（key = assetId）。删除后不在素材库显示，但在真正回收前仍可被撤销带回。
    * 会话级状态：不进撤销历史、不写进草稿。
@@ -284,6 +289,8 @@ export interface EditorState {
   hydrateDraft: (draft: {
     project: Project
     assets: MediaAsset[]
+    /** 工程引用、但本地没有 Blob 的素材（占位片段）。缺省 = 没有占位。 */
+    missingAssets?: MissingAsset[]
     source: SourceInfo | null
     timelineZoom: number
     timelineSettings: DraftSettings

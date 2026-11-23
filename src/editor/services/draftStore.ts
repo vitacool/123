@@ -15,12 +15,15 @@ import { migrateDraftSnapshot } from '../core/draft'
 import { normalizeProject } from '../core/normalizeProject'
 import {
   normalizeDraftExportRange,
+  normalizeMissingAssets,
   pruneProjectUrls,
   remapProjectUrls,
   type DraftAsset,
   type DraftSettings,
   type DraftSnapshot,
+  type MissingAsset,
 } from '../core/draft'
+import { filterReferencedMissingAssets } from '../core/missingAssets'
 
 const DB_NAME = 'framecut-drafts'
 /** v1：单草稿（key = 'current'）。v2：多项目（key = id）。 */
@@ -154,6 +157,7 @@ export function buildDraftRecord(
     projectName: string
     project: Project
     assets: MediaAsset[]
+    missingAssets: MissingAsset[]
     source: { url: string } | null
     timelineZoom: number
     timelineSettings: { mainTrackMagnet: boolean; autoSnap: boolean; linkage: boolean; previewAxis: boolean }
@@ -409,6 +413,8 @@ export async function deleteMediaBlob(id: string): Promise<void> {
 export interface RestoredDraft {
   project: Project
   assets: MediaAsset[]
+  /** 工程引用、但本地没有 Blob 的素材（占位片段）。 */
+  missingAssets: MissingAsset[]
   source: MediaAsset | null
   timelineZoom: number
   timelineSettings: DraftSettings
@@ -459,17 +465,24 @@ export async function restoreDraft(input: unknown): Promise<RestoredDraft | null
       })
     }
 
-    if (assets.length === 0) return null
-
     const available = new Set(assets.map((asset) => asset.url))
     const assetIdByUrl = new Map<string, string>()
     for (const meta of snapshot.assets) assetIdByUrl.set(meta.url, meta.id)
-    let project = normalizeProject(snapshot.project, { assetIdByUrl }).project
-    project = pruneProjectUrls(remapProjectUrls(project, urlMap), available)
-    // 时间轴为空不是「不可恢复」：素材可能只是导入了、还没拖进时间轴
-    // （典型：只导入音频、还没建任何片段）。原判定只看 clips / audioTracks /
-    // overlayTracks，于是这种草稿被判成空工程 → 每次打开都提示「素材不可用」，
-    // 项目永远打不开。真正的「全空」由上面 `assets.length === 0` 兜住。
+    const normalized = normalizeProject(snapshot.project, { assetIdByUrl }).project
+    // 缺失素材的片段保留为占位（「素材已移除」），不再因为找不到 Blob 被剔除。
+    const missingAssets = filterReferencedMissingAssets(
+      normalizeMissingAssets(snapshot.missingAssets).filter(
+        (item) => !urlMap.has(item.url) && !available.has(item.url),
+      ),
+      normalized,
+    )
+    const keepUrls = new Set(missingAssets.map((item) => item.url))
+    const project = pruneProjectUrls(remapProjectUrls(normalized, urlMap), available, { keepUrls })
+
+    // 没有 Blob 不等于「不可恢复」：占位片段（素材缺失）也要能打开。
+    // 时间轴为空也不是「不可恢复」：素材可能只是导入了、还没拖进时间轴
+    // （典型：只导入音频、还没建任何片段）。真正的「全空」才判 null。
+    if (assets.length === 0 && getProjectEnd(project) <= 0) return null
 
     const sourceUrl = snapshot.sourceUrl
       ? urlMap.get(snapshot.sourceUrl) ?? snapshot.sourceUrl
@@ -480,13 +493,11 @@ export async function restoreDraft(input: unknown): Promise<RestoredDraft | null
       videoAssets[0] ??
       null
 
-    // Drop clips whose source asset never came back.
-    project = pruneProjectUrls(project, available)
-
     succeeded = true
     return {
       project,
       assets,
+      missingAssets: filterReferencedMissingAssets(missingAssets, project),
       source,
       timelineZoom: snapshot.timelineZoom,
       timelineSettings: {
@@ -528,6 +539,7 @@ export function toDraftAsset(asset: MediaAsset): DraftAsset {
 export function toDraftSnapshot(state: {
   project: Project
   assets: MediaAsset[]
+  missingAssets?: MissingAsset[]
   source: { url: string } | null
   timelineZoom: number
   timelineSettings: Omit<DraftSettings, 'captionFollow'>
@@ -539,6 +551,10 @@ export function toDraftSnapshot(state: {
     version: 1,
     project: state.project,
     assets: state.assets.map(toDraftAsset),
+    // 缺失素材（占位片段）随草稿保存，刷新后片段不会消失。
+    ...(state.missingAssets && state.missingAssets.length > 0
+      ? { missingAssets: state.missingAssets }
+      : {}),
     sourceUrl: state.source?.url ?? null,
     timelineZoom: state.timelineZoom,
     timelineSettings: {
