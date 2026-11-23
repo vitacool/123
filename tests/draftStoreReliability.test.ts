@@ -261,3 +261,68 @@ describe('C. 只导入素材、还没有片段的草稿可以恢复', () => {
     expect(broken).toBeNull()
   })
 })
+
+// ---------------------------------------------------------------------------
+// D. 本地 blob 读不出来（配额不足 / 被清理）时，片段必须保留为占位
+// ---------------------------------------------------------------------------
+describe('D. blob 缺失的素材变成「缺失素材」，片段不整段消失', () => {
+  const localVideo = (id: string): DraftAsset => ({
+    id,
+    url: `blob:orig-${id}`,
+    name: `${id}.mp4`,
+    size: 2048,
+    duration: 5,
+    width: 640,
+    height: 360,
+    kind: 'video',
+    local: true,
+  })
+
+  it('草稿记录引用了本地素材、但 blob 不在 → 片段保留 + missingAssets 记录它', async () => {
+    const store = await loadStore()
+    // 注意：**不**调用 saveMediaBlob —— 模拟配额不足导致 blob 当时没写进去
+    const asset = localVideo('clip-1')
+    const base = createInitialProject({ url: asset.url, duration: 5 }, 'c1')
+    const snapshot: DraftSnapshot = {
+      version: 1,
+      project: { ...base, audioTracks: [], overlayTracks: [], textTracks: [] },
+      assets: [asset],
+      sourceUrl: asset.url,
+      timelineZoom: 1,
+      timelineSettings: { ...SETTINGS },
+      playhead: 0,
+      updatedAt: Date.now(),
+    }
+
+    const restored = await store.restoreDraft(snapshot)
+    expect(restored, '有片段时不该判成「不可恢复」').not.toBeNull()
+    // 关键：片段没有被 pruneProjectUrls 剔除
+    expect(restored!.project.clips).toHaveLength(1)
+    // 素材不在素材库（没有 blob），但被记成缺失素材 → 片段显示为占位
+    expect(restored!.assets).toHaveLength(0)
+    expect(restored!.missingAssets.map((item) => item.url)).toContain(asset.url)
+    expect(restored!.missingAssets[0]?.name).toBe(asset.name)
+  })
+
+  it('blob 在的情况下不受影响（正常恢复成真素材，不进 missingAssets）', async () => {
+    const store = await loadStore()
+    const asset = localVideo('clip-2')
+    await store.saveMediaBlob(asset.id, new Blob(['video'], { type: 'video/mp4' }))
+    const base = createInitialProject({ url: asset.url, duration: 5 }, 'c1')
+    const snapshot: DraftSnapshot = {
+      version: 1,
+      project: { ...base, audioTracks: [], overlayTracks: [], textTracks: [] },
+      assets: [asset],
+      sourceUrl: asset.url,
+      timelineZoom: 1,
+      timelineSettings: { ...SETTINGS },
+      playhead: 0,
+      updatedAt: Date.now(),
+    }
+
+    const restored = await store.restoreDraft(snapshot)
+    expect(restored!.assets).toHaveLength(1)
+    expect(restored!.project.clips).toHaveLength(1)
+    expect(restored!.missingAssets).toHaveLength(0)
+  })
+})

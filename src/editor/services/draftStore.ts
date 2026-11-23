@@ -23,7 +23,11 @@ import {
   type DraftSnapshot,
   type MissingAsset,
 } from '../core/draft'
-import { filterReferencedMissingAssets } from '../core/missingAssets'
+import {
+  filterReferencedMissingAssets,
+  mergeMissingAssets,
+  missingAssetFromDraft,
+} from '../core/missingAssets'
 
 const DB_NAME = 'framecut-drafts'
 /** v1：单草稿（key = 'current'）。v2：多项目（key = id）。 */
@@ -554,6 +558,15 @@ export async function restoreDraft(input: unknown): Promise<RestoredDraft | null
   const urlMap = new Map<string, string>()
   /** 本次为 blob 新建的 objectURL：失败路径必须回收，否则会一直占着内存。 */
   const createdUrls: string[] = []
+  /**
+   * 本地素材的 blob 读不出来（配额不足导致当时没写进去 / 被浏览器清理）。
+   *
+   * 这类素材**不能**简单 `continue` 掉：它既不会进 `assets`、也不会进 `missingAssets`，
+   * 随后 `pruneProjectUrls` 会用 `available` 把引用它的片段全部剔除 ——
+   * 用户看到的是「素材和片段都没了」，而不是「素材缺失，请重新选择」。
+   * 正确做法是当成缺失素材（占位片段），与导入工程时跳过素材的处理一致。
+   */
+  const unreadableLocal: DraftAsset[] = []
   let succeeded = false
 
   try {
@@ -563,7 +576,11 @@ export async function restoreDraft(input: unknown): Promise<RestoredDraft | null
       let blob: Blob | undefined
       if (local) {
         blob = await loadMediaBlob(meta.id)
-        if (!blob) continue
+        if (!blob) {
+          // 见上方说明：留作「缺失素材」，让片段以占位形式保留在时间轴。
+          unreadableLocal.push(meta)
+          continue
+        }
         url = URL.createObjectURL(blob)
         createdUrls.push(url)
       }
@@ -591,8 +608,13 @@ export async function restoreDraft(input: unknown): Promise<RestoredDraft | null
     const normalized = normalizeProject(snapshot.project, { assetIdByUrl }).project
     // 缺失素材的片段保留为占位（「素材已移除」），不再因为找不到 Blob 被剔除。
     const missingAssets = filterReferencedMissingAssets(
-      normalizeMissingAssets(snapshot.missingAssets).filter(
-        (item) => !urlMap.has(item.url) && !available.has(item.url),
+      mergeMissingAssets(
+        // 草稿里本来就记着的缺失素材（导入工程时跳过的那批）
+        normalizeMissingAssets(snapshot.missingAssets).filter(
+          (item) => !urlMap.has(item.url) && !available.has(item.url),
+        ),
+        // 这次因为 blob 读不出来而变成「缺失」的本地素材
+        unreadableLocal.map(missingAssetFromDraft),
       ),
       normalized,
     )
