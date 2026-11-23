@@ -1938,13 +1938,18 @@
   cursor: pointer;
 }
 
-/* 转场标记（主轨片段交界处） */
+/* 转场标记（主轨片段交界处）
+ *
+ * 位置约束：必须**让开裁剪手柄**。手柄是「接缝左右各 9px、全高」的竖条，
+ * 标记若居中覆盖接缝，就会把两侧手柄一起盖住（z-index 更高），表现为
+ * 「接缝处怎么拖都裁不动、只会选中片段」。这里把标记抬到片段顶部 14px 条带，
+ * 手柄从 14px 往下开始，两者垂直分离，各自都能命中。 */
 .transition-marker {
   position: absolute;
-  top: 50%;
-  width: 18px;
-  height: 18px;
-  margin-top: -9px;
+  top: 0;
+  width: 14px;
+  height: 14px;
+  margin-top: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3338,7 +3343,8 @@
 
 .clip-trim-handle {
   position: absolute;
-  top: 0;
+  /* 顶部 14px 让给转场标记（见 .transition-marker 的说明），避免两者抢命中。 */
+  top: 14px;
   bottom: 0;
   z-index: 5;
   display: flex;

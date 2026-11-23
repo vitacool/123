@@ -14,8 +14,6 @@ interface TrackControlsProps {
   /** Audio track is silenced by another track's solo. */
   suppressedBySolo?: boolean
   onRemove?: () => void
-  /** 拖动开始（由父组件实现实际的拖动交互；未提供时手柄只做提示）。 */
-  onDragStart?: (event: React.PointerEvent<HTMLButtonElement>) => void
   /** 叠加轨层级调整：'up' = 更靠上层；已在边界时对应按钮置灰。 */
   canMoveUp?: boolean
   canMoveDown?: boolean
@@ -45,7 +43,6 @@ export function TrackControls({
   canMoveDown,
   onMoveUp,
   onMoveDown,
-  onDragStart,
   onOpenCover,
 }: TrackControlsProps) {
   const toggleTrackFlag = useEditorStore((store) => store.toggleTrackFlag)
@@ -86,23 +83,9 @@ export function TrackControls({
       <div className="track-controls-buttons" role="group" aria-label={`${name}控制`}>
         {reorderable && (
           <span className="track-move-stack" role="group" aria-label={`${name}层级`}>
-      {reorderable && (
-        <button
-          type="button"
-          className="track-control track-drag-handle"
-          aria-label={`拖动调整「${name}」的顺序`}
-          title={state.locked ? `轨道已锁定，无法拖动` : `拖动调整顺序（也可用 Alt+↑/↓）`}
-          disabled={state.locked}
-          onPointerDown={(event) => {
-            if (state.locked) return
-            event.preventDefault()
-            event.stopPropagation()
-            onDragStart?.(event)
-          }}
-        >
-          <Icon name="grip" size={12} />
-        </button>
-      )}
+            {/* 原先这里有个「拖动调整顺序」握把，但 TrackGutter 从未传 onDragStart，
+                按下去只有按下态、没有任何效果 —— 容易让人以为编辑器卡住了。
+                真正的排序入口是下面的 ↑/↓（也支持 Alt+↑/↓），这里不再放死控件。 */}
             <button
               type="button"
               className="track-control track-move"

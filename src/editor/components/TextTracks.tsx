@@ -35,7 +35,10 @@ interface EdgeState {
 
 export function TextTracks({
   onClipContextMenu,
+  pad = PAD,
 }: {
+  /** 左侧留白：与标尺/主轨共用（有封面块时是 76，不是 12）。 */
+  pad?: number
   /** 右键片段：由 Timeline 统一弹菜单（这里只上报目标）。 */
   onClipContextMenu?: (event: ReactMouseEvent<HTMLElement>, clipId: string) => void
 } = {}) {
@@ -66,7 +69,8 @@ export function TextTracks({
     }
     const finish = () => {
       const current = dragRef.current
-      if (current && Math.abs(current.start - current.originalStart) > 0.002) {
+      // 像素阈值（5px），与视频/音频片段一致；见 AudioTracks 里同名说明。
+      if (current && Math.abs(current.start - current.originalStart) * pps >= 5) {
         moveTextClip(current.trackId, current.clipId, current.start)
       }
       dragRef.current = null
@@ -198,7 +202,7 @@ export function TextTracks({
                 <div
                   key={clip.id}
                   className={`text-clip${clip.id === selectedClipId ? ' is-selected' : ''}`}
-                  style={{ left: PAD + start * pps + 1, width }}
+                  style={{ left: pad + start * pps + 1, width }}
                   role="option"
                   aria-selected={clip.id === selectedClipId}
                   tabIndex={0}

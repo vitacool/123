@@ -25,6 +25,7 @@ import {
   TIMELINE_MIN_ZOOM,
 } from '../core/constants'
 import { formatClock, formatRulerTime, getRulerStep } from '../core/format'
+import { IMAGE_MAX_DURATION, IMAGE_MIN_DURATION } from '../core/image'
 import { exportRangeDuration } from '../core/exportRange'
 import { reverseActionState } from '../core/reverse'
 import { findAudioClipLocation, getAudioActionAvailability } from '../core/audio'
@@ -48,6 +49,14 @@ import { TextTracks } from './TextTracks'
 import { MarkerPopover } from './MarkerPopover'
 
 const BASE_PAD = 12
+/**
+ * 片段窄到这个宽度以下就不渲染裁剪手柄。
+ *
+ * 手柄是固定 9px×2（左右各一），片段比 18px 还窄时整条都会被手柄盖住：
+ * 按下去永远进入裁剪，拖不动、也换不了轨（只能先放大时间轴）。
+ * 26px ≈ 两个手柄 + 一点可抓的片段本体。
+ */
+const MIN_HANDLE_WIDTH = 26
 /** 封面块宽度与它和 t=0 之间的间隙（只在有封面时占用）。 */
 const COVER_BLOCK_WIDTH = 56
 const COVER_GAP = 8
@@ -371,7 +380,9 @@ export function Timeline({ onPickFile }: TimelineProps) {
       const snapDistance = 7 / pps
       setPlayhead(time, snapDistance)
     },
-    [pps, setPlayhead, total],
+    // pad 必须进依赖：加/删封面会让 pad 从 12 变 76（或反过来），
+    // 旧闭包仍按 12 换算 → 点击定位/拖播放头会偏 64px，直到缩放或时长变化才「自愈」。
+    [pps, setPlayhead, total, pad],
   )
 
   /**
@@ -412,7 +423,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
       }
       setPlayhead(clamp(target, 0, total))
     },
-    [pps, total, setPlayhead, timelineSettings.autoSnap, segments, overlayTracks, project.markers],
+    [pps, total, setPlayhead, timelineSettings.autoSnap, segments, overlayTracks, project.markers, pad],
   )
 
   const handlePlayheadPointerDown = useCallback(
@@ -851,8 +862,22 @@ export function Timeline({ onPickFile }: TimelineProps) {
     setPopover(null)
     const duration = segment.duration
     const freeze = clip.type === 'freeze'
-    const minDuration = freeze ? FREEZE_MIN_DURATION : MIN_CLIP_DURATION
-    const maxDuration = freeze ? FREEZE_MAX_DURATION : Number.POSITIVE_INFINITY
+    /**
+     * 静帧（图片）没有「素材真实时长」这回事：默认 3s，但可以任意拉长/缩短。
+     * 这里必须和 core/operations.ts 的 `createResizeClipEdgeCommand` 用同一套上下限，
+     * 否则 UI 会把可拖范围先夹成 0（图片永远 3 秒、右边缘拖不动），命令根本没机会执行。
+     */
+    const image = clip.type === 'image'
+    const minDuration = freeze
+      ? FREEZE_MIN_DURATION
+      : image
+        ? IMAGE_MIN_DURATION
+        : MIN_CLIP_DURATION
+    const maxDuration = freeze
+      ? FREEZE_MAX_DURATION
+      : image
+        ? IMAGE_MAX_DURATION
+        : Number.POSITIVE_INFINITY
     let minDelta = 0
     let maxDelta = 0
 
@@ -874,7 +899,9 @@ export function Timeline({ onPickFile }: TimelineProps) {
       const nextGap = Math.max(0, next?.gapBefore ?? 0)
       const sourceGrow = freeze
         ? Math.max(0, FREEZE_MAX_DURATION - duration)
-        : Math.max(0, sourceDuration - clip.sourceEnd)
+        : image
+          ? Math.max(0, IMAGE_MAX_DURATION - duration)
+          : Math.max(0, sourceDuration - clip.sourceEnd)
       maxDelta = next ? Math.min(sourceGrow, nextGap) : sourceGrow
       minDelta = -Math.max(0, duration - minDuration)
     }
@@ -1796,6 +1823,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
                             onPointerDown={(event) =>
                               startEdgeDrag(event, segment, 'left', track)
                             }
+                            style={width < MIN_HANDLE_WIDTH ? { display: 'none' } : undefined}
                           ><span /></span>
                           <span
                             className="clip-trim-handle is-right"
@@ -1805,6 +1833,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
                             onPointerDown={(event) =>
                               startEdgeDrag(event, segment, 'right', track)
                             }
+                            style={width < MIN_HANDLE_WIDTH ? { display: 'none' } : undefined}
                           ><span /></span>
                         </div>
                       )
@@ -1991,6 +2020,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
                     aria-label="拖动修改片段入点"
                     title={isFreeze ? '调整入点 / 定格起点（0.5–10 秒）' : '拖动修改入点，可拉回被裁素材'}
                     onPointerDown={(event) => startEdgeDrag(event, segment, 'left')}
+                    style={width < MIN_HANDLE_WIDTH ? { display: 'none' } : undefined}
                   ><span /></span>
                   <span
                     className="clip-trim-handle is-right"
@@ -1998,6 +2028,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
                     aria-label="拖动修改片段出点"
                     title={isFreeze ? '调整出点 / 定格时长（0.5–10 秒）' : '拖动修改出点，可拉回被裁素材'}
                     onPointerDown={(event) => startEdgeDrag(event, segment, 'right')}
+                    style={width < MIN_HANDLE_WIDTH ? { display: 'none' } : undefined}
                   ><span /></span>
                 </div>
               )
@@ -2017,7 +2048,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
                   key={`transition-${segment.clip.id}`}
                   type="button"
                   className={`transition-marker${active ? ' is-active' : ''}`}
-                  style={{ left: x - 9 }}
+                  style={{ left: x - 7 }}
                   aria-label={
                     active
                       ? `转场：${transitionLabel(normalizeTransitionType(segment.clip.transitionOut?.type))}，点击编辑`
@@ -2091,6 +2122,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
 
           <AudioTracks
             pps={pps}
+            pad={pad}
             onClipContextMenu={(event, clipId) => openClipMenu(event, 'audio', clipId)}
             keySelection={keySelection}
             onSelectKeyframes={selectKeyframes}
@@ -2106,6 +2138,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
           />
 
           <TextTracks
+            pad={pad}
             onClipContextMenu={(event, clipId) => openClipMenu(event, 'text', clipId)}
           />
 

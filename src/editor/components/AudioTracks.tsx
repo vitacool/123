@@ -97,6 +97,7 @@ function AudioTrackHead({ track }: { track: AudioTrack }) {
 
 export function AudioTracks({
   pps,
+  pad = PAD,
   onClipContextMenu,
   keySelection,
   onSelectKeyframes,
@@ -107,6 +108,12 @@ export function AudioTracks({
   autoSnap,
 }: {
   pps: number
+  /**
+   * 左侧留白（与标尺/主轨共用同一个值）。主轨在有封面块时会变成 76，
+   * 音频轨必须跟着走，否则设了封面之后整条音频轨会相对标尺左移 64px
+   * —— 看起来就是「音画不同步」。
+   */
+  pad?: number
   /** 右键片段：由 Timeline 统一弹菜单（这里只上报目标）。 */
   onClipContextMenu?: (event: ReactMouseEvent<HTMLElement>, clipId: string) => void
   /** 复用主轨/叠加轨的 ClipKeyframeBand 交互与选中状态。 */
@@ -156,7 +163,10 @@ export function AudioTracks({
     }
     const finish = () => {
       const current = dragRef.current
-      if (current && Math.abs(current.start - current.originalStart) > 0.002) {
+      // 用像素阈值（与视频片段相同的 5px），不是 0.002 秒：低缩放下 0.002s ≈ 0.2px，
+      // 单纯单击（手抖 1px）就会被判成拖动，写入一条「移动音频片段」的撤销记录，
+      // 连点几次音频就相对画面越偏越多、撤销栈也被无用步骤塞满。
+      if (current && Math.abs(current.start - current.originalStart) * pps >= 5) {
         moveAudioClip(current.trackId, current.clipId, current.start)
       }
       dragRef.current = null
@@ -306,7 +316,7 @@ export function AudioTracks({
                 <div
                   key={clip.id}
                   className={`audio-clip${clip.id === selectedClipId ? ' is-selected' : ''}`}
-                  style={{ left: PAD + start * pps + 1, width }}
+                  style={{ left: pad + start * pps + 1, width }}
                   role="option"
                   aria-selected={clip.id === selectedClipId}
                   tabIndex={0}
