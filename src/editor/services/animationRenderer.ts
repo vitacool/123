@@ -474,26 +474,42 @@ export async function renderAnimatedClipToFile(
     // 源文件按「同一源只写一份」共享（引用计数），这里只取引用。
     const still = clip.type === 'freeze' || clip.type === 'image'
     if (!still) audioSourceFile = await sourcePool.acquire(runtime, asset)
-    const audio = planAnimatedClipAudio(clip, audioSourceFile, asset.hasAudio)
+    let audio = planAnimatedClipAudio(clip, audioSourceFile, asset.hasAudio)
 
     // 混音：视频流直接 copy（不重编码），音轨按时间轴时长变速后 mux 进来。
     // 映射/编码参数直接复用 planAnimatedClipAudio().mapArgs（含 -filter_complex 与 -shortest），
     // 只补一个 -c:v copy——避免两处各写一份参数后逐渐漂移。
-    const muxArgs = [
+    const buildMuxArgs = (plan: ReturnType<typeof planAnimatedClipAudio>): string[] => [
       '-hide_banner',
       '-y',
       '-i',
       videoFile,
-      ...audio.inputArgs,
-      ...audio.mapArgs,
+      ...plan.inputArgs,
+      ...plan.mapArgs,
       '-c:v',
       'copy',
       outputName,
     ]
-    const muxCode = await execOnRuntime(runtime, muxArgs, {
+
+    let muxCode = await execOnRuntime(runtime, buildMuxArgs(audio), {
       signal,
       timeoutMs: ANIMATION_ENCODE_TIMEOUT_MS,
     })
+    /**
+     * 兜底：素材的 `hasAudio` 目前只能算「乐观值」（视频素材没有被真正探测过音轨，
+     * 见 SourceInfo.hasAudio 的说明）。无音轨素材（录屏 / -an 过的片子 / GIF 转 mp4）
+     * 会让 `-map 1:a` 因缺流直接退 1，而这条路径**不会再走导出层的无声重试**
+     * （它发生在导出前），结果就是「动画片段混音失败」整次导出失败。
+     *
+     * 源本来就没有音轨时，静音就是正确结果，所以这里直接退回静音轨重试一次。
+     */
+    if (muxCode !== 0 && !audio.silent) {
+      audio = planAnimatedClipAudio(clip, null, false)
+      muxCode = await execOnRuntime(runtime, buildMuxArgs(audio), {
+        signal,
+        timeoutMs: ANIMATION_ENCODE_TIMEOUT_MS,
+      })
+    }
     if (muxCode !== 0) throw new Error(`动画片段混音失败（退出码 ${muxCode}）。`)
 
     const data = await ffmpeg.readFile(outputName)

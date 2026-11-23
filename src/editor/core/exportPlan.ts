@@ -29,6 +29,7 @@ import {
 } from './speed'
 import { clipColor, ffmpegColorFilters } from './color'
 import { audioClipDuration, audioProjectEnd } from './audio'
+import { textProjectEnd } from './text'
 import {
   isAudioTrackActive,
   isMainAudioActive,
@@ -628,7 +629,12 @@ export function buildExportPlan(
   const sources = normalizeSources(sourceOrSources)
   const mainAudio = sourceHasAudio && isMainAudioActive(project)
   const plan = buildExportPlanWithoutAudio(project, sources, mainAudio, options.maskInputs)
-  const mixed = applyAudioTracks(project, sources, plan)
+  /**
+   * `sourceHasAudio === false` 表示「本轮不要任何声音」（无声重试）。
+   * 必须连叠加轨 / 音频轨的分支一起关掉：只关主轨的话，重试仍会为无音轨素材
+   * 生成 `[n:a]`，第二次执行同样退出码 1 —— 用户看到的就是「导出永远失败」。
+   */
+  const mixed = applyAudioTracks(project, sources, plan, false, !sourceHasAudio)
   return finalizePlan(project, mixed, options.range)
 }
 
@@ -1416,8 +1422,46 @@ function buildGappedExportPlan(
   })
 
   if (units.length > 1) {
-    const inputs = units.map((_, index) => `[vu${index}]`).join('')
-    lines.push(`${inputs}concat=n=${units.length}:v=1:a=0[outv]`)
+    /**
+     * 只有「clip 单元紧跟 clip 单元」才可能有转场；任一侧是 gap 单元时恒为硬切。
+     * 之前这里无条件 concat，导致「时间轴只要有一处空隙，所有转场都变硬切」——
+     * 预览里有淡入淡出、成片全是切，用户会以为转场功能坏了。
+     */
+    const transitionAtUnit = (index: number): number => {
+      const unit = units[index]
+      const next = units[index + 1]
+      if (!unit || !next) return 0
+      if (unit.kind !== 'clip' || next.kind !== 'clip') return 0
+      const gap = Math.max(0, next.clip.gapBefore ?? 0)
+      return resolveTransitionDuration(unit.clip, next.clip, gap)
+    }
+    const hasAnyTransition = units.some((_, index) => transitionAtUnit(index) > 0)
+    if (!hasAnyTransition) {
+      const inputs = units.map((_, index) => `[vu${index}]`).join('')
+      lines.push(`${inputs}concat=n=${units.length}:v=1:a=0[outv]`)
+    } else {
+      let accumulator = `[vu0]`
+      let accumulated = units[0].duration
+      for (let index = 1; index < units.length; index += 1) {
+        const output = index === units.length - 1 ? '[outv]' : `[vux${index}]`
+        const overlap = transitionAtUnit(index - 1)
+        if (overlap > 0) {
+          const previous = units[index - 1]
+          const type = normalizeTransitionType(
+            previous.kind === 'clip' ? previous.clip.transitionOut?.type : undefined,
+          )
+          const offset = Math.max(0, accumulated - overlap)
+          lines.push(
+            `${accumulator}[vu${index}]xfade=transition=${type}:duration=${num(overlap)}:offset=${num(offset)}${output}`,
+          )
+          accumulated += units[index].duration - overlap
+        } else {
+          lines.push(`${accumulator}[vu${index}]concat=n=2:v=1:a=0${output}`)
+          accumulated += units[index].duration
+        }
+        accumulator = output
+      }
+    }
   }
 
   const audioGroups = new Map<number, number[]>()
@@ -1503,6 +1547,13 @@ function buildOverlayExportPlan(
       height: source.height,
       duration: source.duration,
       hasAudio: false,
+      /**
+       * `kind` 必须带：`buildExportArgs` 只对 `kind === 'image'` 的输入加 `-loop 1`。
+       * 漏了它，叠加轨上的图片（logo / 贴纸 / 画中画照片）会变成**单帧流**，
+       * 滤镜图 trim 后只剩第一帧，成片里只闪一下 —— 主轨同图正常，叠加轨必错。
+       * 注意不能只写 `shared?.kind`：即使复用主轨的同名文件，`-loop 1` 也是**逐输入**参数。
+       */
+      kind: source.kind === 'audio' ? 'audio' : source.kind === 'image' ? 'image' : 'video',
     })
     overlayInputByUrl.set(source.url, index)
     return index
@@ -1687,7 +1738,10 @@ function applyAudioTracks(
   sources: SourceInfo[],
   plan: ExportPlan,
   audioOnly = false,
+  /** true = 无声导出（重试）：一条音频分支都不建。 */
+  silent = false,
 ): ExportPlan {
+  if (silent) return plan
   const branches: string[] = []
   const inputs = [...plan.inputs]
   const inputIndexByUrl = new Map(inputs.map((input, index) => [input.url, index]))
@@ -1726,7 +1780,9 @@ function applyAudioTracks(
       }
       const source = resolveSource(clip.sourceUrl)
       if (!source) continue
-      if (audioOnly && (source.kind === 'image' || source.hasAudio === false)) continue
+      // 图片没有音轨；hasAudio === false 的素材（录屏 / -an 过的片子 / GIF 转 mp4）
+      // 也没有。这里必须**无条件**跳过，否则 `[n:a]` 指向不存在的流，FFmpeg 直接退 1。
+      if (source.kind === 'image' || source.hasAudio === false) continue
       const input = ensureAudioInput(source)
       if (input === null) continue
       const start = Math.max(0, clip.sourceStart)
@@ -1785,7 +1841,9 @@ function applyAudioTracks(
       }
       const source = resolveSource(clip.sourceUrl)
       if (!source) continue
-      if (audioOnly && (source.kind === 'image' || source.hasAudio === false)) continue
+      // 图片没有音轨；hasAudio === false 的素材（录屏 / -an 过的片子 / GIF 转 mp4）
+      // 也没有。这里必须**无条件**跳过，否则 `[n:a]` 指向不存在的流，FFmpeg 直接退 1。
+      if (source.kind === 'image' || source.hasAudio === false) continue
       const input = ensureAudioInput(source)
       if (input === null) continue
       const start = Math.max(0, clip.sourceStart)
@@ -1825,9 +1883,29 @@ function applyAudioTracks(
     }
   }
 
-  if (branches.length === 0) return plan
+  /**
+   * 成片尾部补齐的目标长度：主轨之外的**音频轨**和**字幕/文字轨**都可能比视频长。
+   *
+   * 之前只算 `audioProjectEnd`，于是「把字幕后拖到视频结束之后」时成片在视频末尾就停，
+   * 尾字幕整段丢失（预览能播到字幕）。这里把 textProjectEnd 一并纳入，
+   * 并沿用既有的**黑场补齐**（预览在视频结束处也是黑场，两边观感一致）。
+   */
+  const tailEnd = Math.max(plan.totalDuration, audioProjectEnd(project), textProjectEnd(project))
 
-  const totalDuration = Math.max(plan.totalDuration, audioProjectEnd(project))
+  if (branches.length === 0) {
+    // 没有任何音频分支：只有字幕超长时也仍需补黑场，否则尾字幕被截断。
+    if (audioOnly || tailEnd <= plan.totalDuration + 0.001) return plan
+    let graph = plan.graph
+    const appendOnly = (part: string): void => {
+      graph = graph.length > 0 ? `${graph};\n${part}` : part
+    }
+    appendOnly(
+      `[${plan.videoLabel}]tpad=stop_mode=add:stop_duration=${num(tailEnd - plan.totalDuration)}:color=black[outvpad]`,
+    )
+    return { ...plan, graph, videoLabel: 'outvpad', totalDuration: tailEnd }
+  }
+
+  const totalDuration = tailEnd
   let graph = plan.graph
   const appendPart = (part: string): void => {
     graph = graph.length > 0 ? `${graph};\n${part}` : part

@@ -637,12 +637,24 @@ export function applyCoverOverlayGraph(
 [${base}][coverpng]overlay=0:0:eof_action=pass:format=auto:enable='between(t,0,${hold.toFixed(6)})'[${plan.videoLabel}]`
 }
 
-/** 工程里所有带蒙版、且会出现在画面上的片段（主轨 + 叠加轨，按出现顺序去重）。 */
-export function maskedClips(project: Project): Clip[] {
+/**
+ * 工程里所有带蒙版、且会出现在画面上的片段（主轨 + 叠加轨，按出现顺序去重）。
+ *
+ * `availableUrls`：只保留素材仍在导出源里的片段。素材被「仅从素材库移除」后，
+ * 片段仍留在时间轴（显示为占位），但已经没有可渲染的画面 —— 这种片段的蒙版
+ * **不能**收进来：蒙版 PNG 渲不出来，后面的「文件数 != 片段数」校验会把整次导出
+ * 硬判成「蒙版渲染失败」，而其它所有路径对缺失素材都是降级为画布背景。
+ */
+export function maskedClips(
+  project: Project,
+  availableUrls?: ReadonlySet<string>,
+): Clip[] {
   const out: Clip[] = []
-  for (const clip of project.clips) if (clip.mask) out.push(clip)
+  const usable = (clip: Clip): boolean =>
+    Boolean(clip.mask) && (!availableUrls || availableUrls.has(clip.sourceUrl))
+  for (const clip of project.clips) if (usable(clip)) out.push(clip)
   for (const track of project.overlayTracks ?? []) {
-    for (const clip of track.clips) if (clip.mask) out.push(clip)
+    for (const clip of track.clips) if (usable(clip)) out.push(clip)
   }
   return out
 }
@@ -733,6 +745,35 @@ export function injectCoverInputArgs(args: string[], coverFile: string | null): 
   const at = args.indexOf('-filter_complex_script')
   if (at < 0) return args
   return [...args.slice(0, at), '-i', coverFile, ...args.slice(at)]
+}
+
+/**
+ * 一次导出里所有「额外输入」的最终顺序：**媒体 → 蒙版 → 文字层 → 封面**。
+ *
+ * 这个顺序必须与 {@link exportInputLayout} 的编号公式完全一致，否则 graph 里
+ * `[n:v]` 指向的就不是它以为的那一路。三个注入函数都是「插到
+ * `-filter_complex_script` 之前」，因此**后调用者排在更后面** —— 很容易写反。
+ *
+ * 为什么单独抽出来：写反过一次（先文字后蒙版），后果不是报错，而是
+ * 「带蒙版的片段几乎整块消失 + 整屏被最后一张蒙版 PNG 盖住」这种**静默画面全毁**，
+ * 靠人工看导出结果很难定位。抽成纯函数后由单测直接锁住顺序。
+ */
+export function buildExportInputArgs(
+  plan: Parameters<typeof buildExportArgs>[0],
+  graphName: string,
+  outputName: string,
+  options: {
+    maskInputOrder: readonly string[]
+    textLayer: TextOverlayLayer | null
+    coverFile: string | null
+  },
+): string[] {
+  const withMasks = injectMaskInputArgs(
+    buildExportArgs(plan, graphName, outputName),
+    options.maskInputOrder,
+  )
+  const withText = injectTextInputArgs(withMasks, options.textLayer)
+  return injectCoverInputArgs(withText, options.coverFile)
 }
 
 async function writeInputs(
@@ -981,8 +1022,16 @@ export async function exportProject(
     let maskInputBase = plan.inputs.length
     let maskClipList: Clip[] = []
     let maskFileByName: Map<string, string> = new Map()
+    /**
+     * 蒙版片段 → 输入序号。必须活到「无声重试」那一轮：重试会重建 plan，
+     * 如果这里丢了，图的蒙版分支会退化成普通 transform（蒙版静默失效、整幅画面露出），
+     * 而 args 里仍然注入着蒙版输入，编号还按「媒体 + 蒙版」算，进一步错位。
+     */
+    let maskInputsByClip: Map<string, number> | null = null
     if (!audioOnly) {
-      maskClipList = maskedClips(project)
+      // 只渲染「素材仍在导出源里」的蒙版：缺失素材的蒙版渲不出来，
+      // 收进来会让后面的数量校验把整次导出硬判成失败（见 maskedClips 的说明）。
+      maskClipList = maskedClips(project, new Set(sources.map((item) => item.url)))
       if (maskClipList.length > 0) {
         // 蒙版 PNG 每次导出都会写一份（共享 MEMFS），必须登记清理，否则会一直累积。
         const registerMask = (file: string): void => {
@@ -990,6 +1039,7 @@ export async function exportProject(
         }
         for (const clip of maskClipList) registerMask(maskFileName(clip.id))
         const maskInputs = new Map(maskClipList.map((clip, index) => [clip.id, maskInputBase + index]))
+        maskInputsByClip = maskInputs
         plan = buildExportPlan(project, sources, true, { range, maskInputs })
         maskFileByName = await writeMaskFiles(
           ffmpeg,
@@ -1122,10 +1172,11 @@ export async function exportProject(
             outputName,
             format as AudioExportFormat,
           )
-        : injectCoverInputArgs(
-            injectMaskInputArgs(injectTextInputArgs(buildExportArgs(plan, graphName, outputName), textLayer), maskInputOrder),
-            coverPng ? coverFileName : null,
-          )
+        : buildExportInputArgs(plan, graphName, outputName, {
+            maskInputOrder,
+            textLayer,
+            coverFile: coverPng ? coverFileName : null,
+          })
       onStage?.('rendering')
       try {
         await runExportCommand(loaded, commandArgs, outputName, lines, signal)
@@ -1141,15 +1192,19 @@ export async function exportProject(
         warning = `${warning ? `${warning} ` : ''}原声轨合成失败，已改为导出无声视频。`
         onStatus?.('音频合成失败，正在重试无声导出…')
         onProgress?.(0)
-        plan = buildExportPlan(project, sources, false, { range })
+        plan = buildExportPlan(project, sources, false, {
+          range,
+          ...(maskInputsByClip ? { maskInputs: maskInputsByClip } : {}),
+        })
         if (textLayer) applyTextOverlayGraph(plan, textLayer.inputIndex)
         plan = applyExportRangeTrim(plan)
         if (coverPng) applyCoverOverlayGraph(plan, coverInputIndex)
         await ffmpeg.writeFile(graphName, plan.graph)
-        commandArgs = injectCoverInputArgs(
-          injectMaskInputArgs(injectTextInputArgs(buildExportArgs(plan, graphName, outputName), textLayer), maskInputOrder),
-          coverPng ? coverFileName : null,
-        )
+        commandArgs = buildExportInputArgs(plan, graphName, outputName, {
+          maskInputOrder,
+          textLayer,
+          coverFile: coverPng ? coverFileName : null,
+        })
         await runExportCommand(loaded, commandArgs, outputName, lines, signal)
       }
 
