@@ -59,5 +59,29 @@ export default defineConfig({
   test: {
     include: ['tests/**/*.test.ts'],
     environment: 'node',
+    /**
+     * 覆盖率：先只**报告**，不设 thresholds —— 979 个用例看着多，但 services/
+     * 与 workers/ 基本测不到（需要浏览器/Worker），先摸清真实短板再定门槛，
+     * 否则门槛只会被排除目录绕过。
+     * 跑法：pnpm test:coverage
+     */
+    coverage: {
+      provider: 'v8',
+      reporter: ['text-summary', 'text', 'json-summary'],
+      reportsDirectory: './coverage',
+      /**
+       * 只统计**可以单测的逻辑层**（core + store）。
+       *
+       * 为什么不统计 components/ 与 services/：Timeline(2239 行)/Preview(1600 行)/
+       * ffmpegExporter 等需要真实浏览器与 FFmpeg.wasm，单测覆盖率必然接近 0，
+       * 把它们算进来只会让数字变成噪声。它们的验证在 Playwright E2E（12 条用例）。
+       */
+      include: ['src/editor/core/**/*.ts', 'src/editor/store/**/*.ts'],
+      exclude: [
+        'src/editor/core/**/*.d.ts',
+        'src/editor/store/**/*.d.ts',
+        'src/editor/store/EditorProvider.tsx',
+      ],
+    },
   },
 })

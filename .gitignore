@@ -33,3 +33,6 @@ test-results/
 
 # lint 报告（lint:report 产出）
 eslint-report.json
+
+# 覆盖率产物（pnpm test:coverage）
+coverage/
