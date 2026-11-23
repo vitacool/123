@@ -88,9 +88,16 @@ function ClipKeyframeBandInner({
 
   const beginDrag = (event: React.PointerEvent<HTMLElement>, t: number) => {
     if (event.button !== 0) return
+    /**
+     * 先 stopPropagation 再判断「这个时刻有没有关键帧」。
+     *
+     * 反过来（先 `if (refs.length === 0) return`）会让「按在菱形上但换算出的 t
+     * 有偏差」的情况直接放行冒泡 —— 结果是想拖关键帧，却把整个片段拖走了。
+     * 菱形本身就在带子里，按在它上面就不该穿透到片段。
+     */
+    event.stopPropagation()
     const refs = refsAtTime(clip.anim, t)
     if (refs.length === 0) return
-    event.stopPropagation()
     // 未选中就点它 → 先选中（与常见编辑器一致）
     const allSelected = refs.every((ref) => selected.some((item) => sameRef(item, ref)))
     if (!allSelected) onSelect(refs, event.shiftKey)
@@ -133,8 +140,14 @@ function ClipKeyframeBandInner({
     <span
       className="clip-keyframe-band"
       style={{ height: BAND_HEIGHT }}
-      onPointerDown={(event) => event.stopPropagation()}
-      onClick={(event) => event.stopPropagation()}
+      /**
+       * 这里**不再** stopPropagation。
+       *
+       * 关键帧点自己的 `beginDrag` 已经 stopPropagation（第 93 行），所以在点上按下
+       * 依然是拖关键帧、不会带动片段。但整条带子（片段底部 8px）以前是无条件拦截的，
+       * 于是那条区域既拖不动片段、点了也选不中 —— 手感上像"片段底部是死的"。
+       * 放行之后：空白处正常选中/拖动片段，点上仍然是关键帧交互。
+       */
     >
       {union.map((point) => {
         const refs = refsAtTime(clip.anim, point.t)
