@@ -625,6 +625,21 @@ Ctrl+Z ×2 → 片段 1 / 素材 0 / 片段文字「素材已移除」/ 预览�
 - 修法：`probeWithTimeout` 全程在 `enqueue` 内执行，**超时计时从「拿到执行权」开始**（前面合法的长任务不会把自检误判成超时）；两个 probe 增加可选 `handle` 参数，导出流程传入自己的 `loaded`；因为不再并发，超时的 `terminate` 不会打断任何正在跑的任务
 - 验证：3 条单测（串行不并发 / 传句柄时不重新 acquire / 超时后运行时重建且后续任务能继续）；**负向对照**：把 `enqueue` 去掉后「自检与其它 exec 串行」失败。真实导出 e2e 通过（1.5s / 含 aac）
 
+### N13｜项目上限只在保存时才拒绝（用户剪完才发现存不了）
+
+- 位置：`components/ProjectLibrary.tsx`、`VideoEditor.newProject`
+- 场景：项目数已达 20 → 点「新建项目」→ 进去剪一阵 → 700ms 防抖保存被拒（只弹一条警告）→ **刷新后内容全丢**，而界面上看不出任何异常
+- 修法：`ProjectLibrary` 增加 `limitReached`——已满时显示提示条、**禁用「新建项目」**并在 `title` 说明「先删一个旧项目」；文案用**实际** `records.length`（实测发现旧数据可能超过上限，只显示常量会误导）
+- 验证（运行时）：往 IndexedDB 塞到 25 条记录后打开「最近项目」→ 提示条「已达上限（20 个，当前 25 个）：新建的项目不会被保存，请先删除一个旧项目。」、新建按钮 `disabled`、title 正确
+
+### N14（验证面）｜e2e 增加 chrome 通道
+
+- 背景：本机无法下载 Playwright 浏览器（实测 10 分钟 0 字节），之前只能在系统 Edge 上跑
+- 改动：`playwright.config.ts` 增加 `chrome` project（`channel: 'chrome'`，同样用系统浏览器）
+- 意义：Edge 与 Chrome 虽同内核但版本/策略可能不同，至少能证明 22 条用例**不是只在某一台机器的某个浏览器上碰巧通过**
+- 结果：**chrome 与 edge 上各 22 条全过**
+- **仍未覆盖**：Firefox（`pointerId=0`、module worker 这些正是项目历史上踩过的坑）、Safari。这两个是当前最大的验证盲区，需要能下载 Playwright 浏览器的环境补齐
+
 ---
 
 ## 附录：证据文件
