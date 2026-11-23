@@ -49,6 +49,7 @@ export function createAssetsSlice(ctx: {
         playhead: 0,
         isPlaying: false,
         exportRange: null,
+        exportRangeRaw: null,
         cropSession: null,
         previewPatch: null,
         markerEditorId: null,
@@ -68,7 +69,19 @@ export function createAssetsSlice(ctx: {
       if (current.assets.length === 0 && current.project.clips.length === 0) {
         const primary = merged.find((asset) => asset.kind !== 'audio')
         if (!primary) {
-          set({ assets: merged, source: null })
+          /**
+           * 空会话里**只导入音频**：也要分配 projectId，否则 `buildDraftRecord` 返回 null，
+           * 保存被整体跳过 —— 刷新/关标签页后音频素材和已经写进 IndexedDB 的 blob 全丢
+           * （界面还提示「再导入视频即可开始剪辑」）。与下面"追加素材"分支保持一致。
+           */
+          set({
+            assets: merged,
+            source: null,
+            projectId: current.projectId ?? createId('project'),
+            projectName: current.projectNameEdited
+              ? current.projectName
+              : projectNameFromSource(merged[0]?.name ?? ''),
+          })
           current.notify(
             incoming.length === 1
               ? `已导入音频「${incoming[0].name}」；再导入视频即可开始剪辑`
@@ -124,12 +137,14 @@ export function createAssetsSlice(ctx: {
       const asset = state.assets.find((item) => item.id === assetId)
       if (!asset) return
       const referenced = isAssetReferenced(state.project, asset)
-      const removedClips = options.removeClips && referenced
+      // 意图（用户点了什么）与观察（此刻是否还有引用）必须分开记录，见 PendingReclaimEntry。
+      const removeClips = Boolean(options.removeClips)
+      const clipsRemovedNow = removeClips && referenced
 
       // 先删片段（1 步撤销）。素材本身不在撤销历史里，所以这里**不销毁**它：
       // 只标记成待回收并从素材库隐藏，revoke / 删 blob 等到历史栈不再引用时再做
       // （见 reconcilePendingAssets），这样 Ctrl+Z 回来的片段仍然有可用的源。
-      if (removedClips) {
+      if (clipsRemovedNow) {
         run(createRemoveAssetClipsCommand({ url: asset.url, assetId: asset.id }))
       }
 
@@ -152,7 +167,8 @@ export function createAssetsSlice(ctx: {
             asset,
             indexAtDelete,
             projectId: state.projectId,
-            removedClips,
+            removedClips: removeClips,
+            referencedAtDelete: referenced,
             deletedAt: Date.now(),
           },
         },
@@ -187,6 +203,7 @@ export function createAssetsSlice(ctx: {
           projectId: state.projectId,
           // 这些素材本来就没有片段引用，不存在「撤销把片段带回来」的恢复。
           removedClips: false,
+          referencedAtDelete: false,
           deletedAt: Date.now(),
         }
       })

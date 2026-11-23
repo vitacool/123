@@ -64,6 +64,8 @@ export function createPersistenceSlice(ctx: {
           draft.timelineSettings.exportRange ?? null,
           Math.max(0, getProjectEnd(draft.project)),
         ),
+        // 载入新项目：raw 与显示值保持一致（草稿里只存了夹取后的值）。
+        exportRangeRaw: draft.timelineSettings.exportRange ?? null,
         cropSession: null,
         previewPatch: null,
         markerEditorId: null,
@@ -93,6 +95,7 @@ export function createPersistenceSlice(ctx: {
         playhead: 0,
         isPlaying: false,
         exportRange: null,
+        exportRangeRaw: null,
         cropSession: null,
         previewPatch: null,
         markerEditorId: null,

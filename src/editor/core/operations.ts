@@ -695,6 +695,41 @@ export function moveClipToTrackAtTime(
   return { ...project, clips, overlayTracks: tracks }
 }
 
+/**
+ * patch 是否**真的**改变了片段的值。
+ *
+ * 为什么需要：`updateClipInProject` 以前只要找到片段就 `{...clip, ...update}` 返回新对象，
+ * 于是「滑块拖出去又拖回原值」「清除一个本来就没有的字段」「点恢复默认（值已经是默认）」
+ * 都会产出新引用 → 历史栈多一步空操作，且把 redo 栈清空。
+ * 用户按 Ctrl+Z 看到「什么都没发生」，会以为撤销坏了。
+ */
+function patchChangesClip(clip: Clip, update: Partial<Clip>): boolean {
+  for (const key of Object.keys(update) as (keyof Clip)[]) {
+    const next = update[key]
+    const previous = clip[key]
+    if (Object.is(previous, next)) continue
+    if (
+      previous &&
+      next &&
+      typeof previous === 'object' &&
+      typeof next === 'object'
+    ) {
+      const previousKeys = Object.keys(previous as object)
+      const nextKeys = Object.keys(next as object)
+      const sameShape = previousKeys.length === nextKeys.length
+      const sameValues = previousKeys.every((name) =>
+        Object.is(
+          (previous as Record<string, unknown>)[name],
+          (next as Record<string, unknown>)[name],
+        ),
+      )
+      if (sameShape && sameValues) continue
+    }
+    return true
+  }
+  return false
+}
+
 export function updateClipInProject(
   project: Project,
   clipId: string,
@@ -715,6 +750,11 @@ export function updateClipInProject(
     }
   })
   if (!found) return null
+  // 命中片段但值没变 → 按「没有可撤销的改动」处理（返回 null，调用方 `?? project`）。
+  const target =
+    project.clips.find((clip) => clip.id === clipId) ??
+    (project.overlayTracks ?? []).flatMap((track) => track.clips).find((clip) => clip.id === clipId)
+  if (target && !patchChangesClip(target, update)) return null
   return { ...project, clips, overlayTracks }
 }
 

@@ -141,12 +141,20 @@ export function createStoreInternals(
       let ids = previousIds.filter((id) => idExists(effective, id))
       if (selection !== undefined) {
         if (selection === null) ids = []
-        else if (!ids.includes(selection)) ids = [selection]
+        // 命令声明的选中项可能已经不存在（典型：撤销「分割」后，selectionAfter 指向
+        // 撤销掉的右半段）。这里必须先校验再写入，否则选区会停留在一个幽灵 id 上：
+        // 时间轴没有高亮、属性面板空白，Delete / 分割 / 裁剪全部静默失效。
+        else if (idExists(effective, selection) && !ids.includes(selection)) ids = [selection]
       }
       const nextSelection = primaryOf(ids, current.selectedClipId)
       const playhead = clamp(current.playhead, 0, Math.max(0, total))
       // 工程变短后导出区间自动夹回有效范围（夹不动就视为未设置）。
-      const exportRange = clampExportRange(current.exportRange, Math.max(0, total))
+      // 注意从 **raw** 推导：夹取结果不进历史，若直接夹 current.exportRange，
+      // 撤销把工程恢复后又拿不回原来的区间（用户以为还在导那一段）。
+      const exportRange = clampExportRange(
+        current.exportRangeRaw ?? current.exportRange,
+        Math.max(0, total),
+      )
       set({
         project: effective,
         selectedIds: ids,
@@ -198,20 +206,33 @@ export function createStoreInternals(
     for (const [id, entry] of entries) {
       const projectRefs = isAssetReferenced(state.project, entry.asset)
       const historyRefs = !options.force && assetsReferencedBy(snapshots, entry.asset)
-      const referenced = projectRefs || historyRefs
 
-      if (referenced) {
-        // 撤销把「当时被删掉的片段」带回来了 → 素材回素材库，待回收状态就此结束。
-        // removeClips=false 的删除（片段本来就没被删）不恢复：用户就是想让它离开素材库。
-        if (entry.removedClips && projectRefs) {
-          changed = true
-          if (!assets.some((item) => item.id === id)) {
-            const insertAt = Math.min(Math.max(0, entry.indexAtDelete), assets.length)
-            assets = [...assets.slice(0, insertAt), entry.asset, ...assets.slice(insertAt)]
-            if (!source && entry.asset.kind !== 'audio') source = entry.asset
-          }
-          continue
+      /**
+       * 恢复条件：**当前工程又有片段引用它**，且不是「用户明确要求片段留着、素材从库里消失」。
+       *
+       * - `removedClips`（意图）为 true：用户本意就是连带删片段，撤销带回片段 → 必须回库；
+       * - `referencedAtDelete`（观察）为 false：删除时它本来就没被引用（清理闲置素材），
+       *   之后任何引用都只可能来自撤销 → 也必须回库。
+       *
+       * 唯一不恢复的是「删的时候片段还在引用 + 用户选了仅从素材库移除」：
+       * 这是用户明确表达的「片段留着、素材别在库里」，保持缺失占位即可。
+       *
+       * 不恢复就必然出现「素材已移除」的黑帧，比多点一个删除按钮更糟。
+       */
+      const shouldRestore =
+        projectRefs && (entry.removedClips || !entry.referencedAtDelete)
+      if (shouldRestore) {
+        changed = true
+        if (!assets.some((item) => item.id === id)) {
+          const insertAt = Math.min(Math.max(0, entry.indexAtDelete), assets.length)
+          assets = [...assets.slice(0, insertAt), entry.asset, ...assets.slice(insertAt)]
+          if (!source && entry.asset.kind !== 'audio') source = entry.asset
         }
+        continue
+      }
+
+      // 还被引用（当前工程或历史快照）→ 继续等，别提前回收。
+      if (projectRefs || historyRefs) {
         nextPending[id] = entry
         continue
       }

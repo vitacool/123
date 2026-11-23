@@ -78,6 +78,10 @@ export function createSelectionSlice(ctx: {
           if (text) {
             if (isTextLocked(text.track)) return
             textToReveal = text.clip
+          } else if (!audio) {
+            // 不存在的 id（典型：撤销「分割」后残留的右半段 id）不要写成选中，
+            // 否则选区会停在一个幽灵 id 上：时间轴没高亮、Delete/分割/裁剪静默失效。
+            return
           }
         }
       }

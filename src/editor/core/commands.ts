@@ -10,6 +10,7 @@ import {
   updateAudioClipInProject,
   updateAudioTrackInProject,
 } from './audio'
+import { isAudioLocked, isTextLocked } from './tracks'
 import {
   addClipToTrackAtTime,
   addMarkerToProject,
@@ -1168,7 +1169,30 @@ export function createDeleteManyCommand(ids: readonly string[], label?: string):
     label: label ?? `删除 ${ids.length} 个片段`,
     selectionAfter: null,
     execute(project) {
-      const targets = new Set(ids)
+      /**
+       * **锁定轨道的片段不能被批量删除**。
+       *
+       * 单选 Delete 走的是 `deleteSelectedClip`（那里判了锁），但 Ctrl+X / 框选后删除
+       * 走的是这条批量命令，以前完全不看 locked —— 锁了轨还能把片段删掉，
+       * 用户会觉得「锁定没用」。这里按轨道过滤，全部被过滤时返回原对象（不进历史）。
+       */
+      const targets = new Set<string>()
+      if (!isMainLocked(project)) {
+        for (const clip of project.clips) if (ids.includes(clip.id)) targets.add(clip.id)
+      }
+      for (const track of project.overlayTracks ?? []) {
+        if (isOverlayLocked(track)) continue
+        for (const clip of track.clips) if (ids.includes(clip.id)) targets.add(clip.id)
+      }
+      for (const track of project.audioTracks ?? []) {
+        if (isAudioLocked(track)) continue
+        for (const clip of track.clips) if (ids.includes(clip.id)) targets.add(clip.id)
+      }
+      for (const track of project.textTracks ?? []) {
+        if (isTextLocked(track)) continue
+        for (const clip of track.clips) if (ids.includes(clip.id)) targets.add(clip.id)
+      }
+      if (targets.size === 0) return project
       return {
         ...project,
         clips: project.clips.filter((clip) => !targets.has(clip.id)),

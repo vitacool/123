@@ -94,11 +94,23 @@ export interface PendingReclaimEntry {
   /** 删除时的 projectId：回收 blob 时沿用「别删其它项目还在用的素材」判定。 */
   projectId: string | null
   /**
-   * 删除时是否连带删掉了引用它的片段。
-   * 只有这种删除才需要「撤销把片段带回来 → 素材回素材库」的恢复；
-   * `removeClips:false`（仅从素材库移除、片段保留）不做恢复，它会一直等到没人引用。
+   * **用户意图**：这次删除是否本意就连带删掉引用它的片段
+   * （素材确认框里的「删除素材及关联片段」= true，「仅从素材库移除」= false）。
+   *
+   * 注意这里记录的是意图，不是「删除那一刻是否还有引用」——后者是观察值，
+   * 撤销会把引用恢复回来，用观察值推断意图必然错位（曾经导致：先删片段、再删素材、
+   * 撤销后片段回来了但素材不回，时间轴上是一段「素材已移除」的黑帧）。
    */
   removedClips: boolean
+  /**
+   * **删除那一刻的观察值**：该素材当时是否仍被片段引用。
+   *
+   * 用来区分两种「只看引用关系分不清」的情形：
+   * - false：删除时本来就没有片段引用它（只是清理闲置素材）→ 之后任何片段重新引用
+   *   都只可能来自撤销，必须把素材放回素材库；
+   * - true 且 `removedClips=false`：用户明确要求「片段留着、素材从库里消失」→ 不恢复。
+   */
+  referencedAtDelete: boolean
   deletedAt: number
 }
 
@@ -248,6 +260,14 @@ export interface EditorState {
    * 会话 / 草稿级设置：直接 set，不进撤销历史，随草稿持久化。
    */
   exportRange: ExportRange | null
+  /**
+   * 导出区间的**原始**值（用户点出来的入/出点，不做破坏性夹取）。
+   *
+   * `exportRange` 会随工程变短被夹小；夹取不可撤销（区间是会话态、不进历史栈），
+   * 撤销把工程还原后就没法恢复。保留 raw 之后，`sync()` 每次从它重新推导
+   * `exportRange`，工程变长回来时区间也会自动回来。纯会话态：不写进草稿。
+   */
+  exportRangeRaw: ExportRange | null
   /** 界面主题偏好（'system' 跟随系统）。纯界面状态：不写进工程/草稿/撤销历史。 */
   theme: FrameCutTheme
   /** 当前实际生效的主题（system 已解析）。Canvas 界面元素据此重绘。 */

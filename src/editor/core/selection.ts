@@ -1,5 +1,7 @@
 import type { Project } from './types'
-import { getTimeline } from './timeline'
+import { findSegmentAt, getTimeline } from './timeline'
+import { audioClipDuration } from './audio'
+import { textClipDuration } from './text'
 /**
  * 多选与批量操作的纯逻辑：选择集合运算、区间/框选、批量移动的偏移规划。
  * 不依赖 React 与 store，便于单测。
@@ -139,4 +141,35 @@ export function selectableOrder(project: Project): string[] {
     for (const clip of track.clips) ids.push(clip.id)
   }
   return ids
+}
+
+/**
+ * 撤销/重做后「该选中谁」的兜底：先取播放头所在位置的片段，再退到第一个可选项。
+ *
+ * 为什么需要：分割 / 插入定格 / 粘贴 这类命令声明的 `selectionAfter` 是**新生成的 id**，
+ * 撤销回到旧快照后它必然不存在。此时若沿用「当前选中」或直接清空，用户会看到
+ * 「片段没高亮 → Delete / 分割 / 裁剪全部静默失效」，而没有任何提示。
+ *
+ * 这里刻意只做「就近选择」而不改工程数据：选区是会话态，撤销后重新定位到播放头
+ * 所在片段，最符合用户「我刚在剪这里」的心智。
+ */
+export function selectionFallbackId(project: Project, time: number): string | null {
+  const base = findSegmentAt(project.clips, time)
+  if (base) return base.clip.id
+  for (const track of project.overlayTracks ?? []) {
+    const segment = findSegmentAt(track.clips, time)
+    if (segment) return segment.clip.id
+  }
+  // 音频/字幕不是顺序轨：用各自的时间区间判断（与时间轴上画的位置一致）。
+  for (const track of project.audioTracks ?? []) {
+    for (const clip of track.clips) {
+      if (time >= clip.start && time < clip.start + audioClipDuration(clip)) return clip.id
+    }
+  }
+  for (const track of project.textTracks ?? []) {
+    for (const clip of track.clips) {
+      if (time >= clip.start && time < clip.start + textClipDuration(clip)) return clip.id
+    }
+  }
+  return selectableOrder(project)[0] ?? null
 }
