@@ -47,7 +47,13 @@ export default defineConfig({
   webServer: process.env.FRAMECUT_E2E_URL
     ? undefined
     : {
-        command: `node node_modules/vite/bin/vite.js --port ${PORT} --strictPort`,
+        // public/ffmpeg 与 public/onnxruntime 是生成物（.gitignore），
+        // 全新 clone 里必须先跑 copy 脚本，否则导出会 404 ffmpeg-core.js。
+        command: [
+          'node scripts/copy-ffmpeg-core.mjs',
+          'node scripts/copy-asr-assets.mjs',
+          `node node_modules/vite/bin/vite.js --port ${PORT} --strictPort`,
+        ].join(' && '),
         url: BASE_URL,
         reuseExistingServer: !process.env.CI,
         timeout: 120_000,
