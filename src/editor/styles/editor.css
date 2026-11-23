@@ -4363,6 +4363,23 @@
   color: var(--fc-success-text);
 }
 
+/* 内存风险「很可能失败」级别：用强调色压过普通警告，和「只是慢」区分开。 */
+.export-warning.is-risk {
+  border-color: rgb(var(--fc-accent-rgb) / .34);
+  background: rgb(var(--fc-accent-rgb) / .08);
+}
+
+.export-warning-suggestions {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  color: inherit;
+  list-style: disc;
+}
+
+.export-warning-suggestions li {
+  margin-top: 2px;
+}
+
 .export-actions {
   display: flex;
   align-items: center;

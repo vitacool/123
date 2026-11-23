@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { getOutputDimensions } from '../core/aspect'
 import { clipTimelineDuration } from '../core/clipTime'
-import { animationPerformanceHint } from '../core/animationExport'
+import { animationPerformanceHint, estimateAnimationFrames } from '../core/animationExport'
+import { assessMemoryRisk } from '../core/memoryRisk'
+import { getProjectEnd } from '../core/timeline'
 import { buildAudioExportPlan } from '../core/exportPlan'
 import { exportRangeDuration } from '../core/exportRange'
 import {
@@ -41,9 +43,6 @@ const STAGE_LABELS: Record<ExportStage, string> = {
   rendering: '正在编码',
   finalizing: '正在收尾',
 }
-
-/** 参与导出的素材总量超过该值时的内存预检阈值（粗略提示，不阻断导出）。 */
-const MEMORY_WARN_BYTES = 1.5 * 1024 * 1024 * 1024
 
 const isAbortError = (error: unknown): boolean =>
   typeof error === 'object' &&
@@ -279,7 +278,26 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
   const animationHint = animationPerformanceHint(project, project.exportQuality.fps)
   const textAnimationHint = textAnimationPerformanceHint(project, project.exportQuality.fps)
   const loudness = project.exportQuality.loudness ?? 'off'
-  const memoryWarning = exportAssetBytes > MEMORY_WARN_BYTES
+  /**
+   * 内存风险分级（含**输出分辨率**维度）。
+   *
+   * 原来的 `memoryWarning` 只看「素材总量 > 1.5GB」，但同样 1.4GB 素材，
+   * 4K 输出的滤镜链与帧缓冲约要吃 4 倍于 1080p 的内存。这里把分辨率权重和
+   * 动画帧一并算进去，并按收益给出可操作建议。
+   */
+  const memoryRisk = useMemo(
+    () =>
+      assessMemoryRisk({
+        assetBytes: exportAssetBytes,
+        resolution: project.exportQuality.resolution,
+        durationSeconds: getProjectEnd(project),
+        animationFrames: estimateAnimationFrames(project, project.exportQuality.fps),
+      }),
+    // 只依赖 project 本身：exportQuality.resolution / fps 都是它的字段，
+    // 单独列出来会被 lint 判成「多余依赖」。
+    [exportAssetBytes, project],
+  )
+  const memoryWarning = memoryRisk.level !== 'ok'
 
   /** 「关闭 / Esc / 点遮罩」的统一入口：导出中先取消，其余情况直接关闭。 */
   const requestAbort = () => {
@@ -515,14 +533,24 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
           </div>
         )}
 
-        {memoryWarning && (
-          <div className="export-warning export-memory-warning" role="status">
+        {memoryWarning && memoryRisk.message && (
+          <div
+            className={`export-warning export-memory-warning${memoryRisk.level === 'risk' ? ' is-risk' : ''}`}
+            role="status"
+          >
             <Icon name="warning" size={16} />
             <span>
-              素材总量较大，浏览器可能内存不足，建议先在本地压缩或分段导出
+              {memoryRisk.message}
               <span className="export-warning-meta">
-                （合计 {formatFileSize(exportAssetBytes)}）
+                （参与导出的素材合计 {formatFileSize(exportAssetBytes)}）
               </span>
+              {memoryRisk.suggestions.length > 0 && (
+                <ul className="export-warning-suggestions">
+                  {memoryRisk.suggestions.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              )}
             </span>
           </div>
         )}
