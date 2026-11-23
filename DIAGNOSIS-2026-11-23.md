@@ -542,6 +542,29 @@ Ctrl+Z ×2 → 片段 1 / 素材 0 / 片段文字「素材已移除」/ 预览�
 
 **验证**：全量单测 **1083 passed / 2 skipped**；`tsc` 0 错误；`eslint` 0 错误；完整 e2e **22 passed**。
 
+### N3｜FFmpeg 核心加载无超时 → 永久卡在「正在加载 0%」
+
+- 位置：`services/ffmpegRuntime.ts#loadCore`
+- 根因：`@ffmpeg/ffmpeg` 的 `load()` 靠 worker 回消息才 settle。如果 **class worker 脚本本身**加载失败（资源 404 / 宿主没托管 dist-lib 的 worker / CSP 禁 module worker），`load()` 永远不 resolve —— 界面卡在「正在加载 FFmpeg…（0%）」，取消后重试同样卡死，用户只能刷新
+- 修法：加载加 45s 超时（`LOAD_TIMEOUT_MS`，测试可调小）；超时后 `terminate()` 掉卡住的 worker 并抛可读错误「可能是核心资源 404 或 Worker 被拦截，请刷新页面后重试」；`acquireRuntime` 既有的失败清理会让下一次导出可重试
+- 验证边界（如实记录）：单测 2 条（load 永久挂起 → 限定时间内 reject + terminate + 可重试；且不会被误判成「多线程加载失败并降级」）。**运行时只验证了「核心 js 404 会给可读错误」**（1s 内报错）——那条路径本来就会正常 reject，与本修复不等价；真正的 worker 层静默挂起难以在本环境构造
+
+### N4｜MP3 编码器探测绕过队列、无超时、失败永久缓存
+
+- 位置：`services/ffmpegRuntime.ts#isMp3EncoderAvailable`
+- 三个问题：① 直接 `handle.ffmpeg.exec(...)`，绕开串行队列，可能与导出并发；② 没有超时，exec 挂起时 Promise 永不 settle → 导出弹窗 `checkingMp3` 永远为 true → 格式按钮全部禁用，只能关窗重开；③ 失败把 `false` 写进缓存，环境恢复后也再探测不了
+- 修法：改用 `enqueue` + `execNow`（同一队列）+ `probeTimeoutMs` 超时；超时/加载失败**不写缓存**
+- 验证：单测 3 条（两种正常结果、挂起时超时返回 false 且下次可重试、与其它 exec 严格串行）；真实导出 e2e 回归通过（1.5s / 含 aac）
+
+### N5｜关键帧带吞掉片段底部的手势
+
+- 位置：`components/ClipKeyframeBand.tsx`
+- 两个问题：① 根节点无条件 `stopPropagation` → 片段底部 8px 既拖不动也选不中；② `beginDrag` 里 `stopPropagation` 排在「有没有关键帧」判断**之后**，按在菱形上但 t 有偏差时会放行冒泡 → 想拖关键帧却把整个片段拖走
+- 修法：根节点不再拦截（点自己的 handler 已 stopPropagation）；`beginDrag` 把 stopPropagation 提到判断之前
+- 验证（运行时）：带子空白处拖动 `left 13px → 58px`（片段移动）；关键帧点上拖动 `58px → 58px`（片段不动）
+
+**本轮验证**：全量单测 **1088 passed / 2 skipped**（+5）；`tsc` 0 错误；`eslint` 0 错误；真实导出 e2e 通过。
+
 ---
 
 ## 附录：证据文件
