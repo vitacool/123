@@ -1,3 +1,5 @@
+import type { Project } from './types'
+import { getTimeline } from './timeline'
 /**
  * 多选与批量操作的纯逻辑：选择集合运算、区间/框选、批量移动的偏移规划。
  * 不依赖 React 与 store，便于单测。
@@ -122,4 +124,19 @@ export function contiguousRunHeads(
     if (index === 0 || !previous || !selected.has(previous)) heads.push(id)
   })
   return heads
+}
+/** 可被选中的片段 id（主轨 / 叠加轨 / 音频轨 / 字幕轨，按显示顺序）。 */
+export function selectableOrder(project: Project): string[] {
+  const ids: string[] = []
+  for (const segment of getTimeline(project.clips)) ids.push(segment.clip.id)
+  for (const track of project.overlayTracks ?? []) {
+    for (const segment of getTimeline(track.clips)) ids.push(segment.clip.id)
+  }
+  for (const track of project.audioTracks ?? []) {
+    for (const clip of track.clips) ids.push(clip.id)
+  }
+  for (const track of project.textTracks ?? []) {
+    for (const clip of track.clips) ids.push(clip.id)
+  }
+  return ids
 }

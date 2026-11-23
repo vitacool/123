@@ -1,9 +1,9 @@
-import type { Clip, Project, TextClip } from '../../core/types'
-import { findClipLocation, findSegmentById, getTimeline } from '../../core/timeline'
+import type { Clip, TextClip } from '../../core/types'
+import { findClipLocation, findSegmentById } from '../../core/timeline'
 import { isOverlayLocked, isMainLocked, isAudioLocked, isTextLocked } from '../../core/tracks'
 import { findAudioClipLocation } from '../../core/audio'
 import { findTextClipLocation } from '../../core/text'
-import { normalizeSelection, planBatchMove, primaryOf, rangeSelection, toggleSelection } from '../../core/selection'
+import { normalizeSelection, planBatchMove, primaryOf, rangeSelection, selectableOrder, toggleSelection } from '../../core/selection'
 import { buildClipboardPayload, planPaste } from '../../core/clipboard'
 import type { IdFactory } from '../../core/clipboard'
 import { createDeleteManyCommand, createPasteCommand, createMoveManyCommand, createUpdateAnyClipCommand, createPasteVisualAttributesCommand, createPasteAudioAttributesCommand, createPasteSpeedAttributesCommand, createDeleteOverlayClipCommand, createDeleteClipCommand } from '../../core/commands'
@@ -24,22 +24,6 @@ import {
 } from '../../core/attributeClipboard'
 import type { StoreGet, StoreInternals, StoreSet } from '../internal'
 
-
-/** 可选中的片段 id（主轨 / 叠加轨 / 音频轨 / 字幕轨，按显示顺序）。 */
-function selectableOrder(project: Project): string[] {
-  const ids: string[] = []
-  for (const segment of getTimeline(project.clips)) ids.push(segment.clip.id)
-  for (const track of project.overlayTracks ?? []) {
-    for (const segment of getTimeline(track.clips)) ids.push(segment.clip.id)
-  }
-  for (const track of project.audioTracks ?? []) {
-    for (const clip of track.clips) ids.push(clip.id)
-  }
-  for (const track of project.textTracks ?? []) {
-    for (const clip of track.clips) ids.push(clip.id)
-  }
-  return ids
-}
 
 /** selection slice：选中集合、剪贴板与属性剪贴板 */
 export type SelectionSlice = Pick<EditorState, 'selectedClipId' | 'selectedIds' | 'clipboard' | 'colorClipboard' | 'selectClip' | 'toggleSelectClip' | 'rangeSelectClip' | 'selectIds' | 'selectAll' | 'copySelection' | 'cutSelection' | 'pasteAtPlayhead' | 'moveSelectionBy' | 'deleteSelectedClip' | 'copyClipColor' | 'pasteClipColor' | 'copyVisualAttributes' | 'pasteVisualAttributes' | 'copyAudioAttributes' | 'pasteAudioAttributes' | 'copySpeedAttributes' | 'pasteSpeedAttributes'>
