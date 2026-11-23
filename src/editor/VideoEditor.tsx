@@ -1,49 +1,34 @@
 import { useEffect, useRef, useState } from 'react'
 import type {
-  ChangeEvent,
-  DragEvent as ReactDragEvent,
-  KeyboardEvent as ReactKeyboardEvent,
-  PointerEvent as ReactPointerEvent,
-} from 'react'
+  ChangeEvent, DragEvent as ReactDragEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, } from 'react'
 import { MAX_RECOMMENDED_FILE_BYTES } from './core/constants'
+import {
+  DEFAULT_FRAMECUT_THEME, readStoredTheme, resolveTheme, writeStoredTheme, type FrameCutTheme, type ResolvedTheme, } from './core/theme'
 import { getProjectEnd } from './core/timeline'
+import { frameCaptureSize, frameFileName } from './core/frameCompose'
+import { captureFrameBlob, frameCaptureWarning } from './services/frameCapture'
 import type { MediaAsset, Project, SourceInfo } from './core/types'
 import { createEditorStore } from './store/editorStore'
 import type { EditorStore } from './store/editorStore'
 import { EditorStoreProvider, useEditorStore, useEditorStoreApi } from './store/EditorProvider'
 import {
-  createFrameCutApi,
-  applyProjectToStore,
-  type FrameCutApi,
-} from './api'
+  createFrameCutApi, applyProjectToStore, type FrameCutApi, } from './api'
 import {
-  countLocalAssets,
-  createProjectFile,
-  downloadProjectFile,
-  isLocalAsset,
-  parseProjectFile,
-  type ProjectFile,
-} from './projectFile'
+  countLocalAssets, createProjectFile, downloadProjectFile, isLocalAsset, parseProjectFile, type ProjectFile, } from './projectFile'
 import {
-  captureThumbnail,
-  isSupportedMedia,
-  readAssetFile,
-  remoteName,
-  waitForVideoMetadata,
-} from './services/assetReader'
+  captureThumbnail, isSupportedMedia, readAssetFile, remoteName, waitForVideoMetadata, } from './services/assetReader'
 import { configureFFmpegAssets } from './services/ffmpegExporter'
 import { parseSubtitleText } from './core/text'
 import type { TranscribeProvider } from './services/asr/types'
 import {
-  clearDraft,
-  loadDraftSnapshot,
-  restoreDraft,
-  saveDraft,
-  saveMediaBlob,
-  toDraftAsset,
-  toDraftSnapshot,
-} from './services/draftStore'
+  countProjectRecords, deleteDraftProject, hasProjectRecord, loadProjectRecords, reportDraftSaveFailure, restoreDraft, saveMediaBlob, toDraftAsset, buildDraftRecord, saveProjectRecordSerialized, saveProjectRecord } from './services/draftStore'
+import {
+  PROJECT_LIMIT,
+  projectLimitReached,
+  type DraftProjectRecord,
+} from './core/projectLibrary'
 import { TopBar } from './components/TopBar'
+import { ProjectLibrary, type ProjectLibraryProps } from './components/ProjectLibrary'
 import { ContextMenu } from './components/ContextMenu'
 import { Preview } from './components/Preview'
 import { MediaLibrary } from './components/MediaLibrary'
@@ -52,9 +37,10 @@ import { CoverPanel } from './components/CoverPanel'
 import { PropertiesPanel } from './components/PropertiesPanel'
 import { Toolbar } from './components/Toolbar'
 import { Timeline } from './components/Timeline'
-import { ExportDialog } from './components/ExportDialog'
+import { ExportDialog, triggerDownload } from './components/ExportDialog'
 import { AutoCaptionDialog } from './components/AutoCaptionDialog'
 import { Toast } from './components/Toast'
+import { ReverseJobBanner } from './components/ReverseJobBanner'
 import { Icon } from './components/Icon'
 import './styles/editor.css'
 
@@ -84,21 +70,21 @@ export interface VideoEditorProps {
   onReady?: (api: FrameCutApi) => void
   /** project 变化时防抖 500ms 回调（与草稿保存共用同一个订阅）。 */
   onProjectChange?: (project: Project) => void
+  /**
+   * 是否启用「最近项目」多草稿模式，默认开启。
+   * 传 `false` 可关闭项目列表（宿主模式通常希望自己管理入口）。
+   * 注：注入了 `store` 或传了 `initialVideo` 时，无论该值如何都不会弹出项目列表。
+   */
+  projects?: boolean
+  /**
+   * 界面主题偏好：'light' | 'dark' | 'system'。
+   * 传了就是**受控模式**：以宿主为准，不读也不写 localStorage，切换时调用 onThemeChange。
+   * 不传则是非受控模式：默认 'system'，偏好存 localStorage。
+   */
+  theme?: FrameCutTheme
+  /** 受控模式下，用户点击主题按钮时回调（由宿主决定是否改变 theme）。 */
+  onThemeChange?: (theme: FrameCutTheme) => void
 }
-
-/** 草稿保存失败提示的全局去重时间戳（30s 内只提示一次，批量导入不刷屏）。 */
-let lastDraftSaveErrorAt = 0
-
-/** 草稿写入 IndexedDB 失败时给出可见提示（配额不足是最常见原因）。 */
-function reportDraftSaveFailure(
-  notify: (message: string, kind?: 'info' | 'success' | 'warning' | 'error') => void,
-): void {
-  const now = Date.now()
-  if (now - lastDraftSaveErrorAt < 30_000) return
-  lastDraftSaveErrorAt = now
-  notify('草稿保存失败，可能是浏览器存储空间不足', 'warning')
-}
-
 
 function useSourceLoader(
   activeVideo: File | string | null,
@@ -221,6 +207,18 @@ interface EditorShellProps {
   loadingLabel?: string | null
   onCancel?: () => void
   transcribeProvider?: TranscribeProvider
+  /** 「最近项目」列表的数据与回调；null 表示不启用多草稿 UI。 */
+  projectLibrary?: ProjectLibraryProps | null
+  /** 本地多草稿模式下：打开项目列表（TopBar 的「项目」按钮）。 */
+  onOpenProjects?: () => void
+  /** 本地多草稿模式下：新建空项目。 */
+  onNewProjectShortcut?: () => void
+  /** 当前实际生效的主题（system 已在 VideoEditor 里解析）。 */
+  theme: ResolvedTheme
+  /** 主题偏好（用于顶部按钮显示当前是 light / dark / system）。 */
+  themePreference: FrameCutTheme
+  /** 用户通过顶部按钮切换主题。 */
+  onSelectTheme: (theme: FrameCutTheme) => void
 }
 
 function EditorShell({
@@ -237,12 +235,26 @@ function EditorShell({
   onCancel,
   loadingLabel,
   transcribeProvider,
+  projectLibrary,
+  onOpenProjects,
+  onNewProjectShortcut,
+  theme,
+  themePreference,
+  onSelectTheme,
 }: EditorShellProps) {
   const [autoCaptionOpen, setAutoCaptionOpen] = useState(false)
   const [backgroundOpen, setBackgroundOpen] = useState(false)
   const [projectMenu, setProjectMenu] = useState<{ x: number; y: number } | null>(null)
+  /** 首帧之后再打开颜色过渡，避免首次加载（尤其暗色）出现闪变。 */
+  const [themeReady, setThemeReady] = useState(false)
+  useEffect(() => {
+    const timer = window.setTimeout(() => setThemeReady(true), 60)
+    return () => window.clearTimeout(timer)
+  }, [])
   const store = useEditorStoreApi()
   const source = useEditorStore((state) => state.source)
+  const projectName = useEditorStore((state) => state.projectName)
+  const renameProject = useEditorStore((state) => state.renameProject)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const [dragActive, setDragActive] = useState(false)
 
@@ -253,6 +265,57 @@ function EditorShell({
   useEffect(() => {
     if (source) rootRef.current?.focus({ preventScroll: true })
   }, [source?.url])
+
+  /**
+   * 导出当前帧：把播放头所在画面按导出分辨率合成成 PNG 并下载。
+   * 素材缺失 / seek 失败只提示（warning），不会抛出未处理的异常。
+   */
+  const captureCurrentFrame = async () => {
+    const state = store.getState()
+    const total = getProjectEnd(state.project)
+    if (total <= 0) {
+      state.notify('时间轴为空，无法导出画面', 'warning')
+      return
+    }
+    if (state.cropSession) {
+      state.notify('正在裁剪画面，先完成或取消裁剪', 'warning')
+      return
+    }
+    const time = Math.max(0, Math.min(state.playhead, total))
+    const size = frameCaptureSize(state.project, state.source ?? state.assets[0] ?? null)
+    state.notify('正在导出当前帧…', 'info')
+    let result: Awaited<ReturnType<typeof captureFrameBlob>>
+    try {
+      result = await captureFrameBlob({
+        project: state.project,
+        assets: state.assets,
+        time,
+        width: size.width,
+        height: size.height,
+      })
+    } catch {
+      // captureFrameBlob 理论上不会抛；这里兜底，避免任何未处理的异常。
+      state.notify('当前帧导出失败', 'warning')
+      return
+    }
+    if (!result.blob) {
+      state.notify('当前帧导出失败', 'warning')
+      return
+    }
+    const fileName = frameFileName(
+      state.source?.name ?? state.assets[0]?.name ?? null,
+      time,
+      state.project.exportQuality.fps,
+    )
+    triggerDownload(result.blob, fileName)
+    // 只弹一个提示：有缺失时 warning 优先，避免被 success 覆盖。
+    const warning = frameCaptureWarning(result.failures)
+    if (warning) {
+      state.notify(`已导出 ${fileName}，但有部分画面缺失：${warning}`, 'warning')
+    } else {
+      state.notify(`已导出当前帧 ${fileName}`, 'success')
+    }
+  }
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.defaultPrevented) return
@@ -314,6 +377,12 @@ function EditorShell({
       state.pasteAtPlayhead()
       return
     }
+    // 导出当前帧：Ctrl/⌘ + Shift + S（不与已有的 Ctrl+S/其他组合冲突）。
+    if (modifier && event.shiftKey && key === 's') {
+      event.preventDefault()
+      void captureCurrentFrame().catch(() => undefined)
+      return
+    }
     if (!modifier && key === 'q') {
       state.trimLeftAtPlayhead()
       return
@@ -324,6 +393,25 @@ function EditorShell({
     }
     if (!modifier && key === 'm') {
       state.addMarker()
+      return
+    }
+    // 导出区间打点：I = 入点，O = 出点，Alt+X = 清除（都只在无修饰键时生效，
+    // 与 Ctrl+X「剪切」区分开）。
+    // 用 event.code 而不是 event.key：macOS 上 Option+X 的 key 是 '≈'（Option+I/O
+    // 也会变成别的字符），只有物理键位 code 稳定；输入框里由上面的早退挡住。
+    if (!modifier && !event.altKey && !event.shiftKey && event.code === 'KeyI') {
+      event.preventDefault()
+      state.setExportInPoint()
+      return
+    }
+    if (!modifier && !event.altKey && !event.shiftKey && event.code === 'KeyO') {
+      event.preventDefault()
+      state.setExportOutPoint()
+      return
+    }
+    if (event.altKey && !modifier && !event.shiftKey && event.code === 'KeyX') {
+      event.preventDefault()
+      state.clearExportRange()
       return
     }
     if (!modifier && (key === 'delete' || key === 'backspace')) {
@@ -416,7 +504,8 @@ function EditorShell({
 
   return (
     <div
-      className="framecut-root"
+      className={`framecut-root${themeReady ? ' is-theme-ready' : ''}`}
+      data-theme={theme}
       ref={rootRef}
       tabIndex={-1}
       onKeyDown={handleKeyDown}
@@ -442,6 +531,16 @@ function EditorShell({
         onProjectMenu={(anchor) =>
           setProjectMenu({ x: anchor.left, y: anchor.bottom + 6 })
         }
+        onCaptureFrame={() => void captureCurrentFrame().catch(() => undefined)}
+        projectName={projectName}
+        onRenameProject={renameProject}
+        onOpenProjects={onOpenProjects}
+        // 草稿模式下用内部「新建空项目」；宿主模式（没有多草稿 UI）下退回宿主回调，
+        // 这样删掉素材库「更多」菜单后，「新建项目」在两种模式下都有入口。
+        onNewProject={onNewProjectShortcut ?? onNewProject}
+        theme={theme}
+        themePreference={themePreference}
+        onSelectTheme={onSelectTheme}
         onCancel={
           onCancel
             ? () => {
@@ -452,18 +551,15 @@ function EditorShell({
         }
       />
       <div className="workspace">
-        <MediaLibrary
-        onImport={onPickFile}
-        onNewProject={onNewProject}
-        onImportSubtitles={onImportSubtitles}
-        onAutoCaption={() => setAutoCaptionOpen(true)}
-        onCanvasBackground={() => setBackgroundOpen(true)}
-      />
+        <MediaLibrary onImport={onPickFile} />
         <Preview onPickFile={onPickFile} loading={loading} error={error} loadingLabel={loadingLabel} />
         {/* 右栏常驻：避免未选中时预览区被 306px 的宽度跳变挤动 */}
         <PropertiesPanel />
       </div>
-      <Toolbar />
+      <Toolbar
+        onAutoCaption={() => setAutoCaptionOpen(true)}
+        onImportSubtitles={onImportSubtitles}
+      />
       <Timeline onPickFile={onPickFile} />
       {projectMenu && (
         <ContextMenu
@@ -480,9 +576,18 @@ function EditorShell({
               label: '导入工程…',
               onSelect: onImportProject,
             },
+            ...(onOpenProjects
+              ? [
+                  { label: '最近项目…', separator: true, onSelect: onOpenProjects },
+                  ...(onNewProjectShortcut
+                    ? [{ label: '新建项目', onSelect: onNewProjectShortcut }]
+                    : []),
+                ]
+              : []),
           ]}
         />
       )}
+      {projectLibrary && <ProjectLibrary {...projectLibrary} />}
       <AutoCaptionDialog open={autoCaptionOpen} onClose={() => setAutoCaptionOpen(false)} provider={transcribeProvider} />
       <CoverPanel />
       <ExportDialog onExport={onExport} onCoverExport={onCoverExport} />
@@ -514,6 +619,7 @@ function EditorShell({
         </div>
       )}
       <Toast />
+      <ReverseJobBanner />
       {dragActive && (
         <div className="drop-overlay">
           <span className="drop-icon">
@@ -537,10 +643,33 @@ export function VideoEditor({
   store: injectedStore,
   onReady,
   onProjectChange,
+  projects = true,
+  theme: themeProp,
+  onThemeChange,
 }: VideoEditorProps) {
   // 宿主可注入 store（多实例/外部订阅）；未注入时编辑器自建一个。
   const [internalStore] = useState(() => createEditorStore())
   const store = injectedStore ?? internalStore
+  // 宿主模式（注入 store 或指定初始视频）不弹项目列表，保持原有自动恢复行为。
+  const libraryEnabled = projects && !injectedStore && !initialVideo
+  /** 受控/非受控主题：传了 prop 就完全听宿主的（不读不写 localStorage）。 */
+  const themeControlled = themeProp !== undefined
+  const [storedTheme, setStoredTheme] = useState<FrameCutTheme>(() => {
+    if (themeControlled) return themeProp as FrameCutTheme
+    // localStorage 不可用（隐私模式 / iframe 沙箱）时静默回退默认值。
+    if (typeof window === 'undefined') return DEFAULT_FRAMECUT_THEME
+    return readStoredTheme(window.localStorage)
+  })
+  const themePreference = themeControlled ? (themeProp as FrameCutTheme) : storedTheme
+  /** system 的解析结果（matchMedia 实时跟随）。 */
+  const [systemDark, setSystemDark] = useState(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false
+    return window.matchMedia('(prefers-color-scheme: dark)').matches
+  })
+  const resolvedTheme = resolveTheme(themePreference, systemDark)
+  const [libraryOpen, setLibraryOpen] = useState(false)
+  const [libraryRecords, setLibraryRecords] = useState<DraftProjectRecord[]>([])
+  const [libraryLoading, setLibraryLoading] = useState(false)
   const [activeVideo, setActiveVideo] = useState<File | string | null>(initialVideo)
   const [loading, setLoading] = useState(Boolean(initialVideo))
   const [loadingLabel, setLoadingLabel] = useState<string | null>(null)
@@ -555,6 +684,8 @@ export function VideoEditor({
   // 宿主回调放进 ref：内联箭头函数不应导致重新订阅/重复触发 onReady。
   const onReadyRef = useRef(onReady)
   const onProjectChangeRef = useRef(onProjectChange)
+  /** 受控主题的最新回调（放进 ref，避免 api 句柄闭包拿到旧函数）。 */
+  const onThemeChangeRef = useRef(onThemeChange)
   const apiRef = useRef<FrameCutApi | null>(null)
 
   useEffect(() => {
@@ -562,12 +693,66 @@ export function VideoEditor({
   }, [onReady])
 
   useEffect(() => {
+    onThemeChangeRef.current = onThemeChange
+  }, [onThemeChange])
+
+  useEffect(() => {
     onProjectChangeRef.current = onProjectChange
   }, [onProjectChange])
 
+  // ======================================================================
+  // 主题：system → light/dark 的实时解析；受控模式完全以宿主 prop 为准。
+  // ======================================================================
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+    const query = window.matchMedia('(prefers-color-scheme: dark)')
+    const apply = (event: MediaQueryListEvent | MediaQueryList) => setSystemDark(event.matches)
+    apply(query)
+    // 系统主题变化时实时跟随（旧浏览器回退到 addListener）。
+    if (typeof query.addEventListener === 'function') {
+      query.addEventListener('change', apply as (event: MediaQueryListEvent) => void)
+      return () =>
+        query.removeEventListener('change', apply as (event: MediaQueryListEvent) => void)
+    }
+    const legacy = query as MediaQueryList & {
+      addListener?: (fn: (event: MediaQueryListEvent) => void) => void
+      removeListener?: (fn: (event: MediaQueryListEvent) => void) => void
+    }
+    legacy.addListener?.(apply as (event: MediaQueryListEvent) => void)
+    return () => legacy.removeListener?.(apply as (event: MediaQueryListEvent) => void)
+  }, [])
+
+  // 把偏好与实际主题同步进 store（顶部按钮、Canvas 界面元素都读 store）。
+  useEffect(() => {
+    store.getState().setTheme(themePreference)
+    store.getState().setResolvedTheme(resolvedTheme)
+  }, [store, themePreference, resolvedTheme])
+
+  // 非受控模式：把偏好写回 localStorage（写失败静默）。
+  useEffect(() => {
+    if (themeControlled) return
+    if (typeof window === 'undefined') return
+    writeStoredTheme(window.localStorage, storedTheme)
+  }, [themeControlled, storedTheme])
+
+  /** 用户切换主题：受控模式交给宿主，非受控模式自己保存。 */
+  const selectTheme = (next: FrameCutTheme) => {
+    if (themeControlled) {
+      onThemeChangeRef.current?.(next)
+      return
+    }
+    setStoredTheme(next)
+  }
+
   // store 就绪后创建控制句柄并交给宿主（只调用一次）。
   useEffect(() => {
-    const api = createFrameCutApi({ store })
+    const api = createFrameCutApi({
+      store,
+      theme: {
+        get: () => store.getState().theme,
+        set: (next) => selectTheme(next),
+      },
+    })
     apiRef.current = api
     onReadyRef.current?.(api)
     return () => {
@@ -577,10 +762,12 @@ export function VideoEditor({
 
   useEffect(() => {
     return () => {
+      // 组件卸载：编辑器马上不存在，没人能再撤销 → 待回收素材一律立即回收。
+      store.getState().disposePendingAssets()
       for (const url of importedUrlsRef.current) URL.revokeObjectURL(url)
       importedUrlsRef.current = []
     }
-  }, [])
+  }, [store])
 
   useEffect(() => {
     configureFFmpegAssets(ffmpegBaseUrl)
@@ -594,18 +781,28 @@ export function VideoEditor({
     let cancelled = false
     void (async () => {
       try {
-        const snapshot = await loadDraftSnapshot()
-        if (!snapshot || cancelled) return
-        const restored = await restoreDraft(snapshot)
+        const records = await loadProjectRecords()
+        if (cancelled) return
+        setLibraryRecords(records)
+        if (libraryEnabled) {
+          // 本地多草稿模式：先展示「最近项目」，由用户选择打开哪个项目。
+          setLibraryOpen(true)
+          return
+        }
+        // 宿主模式 / 关闭项目列表：保持原有「恢复上次草稿」行为，打开最近更新的项目。
+        const latest = records[0]
+        if (!latest) return
+        const restored = await restoreDraft(latest.snapshot)
         if (!restored || cancelled) return
         restoringRef.current = true
+        store.getState().adoptProject(latest.id, latest.name)
         store.getState().hydrateDraft(restored)
         for (const asset of restored.assets) {
           if (asset.url.startsWith('blob:')) importedUrlsRef.current.push(asset.url)
         }
-        store.getState().notify('已恢复上次草稿', 'info')
+        store.getState().notify(`已恢复项目「${latest.name}」`, 'info')
       } catch {
-        // A corrupt draft should never block a fresh editor.
+        // 损坏的草稿不应阻塞编辑器。
       } finally {
         if (!cancelled) restoringRef.current = false
       }
@@ -613,7 +810,81 @@ export function VideoEditor({
     return () => {
       cancelled = true
     }
-  }, [initialVideo, store])
+  }, [initialVideo, store, libraryEnabled])
+
+  /** 重新读取「最近项目」列表。 */
+  const refreshLibrary = async (): Promise<void> => {
+    setLibraryLoading(true)
+    try {
+      const records = await loadProjectRecords()
+      setLibraryRecords(records)
+    } catch {
+      // 读取失败时保留上一次的列表。
+    } finally {
+      setLibraryLoading(false)
+    }
+  }
+
+  /** 打开一个已有项目：先 flush 当前项目（store 内完成），再接管新的 id / 名字。 */
+  const openProjectRecord = async (record: DraftProjectRecord) => {
+    restoringRef.current = true
+    try {
+      const restored = await restoreDraft(record.snapshot)
+      if (!restored) {
+        store.getState().notify('该项目里的素材都不可用，无法打开', 'warning')
+        return
+      }
+      store.getState().adoptProject(record.id, record.name)
+      store.getState().hydrateDraft(restored)
+      for (const asset of restored.assets) {
+        if (asset.url.startsWith('blob:')) importedUrlsRef.current.push(asset.url)
+      }
+      setLibraryOpen(false)
+      setError(null)
+      setLoading(false)
+    } catch {
+      store.getState().notify('打开项目失败', 'warning')
+    } finally {
+      restoringRef.current = false
+    }
+  }
+
+  /** 重命名项目（当前打开的项目同时更新 store 里的名字）。 */
+  const renameProjectRecord = async (record: DraftProjectRecord, name: string) => {
+    const updated: DraftProjectRecord = { ...record, name, updatedAt: Date.now() }
+    try {
+      await saveProjectRecord(updated)
+      setLibraryRecords((current) =>
+        current.map((item) => (item.id === record.id ? updated : item)),
+      )
+      if (store.getState().projectId === record.id) store.getState().renameProject(name)
+    } catch {
+      reportDraftSaveFailure(store.getState().notify)
+    }
+  }
+
+  /** 删除项目：只回收不再被其它项目引用的媒体 blob。 */
+  const deleteProjectRecord = async (record: DraftProjectRecord) => {
+    if (
+      !window.confirm(
+        `删除项目「${record.name}」？该项目的草稿会从这台电脑上永久删除（其它项目不受影响）。`,
+      )
+    ) {
+      return
+    }
+    try {
+      await deleteDraftProject(record.id)
+      if (store.getState().projectId === record.id) {
+        store.getState().clearSource()
+        setActiveVideo(null)
+        setLibraryOpen(libraryEnabled)
+      }
+      setLibraryRecords((current) => current.filter((item) => item.id !== record.id))
+      store.getState().notify(`已删除项目「${record.name}」`, 'info')
+    } catch {
+      store.getState().notify('删除项目失败', 'warning')
+    }
+  }
 
   useEffect(() => {
     let draftTimer = 0
@@ -630,19 +901,71 @@ export function VideoEditor({
         }
       }
       if (restoringRef.current) return
+      // 改名是一次明确的离散操作，不能等 700ms 的防抖保存：
+      // 「最近项目」列表用的是 libraryRecords 快照、打开列表时又会重新读库，
+      // 所以这里立刻把内存列表里的名字同步好并马上落盘，避免看到旧名字。
+      // 只处理「同名项目、同一个 projectId」的纯改名：adoptProject（切换项目）
+      // 也会改 projectName，但那一刻工程内容还没 hydrate，落盘会把旧内容写进新 id。
+      if (
+        state.projectName !== previous.projectName &&
+        state.projectId &&
+        state.projectId === previous.projectId
+      ) {
+        const renamedId = state.projectId
+        const renamedName = state.projectName
+        setLibraryRecords((current) =>
+          current.map((item) =>
+            item.id === renamedId ? { ...item, name: renamedName, updatedAt: Date.now() } : item,
+          ),
+        )
+        store.getState().flushProjectSave()
+      }
       if (
         state.project === previous.project &&
         state.assets === previous.assets &&
         state.source === previous.source &&
         state.timelineZoom === previous.timelineZoom &&
         state.timelineSettings === previous.timelineSettings &&
-        state.captionFollow === previous.captionFollow
+        state.captionFollow === previous.captionFollow &&
+        state.exportRange === previous.exportRange &&
+        state.projectId === previous.projectId &&
+        state.projectName === previous.projectName
       ) {
         return
       }
       window.clearTimeout(draftTimer)
       draftTimer = window.setTimeout(() => {
-        void saveDraft(toDraftSnapshot(state)).catch(() => undefined)
+        const current = store.getState()
+        const id = current.projectId
+        // 没有项目身份（从未有内容的新会话）不落盘，避免列表里堆满空项目；
+        // 已有项目被清空时仍要保存，否则列表里会留着旧内容。
+        if (!id) return
+        // 记录组装与 store 的 flushProjectSave 共用 buildDraftRecord。
+        const record = buildDraftRecord(current)
+        if (!record) return
+        void (async () => {
+          try {
+            // 串行保存：同一项目 id 不会并发写；旧快照会被更新的一次取代。
+            // 数量上限检查放在 beforeSave 里 —— 它在队列内部执行，不会与
+            // 同 id 的其它保存交叠，也不会出现"旧快照后写覆盖新快照"。
+            const { written } = await saveProjectRecordSerialized(record, {
+              beforeSave: async () => {
+                // 新增项目才检查上限；已有项目的更新永远允许（否则会丢编辑）。
+                if (await hasProjectRecord(id)) return true
+                const total = await countProjectRecords()
+                if (!projectLimitReached(total)) return true
+                current.notify(
+                  `最多保存 ${PROJECT_LIMIT} 个项目，请先在「最近项目」里删除一个再继续编辑`,
+                  'warning',
+                )
+                return false
+              },
+            })
+            void written
+          } catch {
+            reportDraftSaveFailure(current.notify)
+          }
+        })()
       }, 700)
     })
     return () => {
@@ -711,6 +1034,8 @@ export function VideoEditor({
         }
       }
       store.getState().addAssets(imported)
+      // 从「最近项目」列表里直接导入时，素材到了就回到编辑器。
+      setLibraryOpen(false)
     }
     setLoading(false)
     setLoadingLabel(null)
@@ -752,14 +1077,21 @@ export function VideoEditor({
   }
 
   const newProject = () => {
-    if (!window.confirm('清除当前草稿并新建项目？未导出的编辑会丢失。')) return
-    store.getState().clearSource()
-    void clearDraft().catch(() => undefined)
+    const state = store.getState()
+    // 先把当前项目落盘（不清草稿、不影响其它项目），再开一个空会话。
+    state.flushProjectSave()
+    state.clearSource()
     setActiveVideo(null)
     setError(null)
     setLoadingLabel(null)
+    setLoading(false)
     for (const url of importedUrlsRef.current) URL.revokeObjectURL(url)
     importedUrlsRef.current = []
+    // 新建后进入空编辑器：从「最近项目」列表点新建时不能停在列表上，
+    // 否则界面看不出任何变化（列表本来就开着）。
+    setLibraryOpen(false)
+    if (libraryEnabled) void refreshLibrary()
+    state.notify('已新建项目，导入素材即可开始剪辑', 'info')
   }
 
   // ---------------------------------------------------------------- 工程文件导入/导出
@@ -913,6 +1245,32 @@ export function VideoEditor({
           loadingLabel={loadingLabel}
           onCancel={onCancel}
           transcribeProvider={transcribeProvider}
+          theme={resolvedTheme}
+          themePreference={themePreference}
+          onSelectTheme={selectTheme}
+          onOpenProjects={
+            libraryEnabled
+              ? () => {
+                  setLibraryOpen(true)
+                  void refreshLibrary()
+                }
+              : undefined
+          }
+          onNewProjectShortcut={libraryEnabled ? newProject : undefined}
+          projectLibrary={
+            libraryEnabled && libraryOpen
+              ? {
+                  records: libraryRecords,
+                  loading: libraryLoading,
+                  onOpen: (record) => void openProjectRecord(record),
+                  onDelete: (record) => void deleteProjectRecord(record),
+                  onRename: (record, name) => void renameProjectRecord(record, name),
+                  onCreate: newProject,
+                  onImport: pickFile,
+                  onDismiss: () => setLibraryOpen(false),
+                }
+              : null
+          }
         />
         <input
           ref={fileInputRef}

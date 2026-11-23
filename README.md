@@ -288,7 +288,20 @@ interface EditorCommand {
 
 关键文件：[commands.ts](src/editor/core/commands.ts)、[history.ts](src/editor/core/history.ts)、[editorStore.ts](src/editor/store/editorStore.ts)。
 
-#### store 的 slice 拆分
+#### 工程加载与草稿校验
+
+归一化链只有一条：[core/normalizeProject.ts](src/editor/core/normalizeProject.ts)。它固定做三件事——**版本迁移**（`PROJECT_SCHEMA_VERSION`，`schemaVersion` 缺失按 v1 逐级升）、**结构校验**（缺字段填默认、非法值修正/丢弃并产出 `warnings`）、**逐字段归一化**（颜色/文字/抠像/蒙版/变速/封面/画质，含智能字幕 `link.assetId` 迁移）。
+
+为什么必须统一：宿主 API 加载工程（[api.ts](src/editor/api.ts)）与从草稿恢复（[draftStore.restoreDraft](src/editor/services/draftStore.ts)）原来各写一份链，`api.ts` 那份漏了 `migrateCaptionLinks`，于是通过宿主 API 载入的项目字幕 link 不迁移。现在两条路径都只调 `normalizeProject()`，差异不可能再出现。
+
+草稿快照另有外壳版本 `DRAFT_SCHEMA_VERSION`（[core/draft.ts](src/editor/core/draft.ts)）：`migrateDraftSnapshot()` 把任意输入迁移成当前版本——`version` 缺失按 v1、`timelineSettings` 缺失填默认值、`timelineZoom`/`playhead` 缺失或非法填 0（**不是 NaN**；NaN 会被后续 `clamp` 原样传下去污染整个界面）。
+
+保存侧：
+
+- 记录组装只有一份实现 `buildDraftRecord()`（store 的 `flushProjectSave` 与 VideoEditor 的防抖保存共用）。
+- 写入走 `saveProjectRecordSerialized()`：按项目 id 分组的串行队列 + 递增序号，**排队期间出现更新请求就丢弃旧请求**，所以「旧快照后写覆盖新快照」不可能发生；数量上限检查放在队列内的 `beforeSave` 里执行。
+
+ID（[core/ids.ts](src/editor/core/ids.ts)）从「`randomUUID` 前 8 位（32 位熵）」改为完整 UUID（无 `randomUUID` 时用 16 字节随机数，128 位熵）。旧短 id 仍是不透明字符串，读旧数据不受影响。
 
 `editorStore.ts` 从 3667 行拆到 511 行：它现在只做组装（`createStore` + 展开各 slice + 公开类型与选择器），业务按关注点分到 `store/slices/`，共享闭包（历史栈 / `run` / `sync` / 素材回收）集中在 [internal.ts](src/editor/store/internal.ts)，slice 之间互不 import（跨 slice 一律走内核），避免循环依赖。
 
@@ -500,7 +513,7 @@ anullsrc=r=48000:cl=stereo,atrim=duration=3.4,asetpts=PTS-STARTPTS,
 
 ## 4. 测试与验证
 
-### 单元测试：940 个通过（2 个跳过），共 75 个文件
+### 单元测试：966 个通过（2 个跳过），共 77 个文件
 
 ```text
 tests/history.test.ts      6    命令执行/撤销/重做、无操作不入栈、重做清空、100 步上限、结构编辑、不可变快照
@@ -530,6 +543,7 @@ tests/assetReclaim.test.ts 9   素材删除的延迟回收：删除只标记待�
 tests/ffmpegRuntime.test.ts 11 运行时共享：exec 永久挂起时超时在 2s 内 reject（不再 await worker）、取消立即 terminate、任务队列串行、旧代次收到「运行时已重启，请重试」、retryOnRestartOnce 只重试一次、多线程自检超时自动降级单线程
 tests/animationChunk.test.ts 11 动画帧分块编码：块计划不丢帧/不重复帧（总帧数与时长守恒）、90 帧分 3 块且 MEMFS 里 PNG 峰值 ≤ 一个块、块内 PNG 用完即删、多块 concat + `-c:v copy` 混音、同源只写一份源文件（池 + dispose）；WebGL 着色器/上下文失败后重复调用不再新建上下文且调用 WEBGL_lose_context
 tests/cssScope.test.ts 16   样式隔离：真实 editor.css 处理后没有游离选择器（.button/.badge/.toast 等全部挂在 .framecut-root 下）、已经限定过的不会二次前缀、插件幂等、10 组 @keyframes 与 animation 引用同步加 fc- 前缀、:root/html/body 映射到根节点、宿主样式表不被处理、body 行内样式「先保存后恢复」
+tests/projectNormalize.test.ts 19 工程归一化与草稿校验：v1 工程迁移（补 type/markers）、sourceStart>=sourceEnd 修正、缺 id/sourceUrl 的片段丢弃、缺省字段填默认值、完全非法输入不崩；智能字幕 link 在两条加载路径都迁移；旧草稿缺 version/timelineSettings/timelineZoom/playhead 时填默认值（不出 NaN、不抛错）；id 熵与旧短 id 兼容；并发保存只有最新一次落盘
 ```
 
 运行：

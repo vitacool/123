@@ -1,14 +1,14 @@
 import type { EditorState } from '../editorStore'
 import type { StoreGet, StoreInternals, StoreSet } from '../internal'
-import { DEFAULT_PROJECT_NAME, normalizeProjectName, projectThumbnail } from '../../core/projectLibrary'
+import { DEFAULT_PROJECT_NAME, normalizeProjectName } from '../../core/projectLibrary'
 import { createEmptyProject } from '../../core/operations'
 import { TIMELINE_MAX_ZOOM, TIMELINE_MIN_ZOOM } from '../../core/constants'
 import { clampExportRange } from '../../core/exportRange'
 import { clamp, getProjectEnd } from '../../core/timeline'
 import {
+  buildDraftRecord,
   reportDraftSaveFailure,
-  saveProjectRecord,
-  toDraftSnapshot,
+  saveProjectRecordSerialized,
 } from '../../services/draftStore'
 
 
@@ -120,18 +120,11 @@ export function createPersistenceSlice(ctx: {
     },
     flushProjectSave: () => {
       const state = get()
-      const id = state.projectId
-      // 没有项目身份（从未有内容的新会话）不落盘，避免列表里出现空项目。
-      if (!id) return
-      const snapshot = toDraftSnapshot(state)
-      const record = {
-        id,
-        name: state.projectName,
-        updatedAt: Date.now(),
-        thumbnail: projectThumbnail(snapshot),
-        snapshot,
-      }
-      void saveProjectRecord(record).catch(() => reportDraftSaveFailure(state.notify))
+      // 记录组装走 buildDraftRecord（与 VideoEditor 的防抖保存共用同一实现）。
+      const record = buildDraftRecord(state)
+      if (!record) return
+      // 串行队列：切换项目/关闭前的强制保存不会与防抖保存互相覆盖。
+      void saveProjectRecordSerialized(record).catch(() => reportDraftSaveFailure(state.notify))
     },
   }
 }
