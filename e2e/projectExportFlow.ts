@@ -30,6 +30,8 @@ export async function importProjectFileAndExport(
     fileName?: string
     /** 导入后时间轴应出现的片段数（默认 1）。 */
     clipCount?: number
+    /** 提供给对话框的素材文件（默认测试 fixture）。 */
+    filePath?: string
   },
 ): Promise<ProjectExportResult> {
   const dir = testInfo.outputDir
@@ -46,7 +48,7 @@ export async function importProjectFileAndExport(
   const chooserPromise = page.waitForEvent('filechooser')
   await dialog.locator('button[data-action="pick"]').first().click()
   const chooser = await chooserPromise
-  await chooser.setFiles(FIXTURE)
+  await chooser.setFiles(options.filePath ?? FIXTURE)
   await expect(dialog.locator('.project-missing-status').first()).toContainText('已选择')
   await dialog.getByRole('button', { name: /打开工程/ }).click()
   await expectClipCount(page, options.clipCount ?? 1)

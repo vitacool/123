@@ -461,6 +461,26 @@ function mainCompositeLines(args: {
   lines.push(`[${prefix}obg][${prefix}masked]overlay=0:0:format=auto,format=yuv420p${output}`)
 }
 
+/**
+ * 叠加轨混合模式：画中画在画布上的可见矩形（已裁剪到画布内）。
+ * 返回 null 表示画面完全在画布外（无需混合）。
+ */
+function overlayBlendRect(
+  clip: Clip,
+  source: SourceInfo,
+  width: number,
+  height: number,
+): { x: number; y: number; width: number; height: number } | null {
+  const geometry = computeClipGeometry(clip, source, width, height)
+  const { rendered, visible } = geometry
+  const left = Math.max(0, Math.round(rendered.x + visible.x))
+  const top = Math.max(0, Math.round(rendered.y + visible.y))
+  const right = Math.min(width, Math.round(rendered.x + visible.x + visible.w))
+  const bottom = Math.min(height, Math.round(rendered.y + visible.y + visible.h))
+  if (right - left < 2 || bottom - top < 2) return null
+  return { x: left, y: top, width: right - left, height: bottom - top }
+}
+
 /** 模糊背景层：取片段自身画面放大到铺满画布并高斯模糊。 */
 function blurBackgroundChain(width: number, height: number, blurAmount: number): string {
   const sigma = Math.max(1, Math.min(50, blurAmount / 2))
@@ -1580,24 +1600,53 @@ function buildOverlayExportPlan(
     units.forEach((unit, index) => {
       const output = index === units.length - 1 ? '[outv]' : `[vc${index}]`
       const mode = clipBlendMode(unit.clip)
+      const window = `enable='between(t,${num(unit.start)},${num(unit.start + unit.duration)})'`
       if (mode === 'normal') {
         // 普通合成：overlay 叠加，带 alpha 的不透明度已在上游处理。
         lines.push(
-          `${previous}${overlayLabels[index]}overlay=0:0:eof_action=pass:format=auto:enable='between(t,${num(unit.start)},${num(unit.start + unit.duration)})'${output}`,
+          `${previous}${overlayLabels[index]}overlay=0:0:eof_action=pass:format=auto:${window}${output}`,
         )
-      } else {
-        // 混合模式：blend 需要两条等长、同尺寸的流，把叠加流按时间轴补全长。
-        // 先 pad 到片段起点、再 pad 到结尾，然后用 blend=all_mode 合成。
-        const padded = `[ovb${index}]`
-        const total = num(totalDuration)
-        const stop = Math.max(0, totalDuration - (unit.start + unit.duration))
-        lines.push(
-          `${overlayLabels[index]}tpad=start_duration=${num(unit.start)}:stop_duration=${num(stop)}:color=0x00000000,format=yuva420p${padded}`,
-        )
-        lines.push(
-          `${previous}${padded}blend=all_mode=${ffmpegBlendMode(mode)}:all_opacity=1,trim=duration=${total},format=yuva420p${output}`,
-        )
+        previous = output
+        return
       }
+      // 混合模式：只处理画中画覆盖到的**区域**与**时间**。
+      //
+      // 为什么不能整帧 blend：ffmpeg 的 blend 逐平面计算、不按 alpha 合成，
+      // 透明区域（以及片段之外的 tpad 透明帧）里的「透明黑」会参与运算，
+      // 结果把底图整片变黑；colorchannelmixer 的 alpha 也会被忽略（不透明度失效）。
+      //
+      // 做法：
+      // 1. 从当前底图 crop 出画中画矩形；
+      // 2. 同矩形 crop 叠加层，与底图在 gbrp（RGB）下 blend（顺序：底图在前 = backdrop，
+      //    与 Canvas 的 overlay/multiply 公式一致）；
+      // 3. 用叠加层自己的 alpha（含 opacity / 蒙版 / 抠像）alphamerge 还原透明度；
+      // 4. overlay 回底图原位置，并用 enable 限定片段的时间范围。
+      const source = resolve(unit.clip)
+      const rect = overlayBlendRect(unit.clip, source, width, height)
+      if (!rect) {
+        // 完全在画布外：叠加层不可见，按普通 overlay（alpha 为 0，不改底图）。
+        lines.push(
+          `${previous}${overlayLabels[index]}overlay=0:0:eof_action=pass:format=auto:${window}${output}`,
+        )
+        previous = output
+        return
+      }
+      const prefix = `obm${index}`
+      const crop = `crop=${rect.width}:${rect.height}:${rect.x}:${rect.y}`
+      lines.push(`${previous}split=2[${prefix}pf][${prefix}pc]`)
+      lines.push(`[${prefix}pc]${crop},format=gbrp[${prefix}pg]`)
+      lines.push(
+        `${overlayLabels[index]}${crop},format=rgba,split=2[${prefix}oc][${prefix}oa]`,
+      )
+      lines.push(`[${prefix}oc]format=gbrp[${prefix}og]`)
+      lines.push(`[${prefix}oa]alphaextract[${prefix}aa]`)
+      lines.push(
+        `[${prefix}pg][${prefix}og]blend=all_mode=${ffmpegBlendMode(mode)}:all_opacity=1,format=rgba[${prefix}bl]`,
+      )
+      lines.push(`[${prefix}bl][${prefix}aa]alphamerge[${prefix}bm]`)
+      lines.push(
+        `[${prefix}pf][${prefix}bm]overlay=${rect.x}:${rect.y}:format=auto:eof_action=pass:${window}${output}`,
+      )
       previous = output
     })
   } else {

@@ -244,3 +244,60 @@ describe('主轨合成：特殊背景 / 空隙时间轴', () => {
     expect(plan.graph).toContain('overlay=0:0')
   })
 })
+
+/**
+ * 叠加轨混合模式：预览只在画中画覆盖到的像素/时间生效。
+ *
+ * 旧实现把叠加流 tpad 成整条时间线后做 `blend=all_mode`：ffmpeg 的 blend 逐平面
+ * 计算、不认 alpha，透明黑也参与正片叠底 → 画中画以外和片段以外整片变黑；
+ * colorchannelmixer 设的 alpha 也被忽略，不透明度失效。
+ *
+ * 修复后：只在画中画矩形内 crop 底图与叠加层，在 gbrp（RGB）下 blend，
+ * 再用叠加层 alpha（含 opacity）alphamerge 并叠加回底图，enable 限定时间范围。
+ */
+describe('叠加轨混合模式：只在画中画区域/时间内混合', () => {
+  it('不再把叠加流 tpad 成整条时间线', () => {
+    const plan = buildExportPlan(
+      projectWithOverlay({ blendMode: 'multiply' }),
+      SOURCE,
+      true,
+    )
+    expect(plan.graph).not.toContain('tpad=start_duration=')
+    expect(plan.graph).not.toMatch(/blend=all_mode=[a-z]+:all_opacity=1,trim=/)
+  })
+
+  it('在画中画矩形内 crop + gbrp blend，再用 alpha 叠回底图', () => {
+    const plan = buildExportPlan(
+      projectWithOverlay({ blendMode: 'multiply', scale: 0.5 }),
+      SOURCE,
+      true,
+    )
+    expect(plan.graph).toContain('format=gbrp')
+    // 画中画区域（不是整帧）：crop=宽:高:x:y
+    expect(plan.graph).toMatch(/crop=\d+:\d+:\d+:\d+,format=gbrp/)
+    expect(plan.graph).toContain('blend=all_mode=multiply:all_opacity=1')
+    // blend 忽略 alpha，因此必须用叠加层自己的 alpha 还原并叠回底图。
+    expect(plan.graph).toContain('alphaextract')
+    expect(plan.graph).toContain('alphamerge')
+    // 时间范围限制。
+    expect(plan.graph).toContain("enable='between(t,")
+  })
+
+  it('不透明度通过 alpha 生效（不再依赖被 blend 忽略的 colorchannelmixer）', () => {
+    const plan = buildExportPlan(
+      projectWithOverlay({ blendMode: 'screen', opacity: 0.4, scale: 0.5 }),
+      SOURCE,
+      true,
+    )
+    expect(plan.graph).toContain('colorchannelmixer=aa=0.4')
+    expect(plan.graph).toContain('alphaextract')
+    expect(plan.graph).toContain('alphamerge')
+  })
+
+  it('正常模式仍直接 overlay（不引入 crop/blend/alphamerge）', () => {
+    const plan = buildExportPlan(projectWithOverlay({ scale: 0.5 }), SOURCE, true)
+    expect(plan.graph).toContain('overlay=0:0')
+    expect(plan.graph).not.toContain('blend=all_mode')
+    expect(plan.graph).not.toContain('alphaextract')
+  })
+})

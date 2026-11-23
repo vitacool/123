@@ -63,6 +63,18 @@ export function canvasCompositeOperation(mode: BlendMode): GlobalCompositeOperat
 }
 
 /** FFmpeg blend 的 all_mode 取值。 */
+/**
+ * 各模式与 Canvas `globalCompositeOperation` 的对照（8-bit sRGB、gbrp、纯色实测）：
+ * - multiply / screen / darken / lighten：交换两个输入结果相同，与 Canvas 公式一致
+ *   （仅 8-bit 舍入差 1；gbrp 下没有 YUV 色度偏移）。
+ * - overlay：FFmpeg 的条件判断看**第二个输入**（backdrop），因此调用必须写成
+ *   `[底层][叠加层]blend=all_mode=overlay`；写反会得到 hardlight 的观感。
+ * - normal：`blend` 直接输出第一个输入，不能拿来做 alpha 合成；普通叠加请用
+ *   `overlay` 滤镜（它会按 alpha 合成）。
+ * - blend 只逐平面计算、**不按 alpha 合成**：透明区域也会参与运算。所以带透明/半透明
+ *   的混合必须先用叠加层的 alpha 做 `alphamerge`，再 `overlay` 回底图
+ *   （见 exportPlan 的 mainCompositeLines 与叠加轨混合段）。
+ */
 export function ffmpegBlendMode(mode: BlendMode): string {
   return (BLEND_BY_VALUE.get(mode) ?? BLEND_MODES[0]).ffmpeg
 }

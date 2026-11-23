@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import type { Page } from '@playwright/test'
 import ffmpegPath from 'ffmpeg-static'
-import type { CanvasBackground, Clip } from '../src/editor/core/types'
+import type { CanvasBackground, Clip, Project } from '../src/editor/core/types'
 
 /**
  * 「预览与导出对比」测试工具。
@@ -170,6 +170,109 @@ export async function averageClipRenderColor(
 /** 读取素材文件为 base64（Node 侧）。 */
 export function readSourceBase64(path: string): string {
   return readFileSync(path).toString('base64')
+}
+
+export interface ComposeFrameProbe {
+  /** 完整工程（主轨 + 叠加轨），会交给真实的 composeFrame。 */
+  project: Project
+  /** 时间轴时刻（秒）。 */
+  time: number
+  canvasWidth: number
+  canvasHeight: number
+  sourceBase64: string
+  sourceName: string
+  sourceMimeType?: string
+  /** 每个参与合成的片段：id + 该时刻对应的源时间（秒，用于 seek 素材）。 */
+  frames: { clipId: string; seekTime: number }[]
+}
+
+/**
+ * 多轨预览：把工程交给真实 `composeFrame`（与 Preview 同一份合成代码）画一帧，
+ * 返回平均 RGB。用于叠加轨 / 混合模式这类「整帧合成」的对比。
+ */
+export async function averageComposeFrameColor(
+  page: Page,
+  probe: ComposeFrameProbe,
+  region?: SampleRegion,
+): Promise<RgbColor> {
+  return page.evaluate(async (input) => {
+    const frameComposePath = '/src/editor/core/frameCompose.ts'
+    const frameCompose = (await import(/* @vite-ignore */ frameComposePath)) as {
+      composeFrame: (value: Record<string, unknown>) => void
+    }
+
+    const bytes = Uint8Array.from(atob(input.sourceBase64), (char) => char.charCodeAt(0))
+    const url = URL.createObjectURL(new Blob([bytes], { type: input.sourceMimeType ?? 'video/mp4' }))
+    const videos: HTMLVideoElement[] = []
+    const frames = new Map<string, { source: CanvasImageSource; width: number; height: number }>()
+    for (const item of input.frames) {
+      const video = document.createElement('video')
+      video.muted = true
+      video.playsInline = true
+      video.src = url
+      await new Promise<void>((resolve, reject) => {
+        video.onloadeddata = () => resolve()
+        video.onerror = () => reject(new Error('对比工具：素材加载失败'))
+      })
+      const seekTo = Math.max(0, Math.min(video.duration - 0.05, item.seekTime))
+      video.currentTime = seekTo
+      await new Promise<void>((resolve, reject) => {
+        video.onseeked = () => resolve()
+        video.onerror = () => reject(new Error('对比工具：seek 失败'))
+      })
+      frames.set(item.clipId, {
+        source: video,
+        width: video.videoWidth,
+        height: video.videoHeight,
+      })
+      videos.push(video)
+    }
+
+    const canvas = document.createElement('canvas')
+    canvas.width = input.canvasWidth
+    canvas.height = input.canvasHeight
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    if (!ctx) throw new Error('对比工具：无法创建 2D 画布')
+
+    frameCompose.composeFrame({
+      ctx,
+      width: canvas.width,
+      height: canvas.height,
+      project: input.project,
+      time: input.time,
+      frames,
+    })
+
+    const sampleX = input.region
+      ? Math.max(0, Math.min(canvas.width - 1, Math.round(input.region.x)))
+      : 0
+    const sampleY = input.region
+      ? Math.max(0, Math.min(canvas.height - 1, Math.round(input.region.y)))
+      : 0
+    const sampleW = input.region
+      ? Math.max(1, Math.min(canvas.width - sampleX, Math.round(input.region.width)))
+      : canvas.width
+    const sampleH = input.region
+      ? Math.max(1, Math.min(canvas.height - sampleY, Math.round(input.region.height)))
+      : canvas.height
+    const data = ctx.getImageData(sampleX, sampleY, sampleW, sampleH).data
+    let r = 0
+    let g = 0
+    let b = 0
+    const pixels = data.length / 4
+    for (let index = 0; index < data.length; index += 4) {
+      r += data[index]
+      g += data[index + 1]
+      b += data[index + 2]
+    }
+    for (const video of videos) video.removeAttribute('src')
+    URL.revokeObjectURL(url)
+    return {
+      r: Math.round(r / pixels),
+      g: Math.round(g / pixels),
+      b: Math.round(b / pixels),
+    }
+  }, { ...probe, region: region ? clampRegion(region, probe.canvasWidth, probe.canvasHeight) : undefined })
 }
 
 /** 用 ffmpeg 解码导出视频的某一帧并返回平均 RGB（可只取某个区域）。 */
