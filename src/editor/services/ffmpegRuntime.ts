@@ -599,25 +599,43 @@ export async function loadExecRuntimeHandle(): Promise<RuntimeHandle> {
 
 let mp3EncoderSupport: boolean | null = null
 
+/**
+ * 探测运行时是否带 libmp3lame 编码器（决定导出格式里 MP3 是否可选）。
+ *
+ * 三个必须点（以前都没有）：
+ * 1. **走串行队列**：原来直接 `handle.ffmpeg.exec(...)`，绕过 `enqueue` —— 如果探测
+ *    与导出同时发生，会打断正在跑的合成；这里用 `enqueue` + `execNow` 保持一致。
+ * 2. **超时**：`exec` 挂起（本环境的多线程核会挂起）时 Promise 永不 settle，
+ *    调用方的 `checkingMp3` 永远是 true → 格式按钮全部禁用，只能关窗重开。
+ * 3. **失败不缓存**：超时/加载失败时返回 false 只降级一次，不写进缓存，
+ *    这样用户下次点导出还能重新探测（缓存成 false 就再也试不了了）。
+ */
 export async function isMp3EncoderAvailable(): Promise<boolean> {
   if (mp3EncoderSupport !== null) return mp3EncoderSupport
+  let support: boolean
   try {
-    const handle = await acquireRuntime()
-    const lines: string[] = []
-    const collect = ({ message }: LogEvent): void => {
-      lines.push(message)
-    }
-    handle.ffmpeg.on('log', collect)
-    try {
-      await handle.ffmpeg.exec(['-hide_banner', '-encoders'])
-    } catch {
-      // -encoders 只输出信息，非零退出也照样有日志。
-    } finally {
-      handle.ffmpeg.off('log', collect)
-    }
-    mp3EncoderSupport = lines.some((line) => /libmp3lame/.test(line))
+    support = await enqueue(async () => {
+      const handle = await acquireRuntime()
+      const lines: string[] = []
+      const collect = ({ message }: LogEvent): void => {
+        lines.push(message)
+        if (lines.length > 400) lines.shift()
+      }
+      handle.ffmpeg.on('log', collect)
+      try {
+        // 注意：非零退出码不会抛错（execNow 返回 code），这里抛出来的只可能是
+        // 超时 / 取消 / 运行时重启 —— 必须往外抛，让外层走「不缓存」的分支，
+        // 否则超时会被当成「没有 libmp3lame」并缓存下来，之后永远探测不了。
+        await execNow(handle, ['-hide_banner', '-encoders'], { timeoutMs: probeTimeoutMs })
+      } finally {
+        handle.ffmpeg.off('log', collect)
+      }
+      return lines.some((line) => /libmp3lame/.test(line))
+    })
   } catch {
-    mp3EncoderSupport = false
+    // 超时（运行时已被 terminate）或加载失败：不写缓存，下次可重试。
+    return false
   }
-  return mp3EncoderSupport
+  mp3EncoderSupport = support
+  return support
 }

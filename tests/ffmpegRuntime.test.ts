@@ -23,6 +23,8 @@ const hoisted = vi.hoisted(() => ({
    */
   loadMode: 'ok' as 'ok' | 'hang',
   /** deleteFile 是否永久挂起（验证「超时后不再 await worker」）。 */
+  /** `-encoders` 的输出是否包含 libmp3lame（默认包含）。 */
+  hasMp3Encoder: true,
   deleteHangs: false,
   /** 进入/离开 exec 的顺序（检查是否重叠）。 */
   events: [] as string[],
@@ -61,12 +63,23 @@ vi.mock('@ffmpeg/ffmpeg', () => {
     off(event: string, handler: (payload: unknown) => void): void {
       this.handlers.get(event)?.delete(handler)
     }
-    async exec(): Promise<number> {
+    async exec(args: string[] = []): Promise<number> {
       hoisted.events.push(`enter:${this.id}`)
       if (hoisted.execMode === 'hang') {
         return new Promise<number>(() => undefined)
       }
       await Promise.resolve()
+      // 模拟 ffmpeg 的日志输出（MP3 探测靠解析 `-encoders` 的日志）。
+      const emit = (message: string) => {
+        for (const handler of this.handlers.get('log') ?? []) handler({ message })
+      }
+      if (args.includes('-encoders')) {
+        if (hoisted.hasMp3Encoder) {
+          emit(' V..... libmp3lame      libmp3lame MP3 (MPEG audio layer 3)')
+        } else {
+          emit(' V..... aac            AAC (Advanced Audio Coding)')
+        }
+      }
       hoisted.events.push(`exit:${this.id}`)
       return 0
     }
@@ -91,6 +104,7 @@ beforeEach(() => {
   hoisted.instances.length = 0
   hoisted.execMode = 'ok'
   hoisted.loadMode = 'ok'
+  hoisted.hasMp3Encoder = true
   hoisted.deleteHangs = false
   hoisted.events = []
   vi.stubGlobal('window', {
@@ -289,5 +303,49 @@ describe('加载超时：核心资源不可用时不能永久卡在 0%', () => {
     await expect(runtime.acquireRuntime()).rejects.toThrow(/加载超时/)
     // 超时是明确的失败信号，不该悄悄把 forcedSingleThread 置真
     expect(runtime.getRuntimeCapabilities().forcedSingleThread).toBe(false)
+  })
+})
+
+/**
+ * MP3 编码器探测：以前直接 `handle.ffmpeg.exec(...)`，绕过串行队列且没有超时。
+ * exec 挂起时 Promise 永不 settle → 导出弹窗的 checkingMp3 永远为 true →
+ * 格式按钮全部禁用，只能关窗重开。
+ */
+describe('MP3 编码器探测：不绕队列、不永久挂起、失败不缓存', () => {
+  it('正常情况：解析 -encoders 日志里的 libmp3lame 与「无」两种结果', async () => {
+    const runtime = await loadRuntime()
+    await expect(runtime.isMp3EncoderAvailable()).resolves.toBe(true)
+
+    // 换一个全新模块实例，模拟没有 libmp3lame 的构建
+    hoisted.hasMp3Encoder = false
+    const runtime2 = await loadRuntime()
+    await expect(runtime2.isMp3EncoderAvailable()).resolves.toBe(false)
+  })
+
+  it('exec 挂起 → 在探测超时内返回 false（不永久挂起），且不缓存、下次可重试', async () => {
+    const runtime = await loadRuntime()
+    runtime.setProbeTimeoutMsForTests(50)
+    hoisted.execMode = 'hang'
+    const started = Date.now()
+
+    await expect(runtime.isMp3EncoderAvailable()).resolves.toBe(false)
+    expect(Date.now() - started).toBeLessThan(2000)
+
+    // 关键：结果没有被缓存成 false —— 环境恢复后还能探测出 true
+    hoisted.execMode = 'ok'
+    await expect(runtime.isMp3EncoderAvailable()).resolves.toBe(true)
+  })
+
+  it('探测与其它 exec 串行（不打断正在跑的任务）', async () => {
+    const runtime = await loadRuntime()
+    hoisted.events = []
+    await Promise.all([
+      runtime.runFFmpegExec(['-i', 'x']),
+      runtime.isMp3EncoderAvailable(),
+      runtime.runFFmpegExec(['-i', 'y']),
+    ])
+    // 队列保证 enter/exit 严格交替，不会出现 enter:1 enter:1
+    const sequence = hoisted.events.join(',')
+    expect(sequence).not.toMatch(/enter:(\d+),enter:\1/)
   })
 })
