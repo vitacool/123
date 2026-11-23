@@ -540,7 +540,7 @@ pnpm build:lib        # tsc -b && vite build --config vite.config.lib.ts（库�
 **Playwright E2E**（Chromium + Firefox）：
 
 ```bash
-pnpm test:e2e              # 两个浏览器都跑（4 个用例 × 2 = 8）
+pnpm test:e2e              # 两个浏览器都跑（6 个用例 × 2 = 12）
 pnpm test:e2e:chromium     # 只跑 Chromium
 pnpm test:e2e:firefox      # 只跑 Firefox
 ```
@@ -552,6 +552,7 @@ pnpm test:e2e:firefox      # 只跑 Firefox
 | `e2e/import-export.spec.ts` | 导入 → 拖播放头 → 分割 → 删除一段 → 导出；用 **真实 ffmpeg**（ffmpeg-static）探测产物：约 1.5s、h264 视频、**含 aac 音轨** |
 | `e2e/editing-drag.spec.ts` | 拖动片段（位置变化）、拖动右侧裁剪手柄（变短且左边缘不动）——覆盖 Firefox 的 `pointerId` 场景 |
 | `e2e/draft-restore.spec.ts` | 编辑后自动保存 → 刷新 → 从「最近项目」打开 → 片段与项目名恢复 |
+| `e2e/replay.spec.ts` | 重播：播放结束点重播从头开始；**播放中点重播**立即回到 0 并继续推进 |
 
 测试素材（3 秒彩条 + 440Hz 正弦音）由 [scripts/make-test-fixture.mjs](scripts/make-test-fixture.mjs) 用
 `ffmpeg-static` 现场生成到 `tests/e2e/fixtures/clip.mp4`（**不进版本库**）；若 pnpm 跳过了

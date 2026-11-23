@@ -819,6 +819,14 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
     let lastVideoTime = 0
     /** 上一次向 store 同步 playhead 的时刻（10Hz；其余帧只走 DOM）。 */
     let lastStoreSync = 0
+    /**
+     * 上一次**由播放循环自己**发布的播放头时间。
+     *
+     * 用来识别「外部改了 playhead」：播放中点「重播」（playhead 归零）或拖动播放头时，
+     * store 里的值会与这个值明显不同；此时必须重新锚定时钟，否则运行中的 tick 仍然
+     * 按旧锚点往前推，把刚设成 0 的播放头又覆盖回去 —— 表现就是「点重播没反应」。
+     */
+    let lastPublished = startPlayhead
     let activeElement: HTMLVideoElement | null = null
     let activeClipId: string | null = null
     let preparedClipId: string | null = null
@@ -936,6 +944,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
 
     /** 播放头：每帧走 DOM（不经过 React），store 只做 10Hz 低频同步。 */
     const commitTime = (now: number, time: number, force = false): void => {
+      lastPublished = time
       publishPlayheadTime(time)
       if (force || now - lastStoreSync >= 100) {
         lastStoreSync = now
@@ -966,6 +975,23 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
     const tick = (now: number) => {
       const state = store.getState()
       if (!state.isPlaying) return
+
+      /*
+       * 外部改了播放头？（点重播归零 / 拖动播放头 / 快捷键跳转）
+       * 10Hz 同步本身最多落后 0.1s，所以 0.25s 的阈值不会误判；
+       * 触发后把时钟锚到这个新位置，随后的帧就从这个位置继续推进。
+       */
+      const externalTime = state.playhead
+      if (Math.abs(externalTime - lastPublished) > 0.25) {
+        anchorTimeline = externalTime
+        anchorWall = now
+        stalledSince = null
+        lastVideoTime = activeElement?.currentTime ?? 0
+        lastPublished = externalTime
+        publishPlayheadTime(externalTime)
+        // 视频也要跟着跳到新位置：交由下面的 seek 逻辑用新的 time 计算目标。
+      }
+
       // 主视频不推进 → 冻结墙钟（缓冲/等待/seek/被暂停），恢复时重新锚定。
       if (activeElement) {
         const progressing =
