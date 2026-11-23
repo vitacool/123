@@ -555,17 +555,31 @@ pnpm test:e2e:firefox      # 只跑 Firefox
 | `e2e/replay.spec.ts` | 重播：播放结束点重播从头开始；**播放中点重播**立即回到 0 并继续推进 |
 
 测试素材（3 秒彩条 + 440Hz 正弦音）由 [scripts/make-test-fixture.mjs](scripts/make-test-fixture.mjs) 用
-`ffmpeg-static` 现场生成到 `tests/e2e/fixtures/clip.mp4`（**不进版本库**）；若 pnpm 跳过了
-ffmpeg-static 的构建脚本，先执行 `node node_modules/ffmpeg-static/install.js` 下载二进制。
+`ffmpeg-static` 现场生成到 `tests/e2e/fixtures/clip.mp4`（**不进版本库**）。依赖的构建脚本白名单
+（`ffmpeg-static` / `sharp` / `onnxruntime-node` / `protobufjs`）写在
+[pnpm-workspace.yaml](pnpm-workspace.yaml) 的 `allowBuilds` 里 —— pnpm 11 已不再读取
+`package.json` 的 `pnpm` 字段，所以 `pnpm install` 会自动下载 ffmpeg 二进制并编译原生依赖，
+**不需要**手工执行 `node node_modules/ffmpeg-static/install.js`。
 
 **CI**：[.github/workflows/ci.yml](.github/workflows/ci.yml) 两个 job ——
 `typecheck / lint / vitest`（外加 `build:lib` 验证声明产物），以及 `playwright (chromium)`、
-`playwright (firefox)` 的矩阵；失败时上传 `playwright-report/` 与 `test-results/`。
+`playwright (firefox)` 的矩阵（浏览器目录 `~/.cache/ms-playwright` 按 lockfile 哈希缓存）；
+失败时上传 `playwright-report/` 与 `test-results/`。
 
 **库发布**：`pnpm build:lib` 用 [vite-plugin-dts](vite.config.lib.ts) 产出声明（`dist-lib/index.d.ts`
 重新导出全部公开 API，共 225 个 `.d.ts`）。`package.json` 的 `types` 与 `exports["."].types` 都指向
 `./dist-lib/index.d.ts`；`react` / `react-dom` 是 **peerDependencies**（宿主提供），同时保留在
 `devDependencies` 里供本地开发与测试。
+
+打包边界（`files: ["dist-lib"]`）：`npm pack` 产出 **3.1 MB / 238 个文件**，只有 `dist-lib`
+（JS、`.d.ts`、CSS、`assets/` 下的 worker 资产与 sourcemap）加 README —— 不含 `src/`、`tests/`、
+`e2e/` 与构建脚本。两个需要宿主注意的点：
+
+1. **`dist-lib/assets/` 必须一起部署**：ASR 的 `whisperWorker`、`vadWorker` 与 FFmpeg 的 `esm` 包装
+   都是独立 chunk，只拷 `framecut-editor.js` 会 404。
+2. 包当前仍是 `"private": true`，且**没有 `license` 字段**（仓库里没有任何许可证信息）。
+   要对外发布需要维护者先确定许可证（补 `LICENSE` 文件 + `license` 字段），再移除 `private`；
+   `prepublishOnly: pnpm build:lib` 已经配好，发布时会强制重建产物。
 
 ### 单元测试：979 个通过（2 个跳过），共 78 个文件
 
