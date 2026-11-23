@@ -27,6 +27,22 @@ export type StoreSet = (
   patch: Partial<EditorState> | ((state: EditorState) => Partial<EditorState>),
 ) => void
 
+/**
+ * store 里可见的历史摘要。
+ *
+ * 为什么不是直接放 `HistoryStack`：它是**可变对象**，引用永远不变，zustand 的选择器
+ * 不会因为"栈长度变了"而重渲染。所以每次栈变动都整体替换这个摘要对象，
+ * `canUndo / canRedo` 由里面的长度派生（见 selectCanUndo / selectCanRedo）。
+ */
+export interface HistoryState {
+  /** 真正的栈（唯一真源）。 */
+  readonly stack: HistoryStack
+  readonly pastLength: number
+  readonly futureLength: number
+  /** 每次变动 +1，便于调试与订阅（也为将来做时间旅行留位置）。 */
+  readonly version: number
+}
+
 export interface StoreInternals {
   /** 命令历史栈（唯一真源）。 */
   readonly history: HistoryStack
@@ -34,6 +50,12 @@ export interface StoreInternals {
   sync(project: Project, selection?: string | null): void
   /** 执行一条命令（磁吸夹紧 + 字幕联动 + 入历史 + 同步）。 */
   run(command: EditorCommand): boolean
+  /** 撤销一步（同时发布历史摘要）；无步骤可撤销返回 null。 */
+  undo(): import('../core/history').HistoryEntry | null
+  /** 重做一步（同时发布历史摘要）。 */
+  redo(): import('../core/history').HistoryEntry | null
+  /** 重置历史（切/关项目）并发布摘要。 */
+  resetHistory(project: Project): void
   /** 待回收素材的对账。 */
   reconcilePendingAssets(options?: { force?: boolean }): void
   /** 工程被整体替换时停掉进行中的倒放任务。 */
@@ -62,6 +84,20 @@ export function createStoreInternals(
 ): StoreInternals {
   const history = new HistoryStack(initial)
   let reverseController: AbortController | null = null
+  let historyVersion = 0
+
+  /** 把历史栈的最新长度写进 store（整体替换摘要对象 → 选择器能感知变化）。 */
+  const publishHistory = (): void => {
+    historyVersion += 1
+    set({
+      history: {
+        stack: history,
+        pastLength: history.pastLength,
+        futureLength: history.futureLength,
+        version: historyVersion,
+      },
+    })
+  }
 
   // ---- idAndReverse ----
     /** 判断某 id 是否仍存在于工程中（任意轨道、任意类型）。 */
@@ -116,8 +152,6 @@ export function createStoreInternals(
         selectedClipId: nextSelection,
         playhead,
         exportRange,
-        canUndo: history.canUndo,
-        canRedo: history.canRedo,
         cropSession:
           current.cropSession && findClipLocation(effective, current.cropSession.clipId)
             ? current.cropSession
@@ -221,6 +255,7 @@ export function createStoreInternals(
     }
     const result = history.execute(effectiveCommand)
     if (!result.changed) return false
+    publishHistory()
     set({ isPlaying: false })
     sync(result.project, command.selectionAfter)
     set({ lastAction: command.label })
@@ -229,6 +264,20 @@ export function createStoreInternals(
 
   return {
     history,
+    undo: () => {
+      const entry = history.undo()
+      if (entry) publishHistory()
+      return entry
+    },
+    redo: () => {
+      const entry = history.redo()
+      if (entry) publishHistory()
+      return entry
+    },
+    resetHistory: (project) => {
+      history.reset(project)
+      publishHistory()
+    },
     sync,
     run,
     reconcilePendingAssets,

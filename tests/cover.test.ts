@@ -13,7 +13,7 @@ import { createClearCoverCommand, createSetCoverCommand } from '../src/editor/co
 import { createInitialProject } from '../src/editor/core/operations'
 import { normalizeProjectCover } from '../src/editor/core/draft'
 import { createProjectFile } from '../src/editor/projectFile'
-import { createEditorStore } from '../src/editor/store/editorStore'
+import { createEditorStore, selectCanUndo } from '../src/editor/store/editorStore'
 import type { Project, ProjectCover, SourceInfo } from '../src/editor/core/types'
 
 const SOURCE: SourceInfo = {
@@ -170,7 +170,7 @@ describe('store：封面 action', () => {
     store.getState().setCoverFromFrame(999)
     const state = store.getState()
     expect(state.project.cover).toBeUndefined()
-    expect(state.canUndo).toBe(false)
+    expect(selectCanUndo(store.getState())).toBe(false)
     expect(state.toast?.message).toContain('没有可截取的画面')
   })
 

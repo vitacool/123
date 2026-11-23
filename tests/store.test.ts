@@ -4,7 +4,7 @@ import {
   insertFreezeAt,
 } from '../src/editor/core/operations'
 import type { SourceInfo } from '../src/editor/core/types'
-import { createEditorStore } from '../src/editor/store/editorStore'
+import { createEditorStore, selectCanUndo, selectCanRedo } from '../src/editor/store/editorStore'
 
 const SOURCE: SourceInfo = {
   url: 'blob:test',
@@ -28,7 +28,7 @@ describe('editor store integration', () => {
     expect(state.project.clips).toHaveLength(1)
     expect(state.project.clips[0].id).toBe(state.selectedClipId)
     expect(state.project.clips[0].sourceEnd).toBe(12)
-    expect(state.canUndo).toBe(false)
+    expect(selectCanUndo(store.getState())).toBe(false)
   })
 
   it('routes split, undo and redo through the command history', () => {
@@ -37,12 +37,12 @@ describe('editor store integration', () => {
     store.getState().splitAtPlayhead()
     let state = store.getState()
     expect(state.project.clips).toHaveLength(2)
-    expect(state.canUndo).toBe(true)
+    expect(selectCanUndo(store.getState())).toBe(true)
     expect(state.selectedClipId).toBe(state.project.clips[1].id)
 
     state.undo()
     expect(store.getState().project.clips).toHaveLength(1)
-    expect(store.getState().canRedo).toBe(true)
+    expect(selectCanRedo(store.getState())).toBe(true)
 
     store.getState().redo()
     state = store.getState()
@@ -74,11 +74,11 @@ describe('editor store integration', () => {
     store.getState().beginCrop()
     store.getState().updateCropDraft({ x: 0.2, y: 0.1, w: 0.5, h: 0.6 })
     expect(store.getState().project.clips[0].crop).toEqual({ x: 0, y: 0, w: 1, h: 1 })
-    expect(store.getState().canUndo).toBe(false)
+    expect(selectCanUndo(store.getState())).toBe(false)
 
     store.getState().commitCrop()
     expect(store.getState().project.clips[0].crop).toEqual({ x: 0.2, y: 0.1, w: 0.5, h: 0.6 })
-    expect(store.getState().canUndo).toBe(true)
+    expect(selectCanUndo(store.getState())).toBe(true)
     expect(store.getState().cropSession).toBeNull()
 
     store.getState().undo()
@@ -93,12 +93,12 @@ describe('editor store integration', () => {
       patch: { rotation: 45, scale: 1.8 },
     })
     expect(store.getState().project.clips[0].rotation).toBe(0)
-    expect(store.getState().canUndo).toBe(false)
+    expect(selectCanUndo(store.getState())).toBe(false)
 
     store.getState().setRotation(45)
     expect(store.getState().project.clips[0].rotation).toBe(45)
     expect(store.getState().previewPatch).toBeNull()
-    expect(store.getState().canUndo).toBe(true)
+    expect(selectCanUndo(store.getState())).toBe(true)
   })
 
   it('adds and removes markers through commands', () => {
@@ -123,7 +123,7 @@ describe('editor store integration', () => {
     let state = store.getState()
     expect(state.project.clips).toHaveLength(1)
     expect(state.selectedClipId).toBe(state.project.clips[0].id)
-    expect(state.canUndo).toBe(true)
+    expect(selectCanUndo(store.getState())).toBe(true)
 
     state.undo()
     state = store.getState()
@@ -142,7 +142,7 @@ describe('editor store integration', () => {
     expect(state.project.clips.map((clip) => clip.id)).toEqual([rightId, leftId])
     expect(state.selectedClipId).toBe(rightId)
     expect(state.playhead).toBe(0)
-    expect(state.canUndo).toBe(true)
+    expect(selectCanUndo(store.getState())).toBe(true)
   })
 
   it('restores trimmed source from clip edges without losing media', () => {
@@ -170,13 +170,13 @@ describe('editor store integration', () => {
     let state = store.getState()
     expect(state.project.clips[0].sourceStart).toBe(3)
     expect(state.project.clips[0].gapBefore).toBe(3)
-    expect(state.canUndo).toBe(true)
+    expect(selectCanUndo(store.getState())).toBe(true)
 
     state.undo()
     state = store.getState()
     expect(state.project.clips[0].sourceStart).toBe(0)
     expect(state.project.clips[0].gapBefore).toBe(0)
-    expect(state.canRedo).toBe(true)
+    expect(selectCanRedo(store.getState())).toBe(true)
 
     state.redo()
     state = store.getState()
@@ -192,7 +192,7 @@ describe('editor store integration', () => {
     expect(state.project.overlayTracks).toHaveLength(1)
     expect(state.project.overlayTracks![0].clips).toHaveLength(0)
     expect(state.selectedClipId).toBe(baseId)
-    expect(state.canUndo).toBe(true)
+    expect(selectCanUndo(store.getState())).toBe(true)
     const overlayTrackId = state.project.overlayTracks![0].id
 
     store.getState().removeOverlayTrack(overlayTrackId)
@@ -211,7 +211,7 @@ describe('editor store integration', () => {
     const state = store.getState()
     expect(state.project.clips).toHaveLength(0)
     expect(state.source).toBeNull()
-    expect(state.canUndo).toBe(false)
+    expect(selectCanUndo(store.getState())).toBe(false)
   })
 
   it('inserts a freeze at an exact clip boundary with a stable frame', () => {
@@ -244,7 +244,7 @@ describe('text track history', () => {
     expect(clips).toHaveLength(2)
     expect(clips[0].end).toBe(1.5)
     expect(clips[1].start).toBe(1.5)
-    expect(store.getState().canUndo).toBe(true)
+    expect(selectCanUndo(store.getState())).toBe(true)
   })
 })
 
@@ -260,5 +260,157 @@ describe('locked target tracks', () => {
     const state = store.getState()
     expect(state.project.clips).toHaveLength(1)
     expect(state.project.overlayTracks?.[0].clips).toHaveLength(0)
+  })
+})
+
+describe('导出区间（I/O 打点）', () => {
+  it('设入点：只设了一端时出点取工程终点', () => {
+    const store = makeStore()
+    store.getState().setPlayhead(3)
+    store.getState().setExportInPoint()
+    expect(store.getState().exportRange).toEqual({ start: 3, end: 12 })
+  })
+
+  it('设出点：只设了一端时入点取工程起点', () => {
+    const store = makeStore()
+    store.getState().setPlayhead(5)
+    store.getState().setExportOutPoint()
+    expect(store.getState().exportRange).toEqual({ start: 0, end: 5 })
+  })
+
+  it('两端都设过之后各自保持另一端不变', () => {
+    const store = makeStore()
+    store.getState().setPlayhead(2)
+    store.getState().setExportInPoint()
+    store.getState().setPlayhead(7)
+    store.getState().setExportOutPoint()
+    expect(store.getState().exportRange).toEqual({ start: 2, end: 7 })
+
+    // 再改入点：出点保持 7。
+    store.getState().setPlayhead(4)
+    store.getState().setExportInPoint()
+    expect(store.getState().exportRange).toEqual({ start: 4, end: 7 })
+  })
+
+  it('入点越过出点、或在工程终点设入点都会被拒绝并提示', () => {
+    const store = makeStore()
+    store.getState().setPlayhead(2)
+    store.getState().setExportInPoint()
+    store.getState().setPlayhead(7)
+    store.getState().setExportOutPoint()
+    expect(store.getState().exportRange).toEqual({ start: 2, end: 7 })
+
+    // 已有区间时另一端保持不变：入点越过出点 → 拒绝。
+    store.getState().setPlayhead(7.05)
+    store.getState().setExportInPoint()
+    expect(store.getState().exportRange).toEqual({ start: 2, end: 7 })
+    expect(store.getState().toast?.kind).toBe('warning')
+
+    // 出点越到入点之前同样拒绝。
+    store.getState().setPlayhead(1)
+    store.getState().setExportOutPoint()
+    expect(store.getState().exportRange).toEqual({ start: 2, end: 7 })
+
+    // 没有区间时出点会自动取工程起点；入点取工程终点（此处在 12 秒 → 长度 0 被拒）。
+    store.getState().clearExportRange()
+    store.getState().setPlayhead(12)
+    store.getState().setExportInPoint()
+    expect(store.getState().exportRange).toBeNull()
+    expect(store.getState().toast?.kind).toBe('warning')
+  })
+
+  it('拖动端点时保持至少 0.1 秒，并夹到工程范围内', () => {
+    const store = makeStore()
+    store.getState().setPlayhead(2)
+    store.getState().setExportInPoint()
+    store.getState().setPlayhead(8)
+    store.getState().setExportOutPoint()
+
+    store.getState().setExportRangeEdge('start', 20)
+    expect(store.getState().exportRange).toEqual({ start: 7.9, end: 8 })
+
+    store.getState().setExportRangeEdge('end', 40)
+    expect(store.getState().exportRange).toEqual({ start: 7.9, end: 12 })
+
+    store.getState().setExportRangeEdge('end', -5)
+    expect(store.getState().exportRange).toEqual({ start: 7.9, end: 8 })
+  })
+
+  it('清除区间（Alt+X 对应 action）', () => {
+    const store = makeStore()
+    store.getState().setPlayhead(2)
+    store.getState().setExportInPoint()
+    expect(store.getState().exportRange).not.toBeNull()
+    store.getState().clearExportRange()
+    expect(store.getState().exportRange).toBeNull()
+  })
+
+  it('区间不进撤销历史：撤销 / 重做不改变区间', () => {
+    const store = makeStore()
+    store.getState().setPlayhead(2)
+    store.getState().setExportInPoint()
+    store.getState().setPlayhead(7)
+    store.getState().setExportOutPoint()
+    const range = store.getState().exportRange
+
+    store.getState().setPlayhead(5)
+    store.getState().splitAtPlayhead()
+    expect(selectCanUndo(store.getState())).toBe(true)
+    store.getState().undo()
+    expect(store.getState().exportRange).toEqual(range)
+    store.getState().redo()
+    expect(store.getState().exportRange).toEqual(range)
+  })
+
+  it('工程变短后区间自动夹回有效范围', () => {
+    const store = makeStore()
+    store.getState().setPlayhead(2)
+    store.getState().setExportInPoint()
+    store.getState().setPlayhead(8)
+    store.getState().setExportOutPoint()
+
+    // 播放头 5 处分割，删除后半段：工程只剩 5 秒。
+    store.getState().setPlayhead(5)
+    store.getState().splitAtPlayhead()
+    store.getState().deleteSelectedClip()
+    expect(store.getState().project.clips).toHaveLength(1)
+    expect(store.getState().exportRange).toEqual({ start: 2, end: 5 })
+  })
+
+  it('载入旧草稿（没有 exportRange）时按 null 处理，越界区间夹取', () => {
+    const store = makeStore()
+    const project = store.getState().project
+    store.getState().hydrateDraft({
+      project,
+      assets: store.getState().assets,
+      source: store.getState().source,
+      timelineZoom: 92,
+      timelineSettings: {
+        mainTrackMagnet: true,
+        autoSnap: true,
+        linkage: true,
+        previewAxis: true,
+        captionFollow: true,
+      },
+      playhead: 0,
+    })
+    expect(store.getState().exportRange).toBeNull()
+
+    store.getState().hydrateDraft({
+      project,
+      assets: store.getState().assets,
+      source: store.getState().source,
+      timelineZoom: 92,
+      timelineSettings: {
+        mainTrackMagnet: true,
+        autoSnap: true,
+        linkage: true,
+        previewAxis: true,
+        captionFollow: true,
+        exportRange: { start: 9, end: 40 },
+      },
+      playhead: 0,
+    })
+    expect(store.getState().exportRange).toEqual({ start: 9, end: 12 })
   })
 })

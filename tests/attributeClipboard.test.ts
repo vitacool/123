@@ -19,7 +19,7 @@ import {
   setAudio,
   setVisual,
 } from '../src/editor/core/attributeClipboard'
-import { createEditorStore } from '../src/editor/store/editorStore'
+import { createEditorStore, selectCanUndo } from '../src/editor/store/editorStore'
 import type { Clip, Project, SourceInfo } from '../src/editor/core/types'
 
 const SOURCE: SourceInfo = {
@@ -231,7 +231,7 @@ describe('store：属性复制粘贴 action', () => {
     const before = store.getState().project
     store.getState().pasteVisualAttributes([clipId])
     expect(store.getState().project).toBe(before)
-    expect(store.getState().canUndo).toBe(false)
+    expect(selectCanUndo(store.getState())).toBe(false)
     expect(store.getState().toast?.message).toContain('剪贴板为空')
   })
 
@@ -248,16 +248,16 @@ describe('store：属性复制粘贴 action', () => {
     store.getState().addOverlayTrack()
     const trackId = store.getState().project.overlayTracks![0].id
     const assetId = store.getState().assets[0].id
-    store.getState().addAssetToTimeline(assetId, trackId, 0)
+    store.getState().addAssetToTimeline(assetId, { kind: 'track', trackKind: 'overlay', trackId, time: 0 })
     const overlayClipId = store.getState().project.overlayTracks![0].clips[0].id
     store.getState().toggleTrackFlag('overlay', trackId, 'locked')
 
     const before = store.getState().project
-    const historyBefore = store.getState().canUndo
+    const historyBefore = selectCanUndo(store.getState())
     store.getState().pasteVisualAttributes([overlayClipId])
 
     expect(store.getState().project).toBe(before)
-    expect(store.getState().canUndo).toBe(historyBefore)
+    expect(selectCanUndo(store.getState())).toBe(historyBefore)
     expect(store.getState().toast?.message).toContain('锁定')
     const overlayClip = store.getState().project.overlayTracks![0].clips[0]
     expect(overlayClip.scale).not.toBeCloseTo(1.6, 5)

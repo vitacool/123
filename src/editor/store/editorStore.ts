@@ -94,7 +94,7 @@ import {
   type ExportRange,
 } from '../core/exportRange'
 import { formatClock } from '../core/format'
-import { clampMainTrackStart, createStoreInternals } from './internal'
+import { clampMainTrackStart, createStoreInternals, type HistoryState } from './internal'
 import {
   clampCrop,
   createEmptyProject,
@@ -527,8 +527,8 @@ export interface EditorState {
   cancelReverse: () => void
   markerEditorId: string | null
   exportDialogOpen: boolean
-  canUndo: boolean
-  canRedo: boolean
+  /** 历史栈摘要：canUndo / canRedo 由它派生（见 selectCanUndo / selectCanRedo）。 */
+  history: HistoryState
   lastAction: string
   toast: ToastMessage | null
 
@@ -747,7 +747,7 @@ export function createEditorStore() {
   return createStore<EditorState>()((set, get) => {
   /** 共享内核：历史栈、命令执行、状态同步、素材回收（见 store/internal.ts）。 */
   const internals = createStoreInternals(get, set, initial)
-  const { history, sync, run, reconcilePendingAssets, cancelReverseForProjectSwap } = internals
+  const { sync, run, reconcilePendingAssets, cancelReverseForProjectSwap } = internals
 
 
 
@@ -819,8 +819,12 @@ export function createEditorStore() {
       colorClipboard: null,
       coverPreview: false,
       coverPanelOpen: false,
-      canUndo: false,
-      canRedo: false,
+      history: {
+        stack: internals.history,
+        pastLength: 0,
+        futureLength: 0,
+        version: 0,
+      },
       lastAction: '',
       toast: null,
       asrWordsBySource: null,
@@ -832,7 +836,7 @@ export function createEditorStore() {
         cancelReverseForProjectSwap()
         const asset: MediaAsset = { ...source, id: createId('asset') }
         const project = createInitialProject(source, createId('clip'))
-        history.reset(project)
+        internals.resetHistory(project)
         set({
           source: asset,
           assets: [asset],
@@ -851,8 +855,6 @@ export function createEditorStore() {
           previewPatch: null,
           markerEditorId: null,
           exportDialogOpen: false,
-          canUndo: false,
-          canRedo: false,
           lastAction: '',
           toast: null,
           asrWordsBySource: null,
@@ -861,7 +863,7 @@ export function createEditorStore() {
 
       hydrateDraft: (draft) => {
         cancelReverseForProjectSwap()
-        history.reset(draft.project)
+        internals.resetHistory(draft.project)
         const firstAudio = draft.project.audioTracks?.[0]?.clips[0]?.id ?? null
         const firstSelection = draft.project.clips[0]?.id ?? firstAudio
         set({
@@ -898,8 +900,6 @@ export function createEditorStore() {
           previewPatch: null,
           markerEditorId: null,
           exportDialogOpen: false,
-          canUndo: false,
-          canRedo: false,
           lastAction: '',
           toast: null,
           asrWordsBySource: null,
@@ -928,7 +928,7 @@ export function createEditorStore() {
             return
           }
           const project = createInitialProject(primary, createId('clip'), primary.kind)
-          history.reset(project)
+          internals.resetHistory(project)
           set({
             source: primary,
             assets: merged,
@@ -943,8 +943,6 @@ export function createEditorStore() {
             isPlaying: false,
             cropSession: null,
             previewPatch: null,
-            canUndo: false,
-            canRedo: false,
             asrWordsBySource: null,
             lastAction: '',
           })
@@ -1140,7 +1138,7 @@ export function createEditorStore() {
       clearSource: () => {
         cancelReverseForProjectSwap()
         const empty = createEmptyProject()
-        history.reset(empty)
+        internals.resetHistory(empty)
         set({
           source: null,
           assets: [],
@@ -1158,8 +1156,6 @@ export function createEditorStore() {
           previewPatch: null,
           markerEditorId: null,
           exportDialogOpen: false,
-          canUndo: false,
-          canRedo: false,
           lastAction: '',
           toast: null,
           asrWordsBySource: null,
@@ -1171,7 +1167,7 @@ export function createEditorStore() {
       execute: (command) => run(command),
 
       undo: () => {
-        const entry = history.undo()
+        const entry = internals.undo()
         if (!entry) return
         set({ isPlaying: false, cropSession: null, previewPatch: null })
         // 撤销后按命令声明的 selectionAfter 恢复选中（与 redo 一致），
@@ -1188,7 +1184,7 @@ export function createEditorStore() {
       },
 
       redo: () => {
-        const entry = history.redo()
+        const entry = internals.redo()
         if (!entry) return
         set({ isPlaying: false, cropSession: null, previewPatch: null })
         const selection =
@@ -3639,3 +3635,10 @@ export function createEditorStore() {
 }
 
 export type EditorStore = ReturnType<typeof createEditorStore>
+
+/**
+ * 能否撤销 / 重做：**派生**自历史摘要，不再是需要手工同步的布尔字段。
+ * 组件用 `useEditorStore(selectCanUndo)` 订阅即可。
+ */
+export const selectCanUndo = (state: EditorState): boolean => state.history.pastLength > 0
+export const selectCanRedo = (state: EditorState): boolean => state.history.futureLength > 0

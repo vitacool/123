@@ -135,3 +135,50 @@ describe('切换项目必须重置多选集合（selectedIds）', () => {
     expect(state.project).toEqual(createEmptyProject())
   })
 })
+describe('历史栈纳入 store 状态：canUndo / canRedo 是派生值', () => {
+  it('每次历史变动都会替换摘要对象（选择器才能感知变化）', async () => {
+    const { selectCanUndo, selectCanRedo } = await import('../src/editor/store/editorStore')
+    const store = createEditorStore()
+    store.getState().loadSource(source('u1'))
+
+    const before = store.getState().history
+    expect(selectCanUndo(store.getState())).toBe(false)
+
+    store.getState().setPlayhead(4)
+    store.getState().splitAtPlayhead()
+    const afterSplit = store.getState().history
+    // 引用变化 + 长度增加 → 订阅 canUndo 的组件会重渲染
+    expect(afterSplit).not.toBe(before)
+    expect(afterSplit.pastLength).toBe(1)
+    expect(afterSplit.version).toBeGreaterThan(before.version)
+    expect(selectCanUndo(store.getState())).toBe(true)
+    expect(selectCanRedo(store.getState())).toBe(false)
+
+    store.getState().undo()
+    const afterUndo = store.getState().history
+    expect(afterUndo).not.toBe(afterSplit)
+    expect(afterUndo.pastLength).toBe(0)
+    expect(afterUndo.futureLength).toBe(1)
+    expect(selectCanUndo(store.getState())).toBe(false)
+    expect(selectCanRedo(store.getState())).toBe(true)
+
+    store.getState().redo()
+    expect(selectCanUndo(store.getState())).toBe(true)
+    expect(selectCanRedo(store.getState())).toBe(false)
+  })
+
+  it('重置项目时摘要同步归零（不再需要手工同步布尔值）', () => {
+    const store = createEditorStore()
+    store.getState().loadSource(source('u1'))
+    store.getState().setPlayhead(4)
+    store.getState().splitAtPlayhead()
+    expect(store.getState().history.pastLength).toBe(1)
+
+    store.getState().clearSource()
+    const state = store.getState()
+    expect(state.history.pastLength).toBe(0)
+    expect(state.history.futureLength).toBe(0)
+    // 摘要里始终带着真正的栈
+    expect(typeof state.history.stack.snapshots).toBe('function')
+  })
+})

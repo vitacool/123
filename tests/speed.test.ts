@@ -25,7 +25,7 @@ import {
 } from '../src/editor/core/clipTime'
 import { mapWordsToTimeline } from '../src/editor/core/captionMapping'
 import { getTimeline } from '../src/editor/core/timeline'
-import { createEditorStore } from '../src/editor/store/editorStore'
+import { createEditorStore, selectCanUndo } from '../src/editor/store/editorStore'
 import type { AsrWord } from '../src/editor/core/asr'
 import {
   createClip,
@@ -272,12 +272,12 @@ describe('store.setClipSpeed 对定格片段的拒绝路径', () => {
       selectedIds: ['f1'],
     })
     const before = store.getState().project
-    const canUndoBefore = store.getState().canUndo
+    const canUndoBefore = selectCanUndo(store.getState())
 
     store.getState().setClipSpeed('f1', 2, true)
 
     expect(store.getState().project).toBe(before)
-    expect(store.getState().canUndo).toBe(canUndoBefore)
+    expect(selectCanUndo(store.getState())).toBe(canUndoBefore)
     expect(store.getState().toast?.kind).toBe('warning')
     expect(store.getState().toast?.message).toContain('定格片段不支持变速')
   })
@@ -287,7 +287,7 @@ describe('store.setClipSpeed 对定格片段的拒绝路径', () => {
     const clipId = store.getState().selectedClipId!
     store.getState().setClipSpeed(clipId, 2, true)
     expect(store.getState().project.clips[0].speed).toBe(2)
-    expect(store.getState().canUndo).toBe(true)
+    expect(selectCanUndo(store.getState())).toBe(true)
     // 撤销后恢复原值
     store.getState().undo()
     expect(store.getState().project.clips[0].speed).toBeUndefined()

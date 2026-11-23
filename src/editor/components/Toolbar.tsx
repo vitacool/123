@@ -2,8 +2,10 @@ import { getProjectEnd, getActionAvailability, findClipLocation } from '../core/
 import { clipTimelineDuration } from '../core/clipTime'
 import { findAudioClipLocation, getAudioActionAvailability } from '../core/audio'
 import { findTextClipLocation, getTextActionAvailability } from '../core/text'
-import { isAudioLocked, isTextLocked } from '../core/tracks'
+import { isAudioLocked, isMainLocked, isOverlayLocked, isTextLocked } from '../core/tracks'
+import { reverseActionState } from '../core/reverse'
 import { useEditorStore } from '../store/EditorProvider'
+import { selectCanRedo, selectCanUndo } from '../store/editorStore'
 import { Icon, type IconName } from './Icon'
 
 interface ToolProps {
@@ -37,7 +39,15 @@ function Tool({ icon, label, tooltip, shortcut, disabled, active, onClick }: Too
   )
 }
 
-export function Toolbar() {
+export function Toolbar({
+  onAutoCaption,
+  onImportSubtitles,
+}: {
+  /** 打开「智能字幕」弹窗（自动识别语音生成字幕）。 */
+  onAutoCaption?: () => void
+  /** 导入 SRT / VTT 字幕文件。 */
+  onImportSubtitles?: () => void
+} = {}) {
   const project = useEditorStore((state) => state.project)
   const selectedClipId = useEditorStore((state) => state.selectedClipId)
   const playhead = useEditorStore((state) => state.playhead)
@@ -45,8 +55,9 @@ export function Toolbar() {
   const splitAtPlayhead = useEditorStore((state) => state.splitAtPlayhead)
   const trimLeftAtPlayhead = useEditorStore((state) => state.trimLeftAtPlayhead)
   const trimRightAtPlayhead = useEditorStore((state) => state.trimRightAtPlayhead)
-  const canUndo = useEditorStore((state) => state.canUndo)
-  const canRedo = useEditorStore((state) => state.canRedo)
+  // canUndo / canRedo 是派生值（历史栈摘要），不再从 state 里读布尔字段。
+  const canUndo = useEditorStore(selectCanUndo)
+  const canRedo = useEditorStore(selectCanRedo)
   const undo = useEditorStore((state) => state.undo)
   const redo = useEditorStore((state) => state.redo)
   const rotateSelected = useEditorStore((state) => state.rotateSelected)
@@ -56,6 +67,9 @@ export function Toolbar() {
   const toggleFlipV = useEditorStore((state) => state.toggleFlipV)
   const addMarker = useEditorStore((state) => state.addMarker)
   const deleteSelectedClip = useEditorStore((state) => state.deleteSelectedClip)
+  const assets = useEditorStore((state) => state.assets)
+  const reverseClip = useEditorStore((state) => state.reverseClip)
+  const reverseJob = useEditorStore((state) => state.reverseJob)
 
   const segment = findClipLocation(project, selectedClipId)
   const availability = getActionAvailability(project, selectedClipId, playhead)
@@ -69,6 +83,28 @@ export function Toolbar() {
   const total = getProjectEnd(project)
   const clip = segment?.clip ?? null
   const cropActive = Boolean(cropSession)
+
+  // 「倒放」的可用性与文案和右键菜单共用 core 的同一套判断：
+  // 需选中主轨/叠加轨的 video 片段、轨道未锁定、素材仍在、不在裁剪、没有进行中的任务；
+  // 已经处于倒放状态时按钮高亮，点击即「取消倒放（恢复原片）」。
+  const reverseLocked = segment
+    ? segment.track
+      ? isOverlayLocked(segment.track)
+      : isMainLocked(project)
+    : false
+  const reverseState = reverseActionState({
+    clip,
+    assets,
+    locked: reverseLocked,
+    cropping: cropActive,
+    busy: Boolean(reverseJob),
+  })
+  const reverseTooltip =
+    reverseState.enabled && reverseState.reversed
+      ? '取消倒放（恢复原片）'
+      : reverseState.enabled
+        ? '把该片段的源区间生成倒放素材（可撤销）'
+        : reverseState.reason
 
   // 工具栏最左的状态提示：无选中时引导操作，有选中时显示类型与时长。
   const selectionHint = (() => {
@@ -181,6 +217,16 @@ export function Toolbar() {
           disabled={!hasSelection || cropActive}
           onClick={beginCrop}
         />
+        <Tool
+          icon="reverse"
+          label="倒放"
+          tooltip={reverseTooltip}
+          active={reverseState.reversed}
+          disabled={!reverseState.enabled}
+          onClick={() => {
+            if (segment) reverseClip(segment.segment.clip.id)
+          }}
+        />
       </div>
 
       <span className="toolbar-separator" />
@@ -222,6 +268,20 @@ export function Toolbar() {
           shortcut="Delete"
           disabled={!(hasSelection || audioSelected || textSelected) || cropActive}
           onClick={deleteSelectedClip}
+        />
+        <Tool
+          icon="text"
+          label="智能字幕"
+          tooltip="识别语音自动生成字幕（本地运行）"
+          disabled={cropActive || !onAutoCaption}
+          onClick={() => onAutoCaption?.()}
+        />
+        <Tool
+          icon="note"
+          label="导入字幕"
+          tooltip="导入 SRT / VTT 字幕文件"
+          disabled={cropActive || !onImportSubtitles}
+          onClick={() => onImportSubtitles?.()}
         />
       </div>
 
