@@ -1095,8 +1095,8 @@ export async function exportProject(
         onStatus?.('正在自检多线程 FFmpeg 核心…')
         const probe = await raceWithAbort(
           audioOnly
-            ? probeRuntimeForAudio()
-            : probeRuntimeForExport(probeInput as string),
+            ? probeRuntimeForAudio(loaded)
+            : probeRuntimeForExport(probeInput as string, loaded),
           signal,
         )
         if (probe !== 'ok') {

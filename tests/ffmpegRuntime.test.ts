@@ -349,3 +349,47 @@ describe('MP3 编码器探测：不绕队列、不永久挂起、失败不缓存
     expect(sequence).not.toMatch(/enter:(\d+),enter:\1/)
   })
 })
+
+/**
+ * 导出自检（probeRuntimeForExport / ForAudio）以前直接 `ffmpeg.exec(...)`：
+ * 绕过串行队列，可能与导出/倒放/ASR **并发**抢同一个 worker；超时时
+ * `terminateRuntime()` 又会把别人正在跑的任务一起杀掉。
+ */
+describe('导出自检：走队列 + 使用调用方句柄', () => {
+  it('自检与其它 exec 串行，不会并发抢 worker', async () => {
+    const runtime = await loadRuntime()
+    hoisted.events = []
+    await Promise.all([
+      runtime.runFFmpegExec(['-i', 'a']),
+      runtime.probeRuntimeForAudio(),
+      runtime.runFFmpegExec(['-i', 'b']),
+    ])
+    const sequence = hoisted.events.join(',')
+    expect(sequence).not.toMatch(/enter:(\d+),enter:\1/)
+    // 三次任务都真的跑了
+    expect(hoisted.events.filter((item) => item.startsWith('enter:')).length).toBe(3)
+  })
+
+  it('传入句柄时不重新 acquire（避免探测到另一个代次的实例）', async () => {
+    const runtime = await loadRuntime()
+    const handle = await runtime.acquireRuntime()
+    const createdBefore = hoisted.instances.length
+    await runtime.probeRuntimeForAudio(handle)
+    // 没有再创建新实例 = 用的是调用方那个句柄
+    expect(hoisted.instances.length).toBe(createdBefore)
+  })
+
+  it('自检超时后运行时被重建，后续任务能继续（不会永久卡死）', async () => {
+    const runtime = await loadRuntime()
+    runtime.setProbeTimeoutMsForTests(50)
+    hoisted.execMode = 'hang'
+    const handle = await runtime.acquireRuntime()
+
+    await expect(runtime.probeRuntimeForAudio(handle)).resolves.toBe('timeout')
+
+    // 运行时已被重启（代次 +1），下一次 exec 用新实例恢复正常
+    hoisted.execMode = 'ok'
+    await expect(runtime.runFFmpegExec(['-i', 'next'])).resolves.toBe(0)
+    expect(runtime.currentGeneration()).toBeGreaterThan(handle.generation)
+  })
+})

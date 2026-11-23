@@ -487,22 +487,36 @@ export async function retryOnRestartOnce<T>(task: () => Promise<T>): Promise<T> 
 
 // ---------------------------------------------------------------- 自检 / 探测
 
+/**
+ * 跑一次自检任务。
+ *
+ * 三个要点（以前都没有）：
+ * 1. **走串行队列**：原来直接 `ffmpeg.exec(...)`，会与正在跑的导出/倒放/ASR **并发** ——
+ *    两个 exec 抢同一个 worker，轻则结果错乱，重则双双卡死。现在与其它 exec 共用
+ *    `enqueue`，排队执行。
+ * 2. **超时从「拿到执行权」开始算**：排在前面的任务可能跑很久，如果从入队就开始计时，
+ *    自检会被前面合法的长任务误判成超时。
+ * 3. 超时仍然需要 `terminateRuntime()`（wasm 的 exec 无法中断，只能销毁 worker），
+ *    但因为我们**不并发**，此时队列里没有别的任务在跑，不会打断别人正在做的事。
+ */
 async function probeWithTimeout(
   ffmpeg: FFmpeg,
   args: string[],
   timeoutMs: number,
 ): Promise<'ok' | 'failed' | 'timeout'> {
-  const work = ffmpeg
-    .exec(args)
-    .then((code): 'ok' | 'failed' => (code === 0 ? 'ok' : 'failed'))
-    .catch((): 'failed' => 'failed')
-  const result = await Promise.race([work, sleep(timeoutMs).then(() => 'timeout' as const)])
-  if (result === 'timeout') {
-    // 卡在 exec 里：立刻重启，绝不 await deleteFile（那会永久挂起）。
-    terminateRuntime('自检超时')
-    return 'timeout'
-  }
-  return result
+  return enqueue(async () => {
+    const work = ffmpeg
+      .exec(args)
+      .then((code): 'ok' | 'failed' => (code === 0 ? 'ok' : 'failed'))
+      .catch((): 'failed' => 'failed')
+    const result = await Promise.race([work, sleep(timeoutMs).then(() => 'timeout' as const)])
+    if (result === 'timeout') {
+      // 卡在 exec 里：立刻重启，绝不 await deleteFile（那会永久挂起）。
+      terminateRuntime('自检超时')
+      return 'timeout'
+    }
+    return result
+  })
 }
 
 /** 用一个极短的 lavfi 任务自检「多线程核心能否真的执行滤镜/编码」。 */
@@ -560,16 +574,28 @@ async function probeMultiThreadRuntime(
   )
 }
 
-/** 导出流程用的自检（调用方自己决定超时后的降级）。 */
-export async function probeRuntimeForExport(inputName: string): Promise<'ok' | 'failed' | 'timeout'> {
-  const handle = await acquireRuntime()
-  return probeMultiThreadRuntime(handle.ffmpeg, inputName)
+/**
+ * 导出流程用的自检（调用方自己决定超时后的降级）。
+ *
+ * `handle`：**强烈建议传入调用方自己持有的句柄**。
+ * 不传时会 `acquireRuntime()` 现取 —— 如果期间运行时被别的任务重启过，
+ * 拿到的就是另一个代次：自检结果对不上真正要用的实例，而且探测的文件
+ * （如 `input0.mp4`）在新实例的 MEMFS 里可能根本不存在。
+ */
+export async function probeRuntimeForExport(
+  inputName: string,
+  handle?: RuntimeHandle,
+): Promise<'ok' | 'failed' | 'timeout'> {
+  const target = handle ?? (await acquireRuntime())
+  return probeMultiThreadRuntime(target.ffmpeg, inputName)
 }
 
-/** 音频导出用的自检（输入可能没有视频流）。 */
-export async function probeRuntimeForAudio(): Promise<'ok' | 'failed' | 'timeout'> {
-  const handle = await acquireRuntime()
-  return probeExecRuntime(handle.ffmpeg)
+/** 音频导出用的自检（输入可能没有视频流）。同样建议传入调用方句柄。 */
+export async function probeRuntimeForAudio(
+  handle?: RuntimeHandle,
+): Promise<'ok' | 'failed' | 'timeout'> {
+  const target = handle ?? (await acquireRuntime())
+  return probeExecRuntime(target.ffmpeg)
 }
 
 /**
