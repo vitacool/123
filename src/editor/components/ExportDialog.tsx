@@ -4,6 +4,11 @@ import { clipTimelineDuration } from '../core/clipTime'
 import { animationPerformanceHint } from '../core/animationExport'
 import { buildAudioExportPlan } from '../core/exportPlan'
 import { exportRangeDuration } from '../core/exportRange'
+import {
+  estimateRemainingSeconds,
+  formatEta,
+  type ExportProgressSample,
+} from '../core/exportEta'
 import { textAnimationPerformanceHint } from '../core/textAnimation'
 import { formatFileSize, formatPlayhead } from '../core/format'
 import type { ExportFps, ExportLoudness, ExportResolution, SourceInfo } from '../core/types'
@@ -115,6 +120,45 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
   const [phase, setPhase] = useState<Phase>('config')
   const [progress, setProgress] = useState(0)
   const [status, setStatus] = useState('准备中…')
+  /**
+   * 导出进度采样（用于估算剩余时间）。
+   *
+   * FFmpeg.wasm 在浏览器里合成 1080p 约 4–5 倍实时，5 分钟的片子要 20 分钟以上；
+   * 只有百分比没有「还要多久」时，用户很容易以为卡死，然后取消掉一个其实
+   * 在正常推进的任务。
+   */
+  const progressSamplesRef = useRef<ExportProgressSample[]>([])
+  /** 每秒重算一次 ETA 用（只在 rendering 阶段走）。 */
+  /** 每秒重算一次 ETA 用；值本身不用，只要触发重渲染。 */
+  const [, setEtaTick] = useState(0)
+  const [etaSeconds, setEtaSeconds] = useState<number | null>(null)
+
+  /**
+   * 记录一次进度采样（供 ETA 使用）。
+   *
+   * 只在「进度确实前进」时记，且限制采样密度（每前进 ≥0.5% 或距上次 ≥1s），
+   * 免得 FFmpeg 高频回调把数组撑爆、也免得平台期把速率算成 0。
+   */
+  const recordProgress = (value: number) => {
+    setProgress(value)
+    /**
+     * 只在**真正的渲染阶段**采样。
+     *
+     * `onProgress` 在「读素材/写虚拟文件系统」阶段也会被调用（传 0），
+     * 这些样例会以很低的速率混进窗口，把 ETA 高估好几倍
+     * （实测：42s 的 1080p 导出，16% 时显示「还要 1 分 47 秒」，实际只剩 25s）。
+     */
+    if (stageRef.current !== 'rendering') return
+    const now = performance.now()
+    const samples = progressSamplesRef.current
+    const last = samples[samples.length - 1]
+    if (!last || value - last.progress >= 0.005 || now - last.at >= 1000) {
+      samples.push({ at: now, progress: value })
+      // 只留最近一段，足够 ETA 用，也不会无界增长。
+      if (samples.length > 400) samples.splice(0, samples.length - 400)
+    }
+  }
+
   const [result, setResult] = useState<ExportResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [callbackError, setCallbackError] = useState<string | null>(null)
@@ -133,6 +177,33 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
   /** 已请求取消、正在等待运行时停止。 */
   const [stopping, setStopping] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
+  /**
+   * 当前导出阶段的**实时**副本。
+   *
+   * `onProgress` 回调是在导出开始那一刻传下去的闭包，读到的 `stage` 永远是旧值，
+   * 所以采样时必须通过 ref 读最新阶段（否则会把写输入阶段的 0 进度也算进速率）。
+   */
+  const stageRef = useRef<ExportStage>('loading-core')
+
+  /**
+   * rendering 阶段每秒重算一次 ETA。
+   *
+   * 为什么用 tick 而不是把 ETA 写进进度回调：进度不变时「剩余时间」也会随时间
+   * 流逝变化（进度卡住 → 剩余时间变长），需要 1Hz 刷新才不会显得不动。
+   *
+   * 注意：effect 体内**不做同步 setState**（只用 interval，回调里更新），
+   * 否则会触发 react-hooks/set-state-in-effect 的级联渲染告警。
+   * 阶段切换时靠渲染条件（`stage === 'rendering'`）自然不显示，
+   * 残留值会在下一次开始导出时清空。
+   */
+  useEffect(() => {
+    if (phase !== 'running' || stage !== 'rendering') return
+    const timer = window.setInterval(() => {
+      setEtaSeconds(estimateRemainingSeconds(progressSamplesRef.current, performance.now()))
+      setEtaTick((value) => value + 1)
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [phase, stage])
 
   const runtime = getRuntimeCapabilities()
 
@@ -293,6 +364,10 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
     abortRef.current = controller
     setPhase('running')
     setProgress(0)
+    // 每次导出重新采样：上一轮的速率不代表这一轮（素材/画质可能都变了）。
+    progressSamplesRef.current = []
+    setEtaSeconds(null)
+    stageRef.current = 'loading-core'
     setStage('loading-core')
     setStopping(false)
     setStatus('正在加载 FFmpeg…')
@@ -307,8 +382,12 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
         assets,
         {
           onStatus: setStatus,
-          onProgress: setProgress,
-          onStage: setStage,
+          onProgress: recordProgress,
+          // 阶段与 ref 同步更新：采样回调要靠 ref 读最新阶段（见 stageRef 的说明）。
+          onStage: (next: ExportStage) => {
+            stageRef.current = next
+            setStage(next)
+          },
         },
         { signal: controller.signal, format, range: exportedRange },
       )
@@ -712,6 +791,11 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
             </div>
             <div className="render-progress-meta">
               {stage === 'rendering' && <span>{Math.round(progress * 100)}%</span>}
+              {stage === 'rendering' && etaSeconds !== null && etaSeconds > 0 && (
+                <span className="render-eta" aria-live="polite">
+                  {formatEta(etaSeconds)}后完成
+                </span>
+              )}
               <span>{runtime.multiThread ? '多线程 FFmpeg' : '单线程 FFmpeg'}</span>
             </div>
             <p className="render-note">

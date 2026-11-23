@@ -4486,6 +4486,12 @@
   line-height: 1.65;
 }
 
+/* 剩余时间估计：进度条下方最想看的数字，用强调色把它和右下角的运行模式区分开。 */
+.render-eta {
+  color: var(--fc-accent);
+  font-variant-numeric: tabular-nums;
+}
+
 .export-done,
 .export-error {
   display: flex;
