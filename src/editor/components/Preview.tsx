@@ -5,6 +5,7 @@ import type { PointerEvent as ReactPointerEvent } from 'react'
 import { aspectValue } from '../core/aspect'
 import { audioClipDuration, audioFadeGain } from '../core/audio'
 import { clipFrameSourceAt } from '../core/clipTime'
+import { advancePlaybackClock, createPlaybackClockAnchor, type PlaybackClockAnchor } from '../core/playbackClock'
 import { clipGainAt, clipVolumeAt } from '../core/clipAudio'
 import {
   BACKGROUND_FALLBACK,
@@ -813,20 +814,13 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
      * 现在：主视频**没有在推进**（paused / readyState<2 / currentTime 不动）时把墙钟冻结，
      * 恢复推进的瞬间重新锚定；没有视频可跟（定格、空隙、纯音频）时才纯用墙钟。
      */
-    let anchorWall = started
-    let anchorTimeline = startPlayhead
-    let stalledSince: number | null = null
-    let lastVideoTime = 0
+    /**
+     * 播放时钟锚点（纯逻辑在 core/playbackClock.ts，可单测）。
+     * 里面包含 anchorWall / anchorTimeline / stalledSince / lastVideoTime / lastPublished。
+     */
+    let clock: PlaybackClockAnchor = createPlaybackClockAnchor(startPlayhead, started)
     /** 上一次向 store 同步 playhead 的时刻（10Hz；其余帧只走 DOM）。 */
     let lastStoreSync = 0
-    /**
-     * 上一次**由播放循环自己**发布的播放头时间。
-     *
-     * 用来识别「外部改了 playhead」：播放中点「重播」（playhead 归零）或拖动播放头时，
-     * store 里的值会与这个值明显不同；此时必须重新锚定时钟，否则运行中的 tick 仍然
-     * 按旧锚点往前推，把刚设成 0 的播放头又覆盖回去 —— 表现就是「点重播没反应」。
-     */
-    let lastPublished = startPlayhead
     let activeElement: HTMLVideoElement | null = null
     let activeClipId: string | null = null
     let preparedClipId: string | null = null
@@ -944,7 +938,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
 
     /** 播放头：每帧走 DOM（不经过 React），store 只做 10Hz 低频同步。 */
     const commitTime = (now: number, time: number, force = false): void => {
-      lastPublished = time
+      clock.lastPublished = time
       publishPlayheadTime(time)
       if (force || now - lastStoreSync >= 100) {
         lastStoreSync = now
@@ -959,10 +953,8 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
     const onVisibilityChange = (): void => {
       if (document.visibilityState !== 'hidden') {
         // 回到前台：把时钟重新锚定到当前时间，避免把后台的时间算进播放。
-        anchorWall = performance.now()
-        anchorTimeline = store.getState().playhead
-        stalledSince = null
-        lastVideoTime = activeElement?.currentTime ?? 0
+        clock = createPlaybackClockAnchor(store.getState().playhead, performance.now())
+        clock.lastVideoTime = activeElement?.currentTime ?? 0
         return
       }
       const state = store.getState()
@@ -976,43 +968,22 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
       const state = store.getState()
       if (!state.isPlaying) return
 
-      /*
-       * 外部改了播放头？（点重播归零 / 拖动播放头 / 快捷键跳转）
-       * 10Hz 同步本身最多落后 0.1s，所以 0.25s 的阈值不会误判；
-       * 触发后把时钟锚到这个新位置，随后的帧就从这个位置继续推进。
-       */
-      const externalTime = state.playhead
-      if (Math.abs(externalTime - lastPublished) > 0.25) {
-        anchorTimeline = externalTime
-        anchorWall = now
-        stalledSince = null
-        lastVideoTime = activeElement?.currentTime ?? 0
-        lastPublished = externalTime
-        publishPlayheadTime(externalTime)
-        // 视频也要跟着跳到新位置：交由下面的 seek 逻辑用新的 time 计算目标。
-      }
-
-      // 主视频不推进 → 冻结墙钟（缓冲/等待/seek/被暂停），恢复时重新锚定。
-      if (activeElement) {
-        const progressing =
-          !activeElement.paused &&
-          activeElement.readyState >= 2 &&
-          Math.abs(activeElement.currentTime - lastVideoTime) > 1e-4
-        lastVideoTime = activeElement.currentTime
-        if (progressing) {
-          if (stalledSince !== null) {
-            anchorWall += now - stalledSince
-            stalledSince = null
-          }
-        } else if (stalledSince === null) {
-          stalledSince = now
-        }
-      } else if (stalledSince !== null) {
-        anchorWall += now - stalledSince
-        stalledSince = null
-      }
-      const elapsed = Math.max(0, (now - anchorWall) / 1000)
-      const time = Math.min(total, anchorTimeline + elapsed)
+      // 时钟推进（含停滞冻结、外部改动重锚、总量夹取）全部交给纯函数。
+      const advanced = advancePlaybackClock(clock, {
+        now,
+        video: activeElement
+          ? {
+              currentTime: activeElement.currentTime,
+              paused: activeElement.paused,
+              readyState: activeElement.readyState,
+            }
+          : null,
+        externalPlayhead: state.playhead,
+        total,
+      })
+      clock = advanced.anchor
+      const time = advanced.time
+      if (advanced.externalJump) publishPlayheadTime(time)
       const segment = findSegmentAt(state.project.clips, time)
       if (!segment) {
         // A trim gap: show black plus any overlay tracks, keep advancing.
@@ -1064,10 +1035,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
         preparedClipId = null
         playBlockedAt = 0
         // 换片段：把时钟锚到当前时间，避免跨片段累积偏差。
-        anchorWall = now
-        anchorTimeline = time
-        stalledSince = null
-        lastVideoTime = video.currentTime
+        clock = { ...createPlaybackClockAnchor(time, now), lastVideoTime: video.currentTime }
       }
       if (clip.type === 'freeze') {
         if (!video.paused) video.pause()

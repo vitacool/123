@@ -521,7 +521,8 @@ pnpm dev              # 开发服务器 http://127.0.0.1:5173/（带 COOP/COEP�
 
 pnpm typecheck        # tsc -b（类型门禁：strict + noUnusedLocals/Parameters）
 pnpm lint             # ESLint flat config（见下：只报告，不自动修复）
-pnpm test             # vitest（当前 78 文件 / 979 通过）
+pnpm test             # vitest（当前 79 文件 / 989 通过）
+pnpm test:coverage    # 同上 + v8 覆盖率（产物在 coverage/，先只报告不设门槛）
 pnpm build            # tsc -b && vite build（应用产物 dist/）
 pnpm build:lib        # tsc -b && vite build --config vite.config.lib.ts（库产物 dist-lib/ + .d.ts）
 ```
@@ -536,6 +537,14 @@ pnpm build:lib        # tsc -b && vite build --config vite.config.lib.ts（库�
   `no-control-regex` 5（导出文件名清洗用，刻意保留）、其余为单点问题。集中在
   `components/Timeline.tsx`(25)、`Preview.tsx`(9)、`ContextMenu.tsx`(7)、`ExportDialog.tsx`(7)。
 - 与 hooks 依赖相关的 46 条**没有**批量加依赖数组：那会改变运行时行为，需要逐条评估后再手工改。
+
+**覆盖率基线**（`pnpm test:coverage`，只统计**可单测的逻辑层** `core/` + `store/`）：
+语句 **78.35%** / 分支 **77.66%** / 函数 **79.41%**。不统计 `components/` 与 `services/` ——
+Timeline（2239 行）、Preview（1600 行）、ffmpegExporter 需要真实浏览器与 FFmpeg.wasm，单测覆盖必然接近 0，
+把它们算进来只会让数字变成噪声；它们的验证在 Playwright E2E。当前最弱的文件（后续补测的优先目标）：
+`core/captionModels.ts` 0%、`store/slices/playback.ts` 35.3%、`store/slices/editing.ts` 35.9%、
+`core/cover.ts` 39.1%、`core/frameCompose.ts` 39.9%、`store/slices/selection.ts` 43.3%、
+`core/commands.ts` 53.3%、`core/keyframes.ts` 53.9%。
 
 **Playwright E2E**（Chromium + Firefox）：
 
@@ -648,6 +657,12 @@ pnpm typecheck
 ```
 
 ### 浏览器端到端回归
+
+> **`.verify/cdp-import.mjs` 已是 legacy**（本地脚本，不在版本库里）。它是没有 Playwright 时手写的
+> 无头 Edge + CDP 客户端，1298 行、零依赖。现在**正式的 E2E 入口是 Playwright**（`pnpm test:e2e`，
+> Chromium + Firefox，见上文「开发与测试」）。下面这些阶段只在需要它独有的能力时才会用到
+> （首帧像素哈希、8 轨叠加、导出后逐帧比对这类 Playwright 写起来很笨的检查）；
+> 新增的回归请加到 `e2e/*.spec.ts`，不要再往这个脚本里堆。
 
 可复跑的脚本：[.verify/cdp-import.mjs](.verify/cdp-import.mjs)（无头 Edge + 手写 CDP 客户端，零依赖；页面内用 `MediaRecorder` 录一段 webm 当测试素材，再走真实的隐藏文件输入导入）。`node .verify/cdp-import.mjs <阶段>`，阶段有 `import` / `curve` / `freeze` / `rename` / `clipboard` / `layout` / `drag` / `isolate` / `debug2`，只用 `.verify/` 下的临时 profile 与产物（已在 `.gitignore` 里）。
 

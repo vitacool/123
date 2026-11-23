@@ -111,56 +111,46 @@ describe('keyboardScope：快捷键只在编辑器内生效', () => {
   })
 })
 
-describe('源码守卫：播放期间不再逐帧触发 React 渲染', () => {
+/**
+ * 结构契约（只剩 3 条）。
+ *
+ * 为什么保留"读源码"这种脆弱的断言：这几条守的是**跨文件的接线**，单元测试与 E2E
+ * 都测不到 —— 比如"Timeline 播放头用 DOM 更新而不是 React 重渲染"，行为上完全正常，
+ * 只有实现方式变了性能才会退化（播放时整树 60Hz 重渲染）。
+ *
+ * 只保留真正跨文件、且退化后没有其它测试能发现的三条；其余曾经放在这里的断言
+ * （memo 化、快捷键接线、时钟数学）已经替换成行为测试：
+ * - 时钟数学 → tests/playbackClock.test.ts（core/playbackClock.ts 的纯函数）
+ * - 快捷键作用域 → 本文件里 keyboardScope 的行为测试
+ * - 重播 → e2e/replay.spec.ts
+ */
+describe('播放性能：结构契约（仅跨文件接线）', () => {
   const read = (path: string) => readFileSync(join(process.cwd(), path), 'utf8')
+  const preview = () => read('src/editor/components/Preview.tsx')
 
-  it('Preview 的播放循环用 commitTime（DOM + 10Hz store），不再每帧 setPlayhead', () => {
-    const preview = read('src/editor/components/Preview.tsx')
-    expect(preview).toContain('publishPlayheadTime(time)')
-    // 逐帧写 store 的旧写法必须消失
-    expect(preview).not.toContain('state.setPlayhead(time)')
-    // store 同步是节流的
-    expect(preview).toMatch(/now - lastStoreSync >= 100/)
+  it('播放循环把播放头交给 10Hz 的 commitTime，不逐帧写 store', () => {
+    const source = preview()
+    expect(source).toContain('publishPlayheadTime(time)')
+    // 逐帧 setPlayhead 会让整树 60Hz 重渲染（实测 59.9 commit/s）。
+    expect(source).not.toContain('state.setPlayhead(time)')
+    expect(source).toMatch(/now - lastStoreSync >= 100/)
   })
 
-  it('Timeline 播放头位置直接改 DOM（订阅时钟），不依赖 React 重渲染', () => {
+  it('Timeline 的播放头位置直接改 DOM（订阅时钟），不依赖 React 重渲染', () => {
     const timeline = read('src/editor/components/Timeline.tsx')
     expect(timeline).toContain('subscribePlayheadTime(')
     expect(timeline).toMatch(/playheadRef\.current/)
     expect(timeline).toMatch(/element\.style\.left/)
   })
 
-  it('MediaLibrary 不订阅 playhead；Toolbar 必须订阅（按钮可用性依赖它）', () => {
-    // MediaLibrary 只在点击时用播放头 → 不订阅，播放期间零重渲染。
-    expect(read('src/editor/components/MediaLibrary.tsx')).not.toMatch(
-      /useEditorStore\(\(state\) => state\.playhead\)/,
-    )
-    // Toolbar 的「能否分割/裁剪」是按播放头位置算的：必须订阅，
-    // 否则拖动播放头后按钮不会解除 disabled（E2E 抓到的真实回归）。
-    // 播放期间的开销由 store 的 10Hz 节流兜住（见 Preview 的 commitTime）。
+  it('Toolbar 订阅 playhead（按钮可用性依赖它），MediaLibrary 不订阅', () => {
+    // Toolbar 若不订阅，拖动播放头后「分割/裁剪」按钮不会解除 disabled
+    // —— 这是提示词 13 引入、提示词 14 的 E2E 抓到的真实回归。
     expect(read('src/editor/components/Toolbar.tsx')).toMatch(
       /useEditorStore\(\(state\) => state\.playhead\)/,
     )
-    expect(read('src/editor/components/Preview.tsx')).toMatch(/now - lastStoreSync >= 100/)
-  })
-
-  it('缩略图条与关键帧条已 memo 化', () => {
-    expect(read('src/editor/components/ClipFilmstrip.tsx')).toContain('memo(ClipFilmstripInner)')
-    expect(read('src/editor/components/ClipKeyframeBand.tsx')).toContain(
-      'memo(ClipKeyframeBandInner)',
+    expect(read('src/editor/components/MediaLibrary.tsx')).not.toMatch(
+      /useEditorStore\(\(state\) => state\.playhead\)/,
     )
-  })
-
-  it('快捷键使用统一作用域守卫', () => {
-    expect(read('src/editor/components/CropOverlay.tsx')).toContain('isEditorShortcut(event)')
-    expect(read('src/editor/components/MediaLibrary.tsx')).toContain('isEditorShortcut(event)')
-  })
-
-  it('时钟以主视频推进为准：不推进时冻结墙钟，并处理 visibilitychange', () => {
-    const preview = read('src/editor/components/Preview.tsx')
-    expect(preview).toMatch(/anchorWall/)
-    expect(preview).toMatch(/stalledSince/)
-    expect(preview).toContain("document.addEventListener('visibilitychange'")
-    expect(preview).toContain("document.removeEventListener('visibilitychange'")
   })
 })
