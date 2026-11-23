@@ -109,20 +109,51 @@ export function setProbeTimeoutMsForTests(ms: number): void {
 
 export const PROBE_OUTPUT = 'framecut-selftest.mp4'
 
+/**
+ * 加载 FFmpeg 核心的超时。
+ *
+ * 为什么必须有：`@ffmpeg/ffmpeg` 的 `load()` 内部靠 worker 回消息才 settle。
+ * 如果**class worker 脚本本身**加载失败（资源 404、宿主没有正确托管 dist-lib 的
+ * worker 脚本、CSP 禁 module worker），`load()` 会**永远不 resolve** ——
+ * 界面就卡在「正在加载 FFmpeg…（0%）」，取消后重试同样卡死，用户只能刷新。
+ *
+ * 45s 足够宽松（本地 core + wasm 通常几秒），超时后 terminate 掉并给出可读错误，
+ * `acquireRuntime` 的失败清理会让下一次导出可以重新尝试。
+ */
+export const LOAD_TIMEOUT_MS = 45_000
+
+/** 仅供测试：把加载超时改小。 */
+let loadTimeoutMs = LOAD_TIMEOUT_MS
+export function setLoadTimeoutMsForTests(ms: number): void {
+  loadTimeoutMs = Math.max(1, Math.round(ms))
+}
+
 async function loadCore(mode: RuntimeMode): Promise<FFmpeg> {
   const { FFmpeg: FFmpegClass } = await import('@ffmpeg/ffmpeg')
   const ffmpeg = new FFmpegClass()
-  if (mode === 'multi-thread') {
-    await ffmpeg.load({
-      coreURL: coreUrl('core-mt/ffmpeg-core.js'),
-      wasmURL: coreUrl('core-mt/ffmpeg-core.wasm'),
-      workerURL: coreUrl('core-mt/ffmpeg-core.worker.js'),
-    })
-  } else {
-    await ffmpeg.load({
-      coreURL: coreUrl('core/ffmpeg-core.js'),
-      wasmURL: coreUrl('core/ffmpeg-core.wasm'),
-    })
+  const load =
+    mode === 'multi-thread'
+      ? ffmpeg.load({
+          coreURL: coreUrl('core-mt/ffmpeg-core.js'),
+          wasmURL: coreUrl('core-mt/ffmpeg-core.wasm'),
+          workerURL: coreUrl('core-mt/ffmpeg-core.worker.js'),
+        })
+      : ffmpeg.load({
+          coreURL: coreUrl('core/ffmpeg-core.js'),
+          wasmURL: coreUrl('core/ffmpeg-core.wasm'),
+        })
+  const timeout = sleep(loadTimeoutMs).then(() => 'timeout' as const)
+  const result = await Promise.race([load.then(() => 'ok' as const), timeout])
+  if (result === 'timeout') {
+    // 卡住的 worker 只能靠 terminate 结束；否则它会一直占着内存与连接。
+    try {
+      ffmpeg.terminate()
+    } catch {
+      // 已经在销毁过程中，忽略。
+    }
+    throw new Error(
+      `FFmpeg 核心加载超时（${Math.round(loadTimeoutMs / 1000)} 秒）：可能是核心资源 404 或 Worker 被拦截，请刷新页面后重试。`,
+    )
   }
   return ffmpeg
 }

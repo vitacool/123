@@ -14,6 +14,14 @@ const hoisted = vi.hoisted(() => ({
   instances: [] as unknown[],
   /** 'ok' | 'hang'：exec 是否永久挂起。 */
   execMode: 'ok' as 'ok' | 'hang',
+  /**
+   * 'ok' | 'hang'：load() 是否永久挂起。
+   *
+   * 真实成因：`@ffmpeg/ffmpeg` 的 load() 靠 worker 回消息才 settle，
+   * 如果 **worker 脚本本身** 404 / 被 CSP 拦截，load() 永远不 resolve
+   * —— 界面卡在「正在加载 FFmpeg…（0%）」。
+   */
+  loadMode: 'ok' as 'ok' | 'hang',
   /** deleteFile 是否永久挂起（验证「超时后不再 await worker」）。 */
   deleteHangs: false,
   /** 进入/离开 exec 的顺序（检查是否重叠）。 */
@@ -32,7 +40,9 @@ vi.mock('@ffmpeg/ffmpeg', () => {
       hoisted.instances.push(this)
     }
 
-    async load(): Promise<void> {}
+    async load(): Promise<void> {
+      if (hoisted.loadMode === 'hang') return new Promise<void>(() => undefined)
+    }
     async writeFile(name: string, data: Uint8Array | string): Promise<void> {
       this.files.set(name, data)
     }
@@ -80,6 +90,7 @@ const fake = (index = 0) =>
 beforeEach(() => {
   hoisted.instances.length = 0
   hoisted.execMode = 'ok'
+  hoisted.loadMode = 'ok'
   hoisted.deleteHangs = false
   hoisted.events = []
   vi.stubGlobal('window', {
@@ -240,5 +251,43 @@ describe('降级：多线程自检超时 → 自动切单线程重建', () => {
     hoisted.execMode = 'ok'
     await expect(runtime.runFFmpegExec(['-i', 'x'])).resolves.toBe(0)
     expect(runtime.getRuntimeCapabilities().forcedSingleThread).toBe(true)
+  })
+})
+
+/**
+ * load() 永久挂起（worker 脚本 404 / 被 CSP 拦截）时必须有超时兜底。
+ *
+ * 修前：`@ffmpeg/ffmpeg` 的 load() 靠 worker 回消息才 settle，worker 脚本加载失败
+ * 就永远不 resolve —— 导出界面卡在「正在加载 FFmpeg…（0%）」，取消后重试也卡，
+ * 用户只能刷新页面。
+ */
+describe('加载超时：核心资源不可用时不能永久卡在 0%', () => {
+  it('load 永久挂起 → 在超时后 reject、terminate 实例，且下一次可以重试', async () => {
+    const runtime = await loadRuntime()
+    runtime.setLoadTimeoutMsForTests(50)
+    hoisted.loadMode = 'hang'
+    const started = Date.now()
+
+    await expect(runtime.acquireRuntime()).rejects.toThrow(/加载超时/)
+
+    expect(Date.now() - started).toBeLessThan(2000)
+    // 卡住的 worker 必须被 terminate，否则会一直占着内存
+    expect(fake(0).terminated).toBe(true)
+
+    // 失败后状态被清掉（acquireRuntime 的 catch 分支），所以能重新尝试；
+    // 这一次资源正常，应当成功拿到句柄。
+    hoisted.loadMode = 'ok'
+    await expect(runtime.acquireRuntime()).resolves.toMatchObject({ generation: expect.any(Number) })
+    expect(runtime.currentGeneration()).toBeGreaterThanOrEqual(0)
+  })
+
+  it('多线程 load 挂起时不会被误判为「加载失败并降级」，而是直接报超时', async () => {
+    const runtime = await loadRuntime()
+    runtime.setLoadTimeoutMsForTests(50)
+    hoisted.loadMode = 'hang'
+
+    await expect(runtime.acquireRuntime()).rejects.toThrow(/加载超时/)
+    // 超时是明确的失败信号，不该悄悄把 forcedSingleThread 置真
+    expect(runtime.getRuntimeCapabilities().forcedSingleThread).toBe(false)
   })
 })
