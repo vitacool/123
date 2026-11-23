@@ -293,11 +293,14 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
     const urls: string[] = []
     const seen = new Set<string>()
     for (const clip of project.clips) {
+      // 静帧（图片）没有视频流：塞进 <video> 会得到 readyState=0 的元素，
+      // 而播放时钟把 readyState<2 判成「缓冲中」→ 时间轴永久卡死。
+      if (clip.type === 'image') continue
       if (seen.has(clip.sourceUrl)) continue
       seen.add(clip.sourceUrl)
       urls.push(clip.sourceUrl)
     }
-    if (source && !seen.has(source.url)) urls.push(source.url)
+    if (source && source.kind !== 'image' && !seen.has(source.url)) urls.push(source.url)
     return urls
   }, [project.clips, source])
   const baseVideoKey = baseVideoUrls.join('|')
@@ -518,7 +521,12 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
             state.playhead >= clip.start - 0.001 &&
             state.playhead < clip.end - 0.001
           ) {
-            const stylePreview = captionStylePreview?.trackId === track.id ? captionStylePreview.style : undefined
+            // 从 store 现取，而不是用渲染期闭包变量：draw 的依赖是 [store]（恒定），
+// 闭包里的 captionStylePreview 会永远停在首帧的 null —— 表现为「悬停/拖动样式预设时
+// 画布完全不跟着变，松手才刷新」。
+            const stylePreviewState = store.getState().captionStylePreview
+            const stylePreview =
+              stylePreviewState?.trackId === track.id ? stylePreviewState.style : undefined
             let display = resolveCaptionStyle(clip, stylePreview ? { ...track.captionStyle, ...stylePreview } : track.captionStyle)
             if (textDrag) {
               if (textDrag.applyAll && textDrag.trackId === track.id) {
@@ -796,6 +804,16 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
     syncPausedFrame,
   ])
 
+  /**
+   * 字幕样式「即时预览」：悬停预设 / 拖动阴影滑块时 store 里的 captionStylePreview
+   * 会连续变化。draw 本身从 store 现取该值，但没人触发重绘 —— 于是画面纹丝不动，
+   * 松手（提交工程）后才刷新。这里按该值变化补一次重绘。
+   */
+  useEffect(() => {
+    if (isPlaying) return
+    drawRef.current()
+  }, [captionStylePreview, isPlaying])
+
   useEffect(() => {
     if (!isPlaying) return
     // 用户在按播放（或拖播放头）之后才走到这里：解除 AudioContext 的自动播放挂起。
@@ -832,6 +850,22 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
     let lastSeek = 0
     let lastPlayAttempt = 0
     let playBlockedAt = 0
+    /**
+     * 当前段是否「不该由视频推进时钟」：空隙（无片段）与定格片段都属于这类。
+     *
+     * 为什么用标志位而不是每帧把 `activeElement` 置空：`switching` 的判定里有
+     * `activeElement !== video`，每帧置空会让「换片段」每帧成立 → 时钟每帧重新锚定
+     * 到当前时间，播放头反而完全不动。标志位只影响时钟的输入，不动切换逻辑。
+     */
+    let suppressVideoClock = false
+    /**
+     * 最后一帧的时间轴时间。暂停时用它强制提交一次：
+     * store.playhead 只按 10Hz 同步，暂停瞬间若不做一次 force commit，
+     * 播放头会退回最近一次采样点（最多 0.1s），逐帧精修就对不准。
+     */
+    let lastTickTime = startPlayhead
+    /** 转场期间「进入段」的限流 seek 时间戳（与主片段的 lastSeek 分开记）。 */
+    let enteringSeekAt = 0
     let raf = 0
     const overlayRuntimes = new Map<string, { clipId: string | null; lastSeek: number }>()
 
@@ -841,20 +875,26 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
         if (!layerVideo) continue
         const audioActive = isOverlayAudioActive(state.project, track)
         const segment = findSegmentAt(track.clips, time)
-        const activeSegment = segment && isOverlayVideoVisible(track) ? segment : null
-        if (!audioActive || activeSegment === null || segmentedPreviewMuted(activeSegment.clip)) {
+        const videoVisible = isOverlayVideoVisible(track)
+        /**
+         * 声音门控只看「轨道音频是否启用 + 当前时刻是否在片段内」，**不看**画面可见性：
+         * 「隐藏」在 tracks.ts 里就是 Picture-only，导出也按「画面隐藏、声音保留」处理。
+         * 以前这里绑了 isOverlayVideoVisible，隐藏后预览静音但成片有声 —— 用户据此判断会做错。
+         */
+        if (!audioActive || !segment || segmentedPreviewMuted(segment.clip)) {
           previewGain.setGain(layerVideo, 0)
         } else {
-          const local = Math.max(0, Math.min(activeSegment.duration, time - activeSegment.start))
+          const local = Math.max(0, Math.min(segment.duration, time - segment.start))
           previewGain.setGain(
             layerVideo,
             clipGainAt(
-              { ...activeSegment.clip, ...(previewClipPatch(state, activeSegment.clip.id) ?? {}) },
+              { ...segment.clip, ...(previewClipPatch(state, segment.clip.id) ?? {}) },
               local,
             ),
           )
         }
-        if (!segment || !isOverlayVideoVisible(track)) {
+        // 驱动：画面隐藏且音频也没启用时才可以停下；只隐藏画面时要继续出声。
+        if (!segment || (!videoVisible && !audioActive)) {
           if (!layerVideo.paused) layerVideo.pause()
           overlayRuntimes.set(track.id, { clipId: null, lastSeek: 0 })
           continue
@@ -909,6 +949,49 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
         runtime.clipId = segment.clip.id
         overlayRuntimes.set(track.id, runtime)
       }
+    }
+
+    /**
+     * 转场重叠区：**进入段**也必须被驱动。
+     *
+     * 以前重叠区只按 `findSegmentAt` 取到左段（先开始的那段），右段由 `prepareNext`
+     * 预取到 local 0 后就被 pause 了 —— 于是转场过程中「即将进入的画面」是静止的，
+     * 转场结束瞬间会跳帧/丢声。这里在重叠期间把右段按 `time - right.start` 同步推进，
+     * 并让它开始播放（音量保持 0，切换后由常规路径接管，避免两声叠加）。
+     */
+    const syncEnteringSegment = (
+      state: ReturnType<typeof store.getState>,
+      time: number,
+      now: number,
+    ): void => {
+      const overlapping = segmentsAt(state.project.clips, time)
+      if (overlapping.length < 2) return
+      const entering = overlapping[overlapping.length - 1]
+      const element = baseVideoRefs.current.get(entering.clip.sourceUrl)
+      // 与左段共用同一个 <video>（同源相邻片段）时不能接管：那会把主音轨静音。
+      if (!element || element === activeElement) return
+      const asset =
+        state.assets.find((item) => item.url === entering.clip.sourceUrl) ?? currentSource
+      if (!asset || entering.clip.type === 'freeze' || entering.clip.type === 'image') return
+      previewGain.setGain(element, 0)
+      const target = safeMediaTime(
+        clipFrameSourceAt(entering.clip, Math.max(0, time - entering.start)),
+        asset,
+        element,
+      )
+      if (
+        now - enteringSeekAt > 200 &&
+        Number.isFinite(target) &&
+        Math.abs(element.currentTime - target) > 0.15
+      ) {
+        try {
+          element.currentTime = target
+        } catch {
+          // Ignore transient seek errors.
+        }
+        enteringSeekAt = now
+      }
+      if (element.paused) void element.play().catch(() => undefined)
     }
 
     const prepareNext = (
@@ -968,12 +1051,16 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
 
     const tick = (now: number) => {
       const state = store.getState()
-      if (!state.isPlaying) return
+      if (!state.isPlaying) {
+        // 暂停：把最后一帧的时间强制写回 store，避免播放头退回上一个 10Hz 采样点。
+        commitTime(now, lastTickTime, true)
+        return
+      }
 
       // 时钟推进（含停滞冻结、外部改动重锚、总量夹取）全部交给纯函数。
       const advanced = advancePlaybackClock(clock, {
         now,
-        video: activeElement
+        video: activeElement && !suppressVideoClock
           ? {
               currentTime: activeElement.currentTime,
               paused: activeElement.paused,
@@ -985,10 +1072,14 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
       })
       clock = advanced.anchor
       const time = advanced.time
+      lastTickTime = time
       if (advanced.externalJump) publishPlayheadTime(time)
       const segment = findSegmentAt(state.project.clips, time)
       if (!segment) {
         // A trim gap: show black plus any overlay tracks, keep advancing.
+        // 空隙里没有视频可跟随：关掉「跟视频推进」，否则时钟把主动 pause 当成缓冲，
+        // 每处空隙白等 1.5 秒（stallGrace）才继续。
+        suppressVideoClock = true
         if (activeElement) {
           if (!activeElement.paused) activeElement.pause()
           previewGain.setGain(activeElement, 0)
@@ -1011,6 +1102,37 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
       const clip = segment.clip
       const clipAsset =
         state.assets.find((asset) => asset.url === clip.sourceUrl) ?? currentSource
+      /**
+       * 静帧（图片）：没有可跟随的媒体时钟。
+       *
+       * 必须在这里单独收口，而不是走下面的「video 缺失就跳过」分支：
+       * - 该分支既不 commitTime 也不 draw，播放头会永远停在进入图片前的位置；
+       * - 若保留 activeElement（上一段的 video 被 pause），时钟会把「paused」判成
+       *   缓冲/被浏览器阻止，冻结墙钟 1.5s 后还会误报「浏览器阻止了视频播放」。
+       * 所以：清空 activeElement（时钟退回纯墙钟）、暂停旧元素、照常推进并重绘。
+       */
+      if (clip.type === 'image') {
+        suppressVideoClock = true
+        if (activeElement) {
+          if (!activeElement.paused) activeElement.pause()
+          previewGain.setGain(activeElement, 0)
+          activeElement = null
+        }
+        activeClipId = clip.id
+        prepareNext(state, time, null)
+        syncOverlayPlayback(state, time, now)
+        syncAudio(state, time, true)
+        commitTime(now, time)
+        drawRef.current()
+        if (time >= total - 0.001) {
+          commitTime(now, total, true)
+          state.finishPlayback()
+          drawRef.current()
+          return
+        }
+        raf = requestAnimationFrame(tick)
+        return
+      }
       const video = baseVideoRefs.current.get(clip.sourceUrl) ?? null
       if (!clipAsset || !video) {
         raf = requestAnimationFrame(tick)
@@ -1040,6 +1162,8 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
         clock = { ...createPlaybackClockAnchor(time, now), lastVideoTime: video.currentTime }
       }
       if (clip.type === 'freeze') {
+        // 定格片段是「一张静止帧」：它本来就不该推进时钟（同空隙，避免白等 1.5s）。
+        suppressVideoClock = true
         if (!video.paused) video.pause()
         const frameTime = safeMediaTime(
           clipFrameSourceAt(clip, 0),
@@ -1057,6 +1181,8 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
           lastSeek = now
         }
       } else {
+        // 普通视频片段：时钟重新跟随视频推进（离开定格/空隙时复位标志位）。
+        suppressVideoClock = false
         const expected = clipFrameSourceAt(clip, time - segment.start)
         const target = safeMediaTime(expected, clipAsset, video)
         applySpeedToVideo(
@@ -1102,6 +1228,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
           return
         }
       }
+      syncEnteringSegment(state, time, now)
       prepareNext(state, time, clip.sourceUrl)
       syncOverlayPlayback(state, time, now)
       syncAudio(state, time, true)

@@ -250,18 +250,42 @@ function pixelize(input: PaintTransitionInput, progress: number): void {
   const smallW = Math.max(2, Math.round(width / block))
   const smallH = Math.max(2, Math.round(height / block))
   const target = scratch(input, `pixelize-${block}`, smallW, smallH)
+  /**
+   * 必须先在**全尺寸**离屏上画好这一帧，再缩到 smallW×smallH。
+   *
+   * drawLeft/drawRight 是按整幅 width/height 计算几何的（缩放、裁切、定位都在里面），
+   * 直接画进只有 1/block 大小的画布，画面会被整体推出画布外或只剩左上角一块 ——
+   * 表现就是「选像素化转场后画面基本全黑」。
+   */
+  const full = scratch(input, `pixelize-full-${block}`, width, height)
   if (!target) {
     input.drawRight(ctx, progress)
     return
   }
+  const source = full ?? target
+  const sourceWidth = full ? width : smallW
+  const sourceHeight = full ? height : smallH
+  const sourceCtx = source.ctx
+  sourceCtx.setTransform(1, 0, 0, 1, 0, 0)
+  sourceCtx.globalAlpha = 1
+  sourceCtx.globalCompositeOperation = 'source-over'
+  sourceCtx.clearRect(0, 0, sourceWidth, sourceHeight)
+  // 中点之前画 A，之后画 B：像素块最大时正好换画面。
+  if (progress < 0.5) input.drawLeft(sourceCtx, 1)
+  else input.drawRight(sourceCtx, 1)
+
   const inner = target.ctx
   inner.setTransform(1, 0, 0, 1, 0, 0)
   inner.globalAlpha = 1
   inner.globalCompositeOperation = 'source-over'
   inner.clearRect(0, 0, smallW, smallH)
-  // 中点之前画 A，之后画 B：像素块最大时正好换画面。
-  if (progress < 0.5) input.drawLeft(inner, 1)
-  else input.drawRight(inner, 1)
+  if (full) {
+    // 缩到小块：关闭平滑才能得到硬边像素块。
+    inner.imageSmoothingEnabled = false
+    inner.drawImage(full.canvas, 0, 0, width, height, 0, 0, smallW, smallH)
+    inner.imageSmoothingEnabled = true
+  }
+
   ctx.save()
   ctx.setTransform(1, 0, 0, 1, 0, 0)
   ctx.imageSmoothingEnabled = false
