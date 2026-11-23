@@ -126,7 +126,9 @@ Cross-Origin-Embedder-Policy: require-corp
 │     │  ├─ format.ts
 │     │  └─ ids.ts
 │     ├─ store/
-│     │  ├─ editorStore.ts      # Zustand store + 所有业务动作
+│     │  ├─ editorStore.ts      # store 组装（createStore + 各 slice 展开 + 公开类型）
+│     │  ├─ internal.ts         # 共享内核：历史栈 / run / sync / 素材回收
+│     │  ├─ slices/             # 按关注点拆分的 zustand slices（见下文）
 │     │  └─ EditorProvider.tsx
 │     ├─ components/
 │     │  ├─ TopBar.tsx
@@ -285,6 +287,23 @@ interface EditorCommand {
 - 预览临时值（`previewPatch`）、裁剪草图（`cropSession`）和时间轴拖拽中的视觉草稿不属于项目数据，不进入历史。
 
 关键文件：[commands.ts](src/editor/core/commands.ts)、[history.ts](src/editor/core/history.ts)、[editorStore.ts](src/editor/store/editorStore.ts)。
+
+#### store 的 slice 拆分
+
+`editorStore.ts` 从 3667 行拆到 511 行：它现在只做组装（`createStore` + 展开各 slice + 公开类型与选择器），业务按关注点分到 `store/slices/`，共享闭包（历史栈 / `run` / `sync` / 素材回收）集中在 [internal.ts](src/editor/store/internal.ts)，slice 之间互不 import（跨 slice 一律走内核），避免循环依赖。
+
+| slice | 状态 | 动作 |
+| --- | --- | --- |
+| [history](src/editor/store/slices/history.ts) | `project`、`lastAction`、`history`（`{stack, pastLength, futureLength, version}`） | `execute`、`undo`、`redo` |
+| [ui](src/editor/store/slices/ui.ts) | 主题、`toast`、`timelineSettings`、面板开关、`caption*`、`asrWordsBySource` | 17 个纯界面动作 |
+| [playback](src/editor/store/slices/playback.ts) | `playhead`、`isPlaying`、`timelineZoom`、`timelineViewportWidth` | 11 个播放/缩放动作 |
+| [selection](src/editor/store/slices/selection.ts) | `selectedClipId`、`selectedIds`、`clipboard`、`colorClipboard` | 18 个选中 / 剪贴板动作 |
+| [assets](src/editor/store/slices/assets.ts) | `source`、`assets`、`pendingReclaim`、`reverseJob` | 9 个素材库 / 主素材 / 倒放任务动作 |
+| [export](src/editor/store/slices/export.ts) | `exportRange`、`exportDialogOpen` | 6 个区间 / 对话框动作 |
+| [persistence](src/editor/store/slices/persistence.ts) | `projectId`、`projectName`、`projectNameEdited` | 5 个项目身份 / 生命周期动作 |
+| [editing](src/editor/store/slices/editing.ts) | （无自有状态） | 91 个 `run(command)` 包装：分割 / 裁剪 / 轨道 / 字幕 / 关键帧 / 变换 / 画面裁剪 / 封面 / 倒放 |
+
+`canUndo` / `canRedo` **不是**存储字段，而是派生选择器：`selectCanUndo(state) => state.history.pastLength > 0`。`HistoryStack` 是可变的，所以每次栈变动都整体替换 `history` 摘要对象（引用变化才会触发订阅），不需要任何手工同步。
 
 ### 时间轴与播放
 
@@ -481,7 +500,7 @@ anullsrc=r=48000:cl=stereo,atrim=duration=3.4,asetpts=PTS-STARTPTS,
 
 ## 4. 测试与验证
 
-### 单元测试：143 个，全部通过
+### 单元测试：940 个通过（2 个跳过），共 75 个文件
 
 ```text
 tests/history.test.ts      6    命令执行/撤销/重做、无操作不入栈、重做清空、100 步上限、结构编辑、不可变快照
@@ -499,6 +518,18 @@ tests/tracks.test.ts       9    轨道默认值、画面/声音独立、启用�
 tests/draft.test.ts        3    草稿 URL 重映射、缺失素材清理、媒体 URL 收集
 tests/store.test.ts       16    Store：分割/撤销/重做、裁剪撤销/重做、定格、裁剪、标记、删除、排序、边缘恢复、叠加轨历史、文本选中自动定位/分割、锁定目标轨拦截
 tests/geometry.test.ts     9    裁剪预设、比例锁定手柄、越界保护、自由裁剪、偶数像素、旋转包围盒、填充比例
+tests/speedCurve.test.ts  28    单调三次插值（无过冲/导数连续/两点退化为直线）、采样接口不变、曲线参与时长与导出、倒放+分段/曲线「先正向后镜像」自洽、变速属性剪贴板互斥与定格跳过
+tests/speedCurveEditor.test.ts 6  曲线编辑器静态渲染：SVG 折线与采样点数、3–5 个可拖控制点、slider 语义、禁用态、数量上限
+tests/clipTime.test.ts    19    时间映射、倍率/倒放、分段逆映射、定格缩略条取样区间（只看冻结帧）、在变速片段里插入定格的取帧
+tests/speedSlice.test.ts  34    变速段表/曲线按源区间切片：分割、左裁、右裁、叠加轨、拖边缘内收/外扩（外扩按端点段速换算源增量）后的逐源时刻速度不变与「两半时长之和 = 原时长（<1ms）」，以及分割后 transitionOut 只留在右半
+tests/animationExportBugs.test.ts 9 动画导出三修：烘焙片段清空 speedSegments/speedCurve（不二次变速）、文字层输入序号算上蒙版（[N+M:v] 而不是蒙版 PNG）、中间视频音轨按源区间截取+变速（复用 atempo/asetrate 链，定格静音），外加「分段变速+蒙版+动画字幕」组合的输入序号与总时长
+tests/pointerDrag.test.ts  5    pointerId 判定：0 也算正在拖（Firefox 鼠标）、matchesPointer 显式比较，外加源码扫描守卫禁止组件里再写 `!x.pointerId` / `.pointerId ===` 这类 truthy 判断
+tests/draftStoreReliability.test.ts 6 草稿存储可靠性（fake-indexeddb）：写入以 transaction.oncomplete 为准（提交阶段配额 abort 必须 reject）、restoreDraft 失败路径回收 objectURL、「只导入素材还没有片段」的草稿能正常恢复
+tests/exportResources.test.ts 13 导出资源清理（mock ffmpeg + URL）：ExportResources 幂等 dispose / 单项失败隔离、蒙版渲染抛错与中途取消后所有登记文件被 deleteFile、无声重试只对音频相关失败生效（OOM 原样抛出）
+tests/assetReclaim.test.ts 9   素材删除的延迟回收：删除只标记待回收（不 revoke / 不删 blob）、撤销后片段与素材一起回来且源仍有效、历史不再引用后才真正回收、仅从素材库移除不误恢复、关项目/卸载强制回收
+tests/ffmpegRuntime.test.ts 11 运行时共享：exec 永久挂起时超时在 2s 内 reject（不再 await worker）、取消立即 terminate、任务队列串行、旧代次收到「运行时已重启，请重试」、retryOnRestartOnce 只重试一次、多线程自检超时自动降级单线程
+tests/animationChunk.test.ts 11 动画帧分块编码：块计划不丢帧/不重复帧（总帧数与时长守恒）、90 帧分 3 块且 MEMFS 里 PNG 峰值 ≤ 一个块、块内 PNG 用完即删、多块 concat + `-c:v copy` 混音、同源只写一份源文件（池 + dispose）；WebGL 着色器/上下文失败后重复调用不再新建上下文且调用 WEBGL_lose_context
+tests/cssScope.test.ts 16   样式隔离：真实 editor.css 处理后没有游离选择器（.button/.badge/.toast 等全部挂在 .framecut-root 下）、已经限定过的不会二次前缀、插件幂等、10 组 @keyframes 与 animation 引用同步加 fc- 前缀、:root/html/body 映射到根节点、宿主样式表不被处理、body 行内样式「先保存后恢复」
 ```
 
 运行：
@@ -509,6 +540,17 @@ pnpm typecheck
 ```
 
 ### 浏览器端到端回归
+
+可复跑的脚本：[.verify/cdp-import.mjs](.verify/cdp-import.mjs)（无头 Edge + 手写 CDP 客户端，零依赖；页面内用 `MediaRecorder` 录一段 webm 当测试素材，再走真实的隐藏文件输入导入）。`node .verify/cdp-import.mjs <阶段>`，阶段有 `import` / `curve` / `freeze` / `rename` / `clipboard` / `layout` / `drag` / `isolate` / `debug2`，只用 `.verify/` 下的临时 profile 与产物（已在 `.gitignore` 里）。
+
+- `drag`：真实鼠标拖拽时间轴——拖动片段（位移 40px）与拖动播放头（位移 60px）都精确生效，用来守住 pointer 事件重构没有破坏正常路径。
+
+- `layout`：「缩放与位置」每列控件不溢出面板（未加关键帧 / 加了关键帧并出现「N 帧」+ 动画提示两种状态都量），标题、数值、关键帧按钮在同一行；顺带回归音频面板的 `.position-grid` 与素材库「更多」已移除、顶栏「新建项目」仍在。
+
+- `curve`：曲线变速编辑器（画布 263×168、5 条网格线、80 个采样点、描边/填充生效），拖到 4.61x 后时长 2.97s→1.18s，撤销一次回到平坦曲线、再撤销一次曲线整体消失。
+- `freeze`：播放头 1.5s 处插入定格——**插入前后预览画布像素哈希完全一致**（定格显示的就是那一帧），主轨定格缩略条各格列色完全一致（spread=0，整条重复同一帧），同时用普通片段做反向对照（spread=161，仍在变化，没被误冻结）。
+- `rename`：顶栏改名后 **120ms 内**（远早于 700ms 自动保存防抖）打开「最近项目」，列表已显示新名字。
+- `clipboard`：A 片段设曲线后复制变速属性，B 粘贴后出现曲线编辑器、时长变短，且 A/B 的**压缩比一致**（曲线按源跨度比例生效）。
 
 在 Windows 11 + 无头 Edge 152（1440×900，CDP 驱动，真实 FFmpeg.wasm）验证。此前基础 44 项检查已通过；本轮针对拖动/裁剪/删除反馈新增的 23 项交互与导出一致性检查全部通过：
 
@@ -562,6 +604,41 @@ pnpm typecheck
 | ![定格保持](docs/screenshots/editor-freeze.png) |
 
 验证环境为 Windows 11 + 无头 Edge 152（1440×900），隔离与非隔离两种静态服务均已跑通。
+
+### 样式隔离（嵌入宿主时不会污染页面）
+
+编辑器 CSS（`src/editor/styles/editor.css`，约 7000 行）在**构建时**由 [`build/postcss-framecut-scope.mjs`](build/postcss-framecut-scope.mjs) 重写：
+
+| 处理 | 结果 |
+| --- | --- |
+| 所有选择器 | 加 `.framecut-root` 前缀：`.button` → `.framecut-root .button`（原本会命中宿主自己的 `.button`） |
+| `:root` / `html` / `body` | 映射到根节点自身：`body .x` → `.framecut-root .x`，`html.dark body` → `.framecut-root`；`*` → `.framecut-root *` |
+| `@keyframes` | 全部加 `fc-` 前缀（`spin` → `fc-spin`，共 10 组），`animation` / `animation-name` 的引用同步改名 |
+| 已限定的选择器 | 原样保留（不会出现 `.framecut-root .framecut-root`）；插件幂等 |
+| `.framecut-host` | 豁免——它是 `.framecut-root` 的**祖先**包裹容器（由 `<VideoEditor />` 渲染），加前缀会永不匹配；它自带 `framecut-` 命名空间 |
+| 宿主样式表 | 不处理（`include` 只匹配 `styles/editor.css`；Vite 的 postcss 对所有 CSS 生效，若不限制会把宿主的 `.button` 一起改掉） |
+
+**Portal 检查**：代码里没有 `createPortal`，toast / 右键菜单 / 各式弹窗都是渲染在 `.framecut-root` 内部（`position: fixed` 定位），因此加前缀后不会丢样式。`document.body.appendChild` 只有下载用的 `<a>`、filmstrip 的 `<video>` 等不可见辅助元素。
+
+**body 行内样式**：拖动时间轴高度时不再写死 `style.cursor = ''`，而是用 [`src/editor/components/bodyStyles.ts`](src/editor/components/bodyStyles.ts) 先保存宿主的原值（含「原本没设」的情况），结束后精确恢复；组件在拖动中途卸载时也会摘掉 `pointermove/pointerup/pointercancel` 监听并恢复样式。
+
+验证方式（两层）：
+
+- 单测 [`tests/cssScope.test.ts`](tests/cssScope.test.ts)：把上面每一项都钉死（含宿主样式表不被处理、幂等、`:root`/`body` 映射、`setBodyStyles` 精确恢复）。
+- 浏览器 e2e 阶段 `isolate`：`FRAMECUT_URL='http://127.0.0.1:5173/?hostDemo=1' node .verify/cdp-import.mjs isolate`。demo 应用在 `?hostDemo=1` 时会渲染一块**宿主界面**（普通 `.button` / `.badge` / `@keyframes spin`，与编辑器重名），阶段里逐项核对：宿主按钮仍是宿主的黄底虚线、编辑器按钮未被污染、宿主 `spin` 与编辑器 `fc-spin` 共存且各自的动画都在跑、编辑器内部动画名全部以 `fc-` 开头。
+
+**是否建议改用 Shadow DOM**：**暂时不建议**，理由如下。
+
+| | 当前方案（PostCSS 前缀） | Shadow DOM |
+| --- | --- | --- |
+| 隔离强度 | 选择器级别：语义隔离，但宿主仍可用 `.framecut-root .button` 命中编辑器内部（这通常是好事） | 真正隔绝：宿主的 `.button` 完全进不来，编辑器的样式也出不去 |
+| 样式外泄 | 已消除（全部前缀） | 消除得更彻底（连 `!important`、属性选择器都无法穿透） |
+| 自定义主题 | 宿主可用 CSS 变量或覆盖 `.framecut-root .x` 微调 | 只能靠 CSS 变量与 `::part()`，需要给每个可定制元素加 `part` |
+| 成本 | 零运行时开销；构建期一次转换 | 需改渲染根（挂 shadow root）、Portal 目标、事件与焦点管理、`ResizeObserver` 度量、e2e 选择器全部要穿透 shadow；当前 7000 行 CSS 里大量后代选择器仍可正常工作，但 `.framecut-root` 上的主题变量要重新安排 |
+| 兼容性 | 无要求 | 需要 `adoptedStyleSheets` / `::part` 支持（现代浏览器均可用） |
+| 风险 | 依赖构建链正确（已由 e2e 守住） | 一次性改动面大，回归风险明显高于收益 |
+
+结论：当前隔离已经解决「污染宿主」这个真实问题（有浏览器验证），Shadow DOM 的额外收益主要是「防宿主反向穿透」，代价是把主题定制与 e2e 全部改一遍。若将来宿主环境要求**绝对**隔离（例如允许第三方插件往同一页面注入 CSS，或需要与同样使用 `.button` 的设计系统共存于同一 DOM 层级），再考虑把 `.framecut-root` 换成 shadow root，并按 `::part` 暴露少量主题接口——那时可以只在最外层做切换，逐个组件迁移。
 
 ## 智能字幕（本地识别）
 
