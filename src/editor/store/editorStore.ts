@@ -11,15 +11,11 @@ import {
   type FrameCutTheme,
   type ResolvedTheme,
 } from '../core/theme'
-import {
-  EXPORT_RANGE_MIN_DURATION,
-  clampExportRange,
-  exportRangeDuration,
-  type ExportRange,
-} from '../core/exportRange'
-import { formatClock } from '../core/format'
+import { type ExportRange } from '../core/exportRange'
 import { createStoreInternals, type HistoryState } from './internal'
 import { createAssetsSlice } from './slices/assets'
+import { createExportSlice } from './slices/export'
+import { createPersistenceSlice } from './slices/persistence'
 import { createPlaybackSlice } from './slices/playback'
 import { createSelectionSlice } from './slices/selection'
 import { createUiSlice } from './slices/ui'
@@ -55,14 +51,7 @@ import { animationContextAt, moveKeyframesInProject } from '../core/keyframes'
 import { animationBaseValue, isPropertyAnimatizable } from '../core/animationTargets'
 import { evalAnimation } from '../core/animation'
 import type { KeyframeRef } from '../core/keyframeEdit'
-import {
-  deleteMediaBlob,
-  reportDraftSaveFailure,
-  saveMediaBlob,
-  saveProjectRecord,
-  toDraftSnapshot,
-} from '../services/draftStore'
-import { DEFAULT_PROJECT_NAME, normalizeProjectName, projectThumbnail } from '../core/projectLibrary'
+import { deleteMediaBlob, saveMediaBlob } from '../services/draftStore'
 import { readAssetFile } from '../services/assetReader'
 import {
   countLinkedCaptions,
@@ -111,17 +100,7 @@ import {
   getProjectEnd,
   getTimeline,
 } from '../core/timeline'
-import {
-  FREEZE_DEFAULT_DURATION,
-  FREEZE_MAX_DURATION,
-  FREEZE_MIN_DURATION,
-  MARKER_COLORS,
-  MAX_OVERLAY_TRACKS,
-  SCALE_MAX,
-  SCALE_MIN,
-  TIMELINE_MAX_ZOOM,
-  TIMELINE_MIN_ZOOM,
-} from '../core/constants'
+import { FREEZE_DEFAULT_DURATION, FREEZE_MAX_DURATION, FREEZE_MIN_DURATION, MARKER_COLORS, MAX_OVERLAY_TRACKS, SCALE_MAX, SCALE_MIN } from '../core/constants'
 import type {
   AnimatableProperty,
   AspectRatioPreset,
@@ -618,7 +597,7 @@ export function createEditorStore() {
   return createStore<EditorState>()((set, get) => {
   /** 共享内核：历史栈、命令执行、状态同步、素材回收（见 store/internal.ts）。 */
   const internals = createStoreInternals(get, set, initial)
-  const { sync, run, reconcilePendingAssets, cancelReverseForProjectSwap } = internals
+  const { sync, run } = internals
 
 
 
@@ -653,13 +632,10 @@ export function createEditorStore() {
       ...createPlaybackSlice({ get, set, internals }),
       ...createSelectionSlice({ get, set, internals }),
       ...createAssetsSlice({ get, set, internals }),
+      ...createExportSlice({ get, set, internals }),
+      ...createPersistenceSlice({ get, set, internals }),
       project: initial,
-      projectId: null,
-      projectName: DEFAULT_PROJECT_NAME,
-      projectNameEdited: false,
-      exportRange: null,
       cropSession: null,
-      exportDialogOpen: false,
       history: {
         stack: internals.history,
         pastLength: 0,
@@ -669,52 +645,6 @@ export function createEditorStore() {
       lastAction: '',
 
 
-      hydrateDraft: (draft) => {
-        cancelReverseForProjectSwap()
-        internals.resetHistory(draft.project)
-        const firstAudio = draft.project.audioTracks?.[0]?.clips[0]?.id ?? null
-        const firstSelection = draft.project.clips[0]?.id ?? firstAudio
-        set({
-          project: draft.project,
-          assets: draft.assets,
-          source: draft.source,
-          selectedClipId: firstSelection,
-          // 切项目必须重置多选集合（否则复制/删除会读到上一个项目的失效 id）。
-          selectedIds: firstSelection ? [firstSelection] : [],
-          playhead: clamp(
-            draft.playhead,
-            0,
-            Math.max(0, getProjectEnd(draft.project)),
-          ),
-          isPlaying: false,
-          timelineZoom: clamp(
-            draft.timelineZoom,
-            TIMELINE_MIN_ZOOM,
-            TIMELINE_MAX_ZOOM,
-          ),
-          timelineSettings: {
-            mainTrackMagnet: draft.timelineSettings.mainTrackMagnet,
-            autoSnap: draft.timelineSettings.autoSnap,
-            linkage: draft.timelineSettings.linkage,
-            previewAxis: draft.timelineSettings.previewAxis,
-          },
-          captionFollow: draft.timelineSettings.captionFollow ?? true,
-          // 旧草稿没有 exportRange：按「导出全部」处理，越界区间夹回有效范围。
-          exportRange: clampExportRange(
-            draft.timelineSettings.exportRange ?? null,
-            Math.max(0, getProjectEnd(draft.project)),
-          ),
-          cropSession: null,
-          previewPatch: null,
-          markerEditorId: null,
-          exportDialogOpen: false,
-          lastAction: '',
-          toast: null,
-          asrWordsBySource: null,
-        })
-        // 换到了另一个项目：旧工程的历史栈刚被 reset，待回收素材已不可能被撤销带回。
-        reconcilePendingAssets({ force: true })
-      },
 
 
 
@@ -722,34 +652,6 @@ export function createEditorStore() {
 
 
 
-      clearSource: () => {
-        cancelReverseForProjectSwap()
-        const empty = createEmptyProject()
-        internals.resetHistory(empty)
-        set({
-          source: null,
-          assets: [],
-          project: empty,
-          // 空会话没有项目身份：首次导入素材时再分配。
-          projectId: null,
-          projectName: DEFAULT_PROJECT_NAME,
-          projectNameEdited: false,
-          selectedClipId: null,
-          selectedIds: [],
-          playhead: 0,
-          isPlaying: false,
-          exportRange: null,
-          cropSession: null,
-          previewPatch: null,
-          markerEditorId: null,
-          exportDialogOpen: false,
-          lastAction: '',
-          toast: null,
-          asrWordsBySource: null,
-        })
-        // 关闭当前项目（清空会话）：历史栈已 reset，待回收素材一律立即回收。
-        reconcilePendingAssets({ force: true })
-      },
 
       execute: (command) => run(command),
 
@@ -1117,112 +1019,12 @@ export function createEditorStore() {
 
 
 
-      renameProject: (name) => {
-        const next = normalizeProjectName(name)
-        const state = get()
-        if (state.projectName === next && state.projectNameEdited) return
-        set({ projectName: next, projectNameEdited: true })
-      },
 
-      adoptProject: (id, name) => {
-        // 切项目前先把当前项目落盘，避免「切换发生在自动保存防抖窗口内」丢编辑。
-        get().flushProjectSave()
-        set({
-          projectId: id,
-          projectName: normalizeProjectName(name),
-          projectNameEdited: true,
-        })
-        // 接管新项目：旧工程的历史即将被 hydrateDraft 重置，待回收素材按「关闭」处理。
-        reconcilePendingAssets({ force: true })
-      },
 
-      flushProjectSave: () => {
-        const state = get()
-        const id = state.projectId
-        // 没有项目身份（从未有内容的新会话）不落盘，避免列表里出现空项目。
-        if (!id) return
-        const snapshot = toDraftSnapshot(state)
-        const record = {
-          id,
-          name: state.projectName,
-          updatedAt: Date.now(),
-          thumbnail: projectThumbnail(snapshot),
-          snapshot,
-        }
-        void saveProjectRecord(record).catch(() => reportDraftSaveFailure(state.notify))
-      },
 
-      setExportInPoint: (time) => {
-        const state = get()
-        const total = Math.max(0, getProjectEnd(state.project))
-        const start = clamp(time ?? state.playhead, 0, total)
-        // 还没有区间时另一端取工程终点；已有区间时另一端保持不变。
-        const end = state.exportRange?.end ?? total
-        const next = clampExportRange({ start, end }, total)
-        if (!next) {
-          state.notify('入点必须比出点早至少 0.1 秒', 'warning')
-          return
-        }
-        set({ exportRange: next })
-        state.notify(
-          `导出范围 ${formatClock(next.start)} – ${formatClock(next.end)}（${exportRangeDuration(next).toFixed(1)} 秒）`,
-          'success',
-        )
-      },
 
-      setExportOutPoint: (time) => {
-        const state = get()
-        const total = Math.max(0, getProjectEnd(state.project))
-        const end = clamp(time ?? state.playhead, 0, total)
-        // 还没有区间时另一端取工程起点；已有区间时另一端保持不变。
-        const start = state.exportRange?.start ?? 0
-        const next = clampExportRange({ start, end }, total)
-        if (!next) {
-          state.notify('出点必须比入点晚至少 0.1 秒', 'warning')
-          return
-        }
-        set({ exportRange: next })
-        state.notify(
-          `导出范围 ${formatClock(next.start)} – ${formatClock(next.end)}（${exportRangeDuration(next).toFixed(1)} 秒）`,
-          'success',
-        )
-      },
 
-      setExportRangeEdge: (edge, time) => {
-        const state = get()
-        const range = state.exportRange
-        if (!range) return
-        const total = Math.max(0, getProjectEnd(state.project))
-        const next =
-          edge === 'start'
-            ? {
-                start: clamp(
-                  time,
-                  0,
-                  Math.max(0, range.end - EXPORT_RANGE_MIN_DURATION),
-                ),
-                end: range.end,
-              }
-            : {
-                start: range.start,
-                end: clamp(
-                  time,
-                  Math.min(total, range.start + EXPORT_RANGE_MIN_DURATION),
-                  total,
-                ),
-              }
-        const clamped = clampExportRange(next, total)
-        if (!clamped) return
-        if (clamped.start === range.start && clamped.end === range.end) return
-        set({ exportRange: clamped })
-      },
 
-      clearExportRange: () => {
-        const state = get()
-        if (!state.exportRange) return
-        set({ exportRange: null })
-        state.notify('已清除导出范围，导出整条时间轴', 'info')
-      },
 
       splitAtPlayhead: () => {
         const state = get()
@@ -2721,19 +2523,7 @@ export function createEditorStore() {
       },
 
 
-      openExportDialog: () => {
-        set({
-          exportDialogOpen: true,
-          isPlaying: false,
-          cropSession: null,
-          previewPatch: null,
-          markerEditorId: null,
-        })
-      },
 
-      closeExportDialog: () => {
-        if (get().exportDialogOpen) set({ exportDialogOpen: false })
-      },
 
 
     }
