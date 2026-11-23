@@ -1,15 +1,9 @@
 import { expect, test } from '@playwright/test'
-import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { createInitialProject } from '../src/editor/core/operations'
-import { getOutputDimensions } from '../src/editor/core/aspect'
-import { createProjectFile, serializeProjectFile } from '../src/editor/projectFile'
+import { createProjectFile } from '../src/editor/projectFile'
 import type { CanvasBackground, SourceInfo } from '../src/editor/core/types'
-import {
-  FIXTURE,
-  expectClipCount,
-  openEditor,
-} from './helpers'
+import { FIXTURE } from './helpers'
+import { importProjectFileAndExport } from './projectExportFlow'
 import {
   PARITY_TOLERANCE,
   averageClipRenderColor,
@@ -83,51 +77,21 @@ test('主轨不透明度 + 混合模式：预览与导出平均色一致', async
     },
     playhead: 0,
   })
-  const projectPath = join(testInfo.outputDir, 'parity.framecut.json')
-  mkdirSync(testInfo.outputDir, { recursive: true })
-  writeFileSync(projectPath, serializeProjectFile(projectFile))
 
-  // ---- 打开编辑器并导入工程（重新选择本地素材）----
-  await openEditor(page)
-  await page.locator('input[data-project-file-input]').setInputFiles(projectPath)
-  const dialog = page.locator('[role="dialog"][aria-label="缺失素材"]')
-  await expect(dialog).toBeVisible()
-  const chooserPromise = page.waitForEvent('filechooser')
-  await dialog.locator('button[data-action="pick"]').first().click()
-  const chooser = await chooserPromise
-  await chooser.setFiles(FIXTURE)
-  await expect(dialog.locator('.project-missing-status').first()).toContainText('已选择')
-  await dialog.getByRole('button', { name: /打开工程/ }).click()
-  await expectClipCount(page, 1)
-
-  // ---- 导出真实 mp4 ----
-  await page.locator('.export-button').click()
-  await page.waitForSelector('.export-dialog', { state: 'visible' })
-  await page.getByRole('button', { name: '开始导出' }).click()
-  const downloadPromise = page.waitForEvent('download', { timeout: 240_000 })
-  await page.waitForSelector('.export-done, .export-error', { timeout: 240_000 })
-  if ((await page.locator('.export-error').count()) > 0) {
-    throw new Error('导出失败：' + (await page.locator('.export-error').innerText()))
-  }
-  const download = await downloadPromise
-  const videoPath = join(testInfo.outputDir, 'parity.mp4')
-  await download.saveAs(videoPath)
-
-  const { width, height } = getOutputDimensions(
-    project.aspectRatio,
-    project.exportQuality.resolution,
-    SOURCE_INFO,
-  )
+  const { videoPath, width, height } = await importProjectFileAndExport(page, testInfo, {
+    projectFile,
+    source: SOURCE_INFO,
+    fileName: 'parity',
+  })
 
   // ---- 预览：真实 clipRender ----
-  const sourceBase64 = readSourceBase64(FIXTURE)
   const probeOf = (overrides: Partial<ClipRenderProbe['clip']>): ClipRenderProbe => ({
     clip: { ...clip, ...overrides },
     background: BACKGROUND,
     canvasWidth: width,
     canvasHeight: height,
     localTime: LOCAL_TIME,
-    sourceBase64,
+    sourceBase64: readSourceBase64(FIXTURE),
     sourceName: 'clip.mp4',
   })
   const preview = await averageClipRenderColor(page, probeOf({}))

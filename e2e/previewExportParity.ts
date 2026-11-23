@@ -44,8 +44,32 @@ export interface ClipRenderProbe {
   sourceMimeType?: string
 }
 
+/** 取样区域（像素，画布坐标）；省略表示整帧。 */
+export interface SampleRegion {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+function clampRegion(
+  region: SampleRegion | undefined,
+  width: number,
+  height: number,
+): SampleRegion {
+  if (!region) return { x: 0, y: 0, width, height }
+  const x = Math.max(0, Math.min(width - 1, Math.round(region.x)))
+  const y = Math.max(0, Math.min(height - 1, Math.round(region.y)))
+  return {
+    x,
+    y,
+    width: Math.max(1, Math.min(width - x, Math.round(region.width))),
+    height: Math.max(1, Math.min(height - y, Math.round(region.height))),
+  }
+}
+
 /**
- * 在页面里用真实 clipRender 渲染一帧并返回平均 RGB。
+ * 在页面里用真实 clipRender 渲染一帧并返回平均 RGB（可只取某个区域，例如四角）。
  *
  * 通过 Vite dev server 动态 import core 模块：拿到的是**与预览完全相同**的渲染代码，
  * 而不是在测试里复刻一套绘制逻辑。
@@ -53,6 +77,7 @@ export interface ClipRenderProbe {
 export async function averageClipRenderColor(
   page: Page,
   probe: ClipRenderProbe,
+  region?: SampleRegion,
 ): Promise<RgbColor> {
   return page.evaluate(async (input) => {
     // 动态 import：dev server 会即时编译 TS；非字面量路径避免 tsc 去解析浏览器路径。
@@ -110,7 +135,19 @@ export async function averageClipRenderColor(
       sourceHeight: video.videoHeight,
     })
 
-    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+    const sampleX = input.region
+      ? Math.max(0, Math.min(canvas.width - 1, Math.round(input.region.x)))
+      : 0
+    const sampleY = input.region
+      ? Math.max(0, Math.min(canvas.height - 1, Math.round(input.region.y)))
+      : 0
+    const sampleW = input.region
+      ? Math.max(1, Math.min(canvas.width - sampleX, Math.round(input.region.width)))
+      : canvas.width
+    const sampleH = input.region
+      ? Math.max(1, Math.min(canvas.height - sampleY, Math.round(input.region.height)))
+      : canvas.height
+    const data = ctx.getImageData(sampleX, sampleY, sampleW, sampleH).data
     let r = 0
     let g = 0
     let b = 0
@@ -127,7 +164,7 @@ export async function averageClipRenderColor(
       g: Math.round(g / pixels),
       b: Math.round(b / pixels),
     }
-  }, probe)
+  }, { ...probe, region: region ? clampRegion(region, probe.canvasWidth, probe.canvasHeight) : undefined })
 }
 
 /** 读取素材文件为 base64（Node 侧）。 */
@@ -135,12 +172,13 @@ export function readSourceBase64(path: string): string {
   return readFileSync(path).toString('base64')
 }
 
-/** 用 ffmpeg 解码导出视频的某一帧并返回平均 RGB。 */
+/** 用 ffmpeg 解码导出视频的某一帧并返回平均 RGB（可只取某个区域）。 */
 export function averageVideoFrameColor(
   videoPath: string,
   time: number,
   width: number,
   height: number,
+  region?: SampleRegion,
 ): RgbColor {
   if (!ffmpegPath) throw new Error('ffmpeg-static 二进制不可用')
   // 只取一帧、输出裸 RGB：不做缩放，尺寸必须与导出画布一致。
@@ -174,15 +212,20 @@ export function averageVideoFrameColor(
       `对比工具：导出帧尺寸不符（得到 ${buffer.length} 字节，期望 ${expected}，${width}x${height}）`,
     )
   }
+  const sample = clampRegion(region, width, height)
   let r = 0
   let g = 0
   let b = 0
-  const pixels = expected / 3
-  for (let index = 0; index < expected; index += 3) {
-    r += buffer[index]
-    g += buffer[index + 1]
-    b += buffer[index + 2]
+  for (let row = 0; row < sample.height; row += 1) {
+    const rowStart = ((sample.y + row) * width + sample.x) * 3
+    for (let column = 0; column < sample.width; column += 1) {
+      const offset = rowStart + column * 3
+      r += buffer[offset]
+      g += buffer[offset + 1]
+      b += buffer[offset + 2]
+    }
   }
+  const pixels = sample.width * sample.height
   return { r: Math.round(r / pixels), g: Math.round(g / pixels), b: Math.round(b / pixels) }
 }
 

@@ -328,12 +328,13 @@ export function maskedClipPieces(
   }
 
   const suffix: string[] = []
+  // 调色只作用于画面本身：放在 rotate 之前，透明角不参与处理。
+  suffix.push(...ffmpegColorFilters(clipColor(clip)))
   if (Math.abs(clip.rotation) > 0.001) {
     suffix.push(
       `rotate=${num((clip.rotation * Math.PI) / 180)}:ow=${geometry.rotated.w}:oh=${geometry.rotated.h}:c=black@0`,
     )
   }
-  suffix.push(...ffmpegColorFilters(clipColor(clip)))
   suffix.push(`scale=${rendered.w}:${rendered.h}:in_range=full:out_range=limited:flags=lanczos`)
   suffix.push(
     'format=rgba',
@@ -368,14 +369,18 @@ function videoTransformChain(
   const parts: string[] = [`crop=${crop.w}:${crop.h}:${crop.x}:${crop.y}`]
   if (clip.flipH) parts.push('hflip')
   if (clip.flipV) parts.push('vflip')
-  if (Math.abs(clip.rotation) > 0.001) {
+  const rotated = Math.abs(clip.rotation) > 0.001
+  // 调色必须在 rotate 之前：rotate 之后画面外是透明角，放在后面既会处理无谓像素，
+  // 也会让黑角随亮度变灰（历史 bug）。这里只作用于画面本身。
+  parts.push(...ffmpegColorFilters(clipColor(clip)))
+  if (rotated) {
+    // 主轨旋转：输出**透明角**（c=black@0），由调用方垫背景层后合成，
+    // 与叠加轨路径一致。rotate 需要 alpha 输入，所以先转 rgba。
     parts.push(
-      `rotate=${num((clip.rotation * Math.PI) / 180)}:ow=${geometry.rotated.w}:oh=${geometry.rotated.h}:c=black`,
+      'format=rgba',
+      `rotate=${num((clip.rotation * Math.PI) / 180)}:ow=${geometry.rotated.w}:oh=${geometry.rotated.h}:c=black@0`,
     )
   }
-  // 调色插在单片段视频链里（与 crop / hflip / rotate 同级、scale 之前），
-  // 因此叠加轨片段只会拿到自己的调色参数，不会串到主轨。
-  parts.push(...ffmpegColorFilters(clipColor(clip)))
   parts.push(`scale=${rendered.w}:${rendered.h}:in_range=full:out_range=limited:flags=lanczos`)
 
   if (visible.w < 2 || visible.h < 2) return null
@@ -385,7 +390,10 @@ function videoTransformChain(
     `crop=${Math.round(visible.w)}:${Math.round(visible.h)}:${Math.round(visible.x)}:${Math.round(visible.y)}`,
   )
   const preserveAlpha = options.preserveAlpha === true
-  if (needsBackgroundLayer(background) || preserveAlpha) {
+  // 旋转后画面外的角是透明的：必须保留 alpha 并让调用方垫背景层，
+  // 否则转 yuv420p 时 alpha 被丢弃、角落变黑。只在 rotation≠0 时走这条路径。
+  const keepAlpha = preserveAlpha || rotated
+  if (needsBackgroundLayer(background) || keepAlpha) {
     // 模糊/图片背景，或需要按不透明度/混合模式合成：先留透明，由调用方垫背景层再合成。
     parts.push(
       `pad=${width}:${height}:${Math.round(rendered.x + visible.x)}:${Math.round(rendered.y + visible.y)}:color=0x00000000`,
@@ -999,10 +1007,12 @@ function buildContiguousExportPlan(
     const source = resolve(clip)
     const temporal = videoTemporalChain(clip, source.duration, fps)
     const background = clipBackground(clip, project)
-    // 不透明度 / 混合模式：画面层必须保留 alpha，之后叠到画布背景上。
+    // 不透明度 / 混合模式 / 旋转透明角：画面层必须保留 alpha，之后叠到画布背景上。
     const composite = hasBlendSettings(clip)
+    const rotated = Math.abs(clip.rotation) > 0.001
+    const needsComposite = composite || rotated
     const transform = videoTransformChain(clip, width, height, source, background, {
-      preserveAlpha: composite,
+      preserveAlpha: needsComposite,
     })
     // ---- 带蒙版的主轨片段 ----
     // crop/flip 之后 alphamerge（蒙版 PNG 尺寸 = 裁切尺寸），再垫背景层合成，
@@ -1088,8 +1098,8 @@ function buildContiguousExportPlan(
       return
     }
 
-    if (composite) {
-      // 黑场/纯色背景 + 不透明度或混合模式：生成背景层后合成，
+    if (needsComposite) {
+      // 黑场/纯色背景 + 不透明度、混合模式或旋转透明角：生成背景层后合成，
       // 而不是把背景色直接 pad 进画面（那样会丢掉 alpha）。
       const prefix = `ob${index}`
       const foreground = `[${prefix}fg]`
@@ -1298,14 +1308,16 @@ function buildGappedExportPlan(
     const temporal = videoTemporalChain(unit.clip, source.duration, fps)
     const background = clipBackground(unit.clip, project)
     const composite = hasBlendSettings(unit.clip)
+    const rotated = Math.abs(unit.clip.rotation) > 0.001
+    const needsComposite = composite || rotated
     // 默认路径保持历史行为（背景色直接 pad）；需要合成时才保留 alpha 并垫背景层。
     const transform = videoTransformChain(
       unit.clip,
       width,
       height,
       source,
-      composite ? background : { type: 'black' },
-      { preserveAlpha: composite },
+      needsComposite ? background : { type: 'black' },
+      { preserveAlpha: needsComposite },
     )
     // 带蒙版片段（含空隙的时间轴）：alphamerge 后垫黑色背景再合成。
     const unitMaskInput = maskInputs?.get(unit.clip.id)
@@ -1353,8 +1365,8 @@ function buildGappedExportPlan(
       )
       return
     }
-    if (composite) {
-      // 不透明度 / 混合模式：画面层叠到画布背景上（模糊背景需要先拆分支）。
+    if (needsComposite) {
+      // 不透明度 / 混合模式 / 旋转透明角：画面层叠到画布背景上（模糊背景需要先拆分支）。
       const prefix = `gb${index}`
       const foreground = `[${prefix}fg]`
       const backgroundLabel = `[${prefix}bg]`
