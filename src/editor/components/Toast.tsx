@@ -1,3 +1,4 @@
+import { matchesPointer } from './pointerDrag'
 import { useEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { useEditorStore } from '../store/EditorProvider'
@@ -148,7 +149,7 @@ export function CommitNumber({
 
   const handleGripMove = (event: ReactPointerEvent<HTMLSpanElement>) => {
     const drag = dragRef.current
-    if (!drag || drag.pointerId !== event.pointerId) return
+    if (!matchesPointer(drag, event)) return
     const deltaPx = event.clientX - drag.startX
     if (Math.abs(deltaPx) < 3) return
     drag.moved = true
@@ -163,7 +164,7 @@ export function CommitNumber({
 
   const handleGripUp = (event: ReactPointerEvent<HTMLSpanElement>) => {
     const drag = dragRef.current
-    if (!drag || drag.pointerId !== event.pointerId) return
+    if (!matchesPointer(drag, event)) return
     dragRef.current = null
     try {
       event.currentTarget.releasePointerCapture(event.pointerId)

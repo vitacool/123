@@ -17,6 +17,7 @@ export function TrackGutter() {
   const project = useEditorStore((state) => state.project)
   const removeOverlayTrack = useEditorStore((state) => state.removeOverlayTrack)
   const moveOverlayTrack = useEditorStore((state) => state.moveOverlayTrack)
+  const moveTrackBy = useEditorStore((state) => state.moveTrackBy)
   const removeAudioTrack = useEditorStore((state) => state.removeAudioTrack)
   const removeTextTrack = useEditorStore((state) => state.removeTextTrack)
   const openCoverPanel = useEditorStore((state) => state.openCoverPanel)
@@ -71,6 +72,10 @@ export function TrackGutter() {
             height={AUDIO_HEIGHT}
             suppressedBySolo={isAudioSuppressedBySolo(project, state)}
             onRemove={() => removeAudioTrack(track.id)}
+            canMoveUp={audioTracks.findIndex((item) => item.id === track.id) > 0}
+            canMoveDown={audioTracks.findIndex((item) => item.id === track.id) < audioTracks.length - 1}
+            onMoveUp={() => moveTrackBy('audio', track.id, 'up')}
+            onMoveDown={() => moveTrackBy('audio', track.id, 'down')}
           />
         )
       })}
@@ -83,6 +88,10 @@ export function TrackGutter() {
           state={textTrackState(track)}
           height={AUDIO_HEIGHT}
           onRemove={() => removeTextTrack(track.id)}
+          canMoveUp={textTracks.findIndex((item) => item.id === track.id) > 0}
+          canMoveDown={textTracks.findIndex((item) => item.id === track.id) < textTracks.length - 1}
+          onMoveUp={() => moveTrackBy('text', track.id, 'up')}
+          onMoveDown={() => moveTrackBy('text', track.id, 'down')}
         />
       ))}
     </>

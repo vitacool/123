@@ -164,6 +164,21 @@ export async function recognizeAssets(
   source: SourceInfo | null,
   options: RecognizeAssetsOptions,
 ): Promise<RecognitionResult> {
+  try {
+    return await runRecognition(project, assets, source, options)
+  } finally {
+    // 成功 / 失败 / 取消都要清理：抽取缓存把源文件写进了共享 MEMFS，
+    // 不清理会一直占着运行时的文件系统。旧实例已死时 deleteFile 会失败，忽略即可。
+    await cleanupExtractCache().catch(() => undefined)
+  }
+}
+
+async function runRecognition(
+  project: Project,
+  assets: MediaAsset[],
+  source: SourceInfo | null,
+  options: RecognizeAssetsOptions,
+): Promise<RecognitionResult> {
   const { signal } = options
   if (signal?.aborted) throw new DOMException('已取消', 'AbortError')
 
@@ -245,7 +260,7 @@ export async function recognizeAssets(
       })
       let pcm: Float32Array
       try {
-        pcm = await extractPcm16k(asset, interval.start, interval.end)
+        pcm = await extractPcm16k(asset, interval.start, interval.end, signal)
       } catch {
         // 素材无音轨/抽取失败：只跳过这一个素材，不整次失败。
         options.onProgress?.({
@@ -358,7 +373,6 @@ export async function recognizeAssets(
   })
 
   const urlToAssetId = new Map(assets.map((asset) => [asset.url, asset.id]))
-  await cleanupExtractCache()
   return {
     wordsBySource,
     timelineWords: mapWordsToTimeline(

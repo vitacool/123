@@ -47,8 +47,8 @@ export const ASPECT_PRESETS: { id: import('./types').AspectRatioPreset; label: s
 ]
 
 export const MARKER_COLORS = [
-  '#e4573d',
-  '#f2a63b',
+  '#7fc99b',
+  '#a9d38c',
   '#6f9d82',
   '#5b84b1',
   '#9b7bb5',

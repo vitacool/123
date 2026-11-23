@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { audioClipDuration } from '../core/audio'
 import type { AudioClip, SourceInfo } from '../core/types'
 import { getAudioPeaks, type AudioPeaks } from '../services/audioWaveform'
+import { useEditorStore } from '../store/EditorProvider'
+import { readThemeToken } from '../services/themeTokens'
 
 interface AudioWaveformProps {
   clip: AudioClip
@@ -14,6 +16,8 @@ interface AudioWaveformProps {
 export function AudioWaveform({ clip, asset, width, height }: AudioWaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const [peaks, setPeaks] = useState<AudioPeaks | null>(null)
+  // 主题变化时重绘（波形颜色是界面色，从 CSS 变量读取）。
+  const resolvedTheme = useEditorStore((state) => state.resolvedTheme)
 
   useEffect(() => {
     let cancelled = false
@@ -48,7 +52,7 @@ export function AudioWaveform({ clip, asset, width, height }: AudioWaveformProps
       const startRatio = Math.min(1, clip.sourceStart / peaks.duration)
       const endRatio = Math.min(1, clip.sourceEnd / peaks.duration)
       const center = pixelHeight / 2
-      context.fillStyle = 'rgba(61, 89, 106, 0.55)'
+      context.fillStyle = readThemeToken('--fc-waveform', 'rgba(61, 89, 106, 0.55)')
       const step = Math.max(2, Math.round(2 * ratio))
       for (let x = 0; x < pixelWidth; x += step) {
         const position = x / Math.max(1, pixelWidth)
@@ -63,7 +67,7 @@ export function AudioWaveform({ clip, asset, width, height }: AudioWaveformProps
     }
     raf = requestAnimationFrame(paint)
     return () => cancelAnimationFrame(raf)
-  }, [peaks, width, height, clip.sourceStart, clip.sourceEnd])
+  }, [peaks, width, height, clip.sourceStart, clip.sourceEnd, resolvedTheme])
 
   return (
     <canvas

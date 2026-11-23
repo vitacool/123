@@ -150,7 +150,7 @@ export function AutoCaptionDialog({ open, onClose, provider }: AutoCaptionDialog
   const busyModel = running && (progress?.stage === 'prepare' || progress?.detail.startsWith('下载模型'))
 
   return (
-    <div className="dialog-backdrop" role="presentation" onClick={running ? undefined : onClose}>
+    <div className="modal-backdrop" role="presentation" onClick={running ? undefined : onClose}>
       <section
         className="auto-caption-dialog"
         role="dialog"

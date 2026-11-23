@@ -1,8 +1,15 @@
-import { loadFFmpegRuntime } from './ffmpegExporter'
+import {
+  acquireRuntime,
+  canCleanup,
+  execOnRuntime,
+  retryOnRestartOnce,
+} from './ffmpegRuntime'
 
 export interface TranscodeCallbacks {
   onProgress?: (progress: number) => void
   onStatus?: (message: string) => void
+  /** 取消转码：立刻终止共享运行时（wasm exec 只能这样打断）。 */
+  signal?: AbortSignal
 }
 
 const TRANSCODE_CRF = 22
@@ -21,8 +28,17 @@ export async function transcodeToH264(
   file: File,
   callbacks: TranscodeCallbacks = {},
 ): Promise<File> {
+  // 运行时可能在转码途中被重启（导出取消/超时都会重启共享实例）：整流程重做一次。
+  return retryOnRestartOnce(() => transcodeOnce(file, callbacks))
+}
+
+async function transcodeOnce(
+  file: File,
+  callbacks: TranscodeCallbacks,
+): Promise<File> {
   callbacks.onStatus?.('正在加载转码器…')
-  const ffmpeg = await loadFFmpegRuntime()
+  const runtime = await acquireRuntime({ signal: callbacks.signal })
+  const ffmpeg = runtime.ffmpeg
   const inputName = `import-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${file.name.split('.').pop() || 'mp4'}`
   const outputName = `import-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp4`
   const onProgress = ({ progress }: { progress: number }) => {
@@ -47,7 +63,7 @@ export async function transcodeToH264(
   try {
     await ffmpeg.writeFile(inputName, new Uint8Array(await file.arrayBuffer()))
     callbacks.onStatus?.('正在转码为 H.264 MP4…')
-    await ffmpeg.exec([
+    await execOnRuntime(runtime, [
       '-threads', '1',
       '-i', inputName,
       '-threads', '1',
@@ -66,7 +82,7 @@ export async function transcodeToH264(
       '-movflags', '+faststart',
       '-max_muxing_queue_size', '1024',
       outputName,
-    ])
+    ], { signal: callbacks.signal })
     callbacks.onProgress?.(100)
     const data = await ffmpeg.readFile(outputName)
     if (typeof data === 'string') throw new Error('转码输出为空')
@@ -86,7 +102,10 @@ export async function transcodeToH264(
     ffmpeg.off('progress', onProgress)
     ffmpeg.off('log', onLog)
     ffmpeg.off('log', onTranscodeLog)
-    await ffmpeg.deleteFile(inputName).catch(() => undefined)
-    await ffmpeg.deleteFile(outputName).catch(() => undefined)
+    // 运行时被重启后旧 MEMFS 已随 worker 销毁：跳过对死实例的删除。
+    if (canCleanup(runtime.generation)) {
+      await ffmpeg.deleteFile(inputName).catch(() => undefined)
+      await ffmpeg.deleteFile(outputName).catch(() => undefined)
+    }
   }
 }

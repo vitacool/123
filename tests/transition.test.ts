@@ -6,6 +6,7 @@ import {
   maxTransitionDuration,
   normalizeTransitionType,
   resolveTransitionDuration,
+  TRANSITION_GROUPS,
   transitionLabel,
   transitionProgress,
   TRANSITION_MAX_DURATION,
@@ -38,15 +39,44 @@ function twoClips(transition?: Clip['transitionOut'], gap = 0): Project {
 }
 
 describe('转场类型与时长夹取', () => {
-  it('五种类型齐全，含中文名', () => {
-    expect(TRANSITION_TYPES.map((item) => item.value)).toEqual([
-      'fade',
-      'fadeblack',
-      'wipeleft',
-      'slideleft',
-      'circleopen',
-    ])
+  it('历史五种类型仍然存在且中文名不变', () => {
+    // 兼容性：旧草稿里的这五个值必须继续可用（分组后位置可以变，值不能变）。
+    const values = TRANSITION_TYPES.map((item) => item.value)
+    for (const legacy of ['fade', 'fadeblack', 'wipeleft', 'slideleft', 'circleopen']) {
+      expect(values).toContain(legacy)
+    }
+    expect(normalizeTransitionType('fadeblack')).toBe('fadeblack')
     expect(transitionLabel('fadeblack')).toBe('黑场过渡')
+  })
+
+  it('新增类型齐全、分组完整、中文名不重复', () => {
+    const values = TRANSITION_TYPES.map((item) => item.value)
+    expect(new Set(values).size).toBe(values.length)
+    const labels = TRANSITION_TYPES.map((item) => item.label)
+    expect(new Set(labels).size).toBe(labels.length)
+    // 每个分组都非空，且顺序与 TRANSITION_GROUPS 一致。
+    const groupsInOrder = values.map(
+      (value) => TRANSITION_TYPES.find((item) => item.value === value)!.group,
+    )
+    const seen: string[] = []
+    for (const group of groupsInOrder) if (seen.at(-1) !== group) seen.push(group)
+    expect(seen).toEqual(TRANSITION_GROUPS.map((group) => group.id))
+    for (const group of TRANSITION_GROUPS) {
+      expect(values.filter((value) => TRANSITION_TYPES.find((i) => i.value === value)!.group === group.id).length)
+        .toBeGreaterThan(0)
+    }
+    // 覆盖本次新增的全部 xfade 名称。
+    for (const type of [
+      'fadewhite', 'fadegrays',
+      'wiperight', 'wipeup', 'wipedown',
+      'smoothleft', 'smoothright', 'smoothup', 'smoothdown',
+      'slideright', 'slideup', 'slidedown',
+      'circleclose', 'circlecrop', 'rectcrop',
+      'vertopen', 'vertclose', 'horzopen', 'horzclose', 'radial',
+      'dissolve', 'pixelize', 'hblur', 'zoomin', 'squeezeh', 'squeezev',
+    ]) {
+      expect(values).toContain(type)
+    }
   })
 
   it('非法类型回退 fade', () => {

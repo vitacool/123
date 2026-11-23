@@ -8,12 +8,20 @@ import { findAudioClipLocation } from '../core/audio'
 import { findTextClipLocation } from '../core/text'
 import { findClipLocation } from '../core/timeline'
 import type { Clip, TextClip, TextTrack } from '../core/types'
+import { MASK_DEFAULTS, MASK_SHAPES, normalizeMask, supportsMask } from '../core/mask'
+import { CHROMA_KEY_DEFAULTS, normalizeChromaKey, type ChromaKey } from '../core/chromaKey'
 import { useEditorStore } from '../store/EditorProvider'
 import { CommitNumber } from './Toast'
 import { CommitSlider } from './CommitSlider'
 import { AudioPropertiesPanel } from './AudioPropertiesPanel'
 import { ClipAudioSection } from './ClipAudioSection'
-import { canChangeClipSpeed, clipSpeedValue } from '../core/speed'
+import {
+  canChangeClipSpeed,
+  clipSpeedValue,
+  createFlatSpeedCurve,
+  normalizeSpeedCurve,
+  normalizeSpeedSegments,
+} from '../core/speed'
 import { clipTransitionOut } from '../core/transition'
 import { clipColor } from '../core/color'
 import {
@@ -25,6 +33,7 @@ import { ClipCompositingSection } from './ClipCompositingSection'
 import { ClipTransitionSection } from './ClipTransitionSection'
 import { ClipColorSection } from './ClipColorSection'
 import { ClipSpeedSection } from './ClipSpeedSection'
+import { SpeedCurveEditor } from './SpeedCurveEditor'
 import { TextPropertiesPanel } from './TextPropertiesPanel'
 import { CaptionListPanel } from './CaptionListPanel'
 import { Icon } from './Icon'
@@ -35,14 +44,25 @@ import { PanelSection } from './PanelSection'
 
 const round = (value: number, digits = 2): number => Number(value.toFixed(digits))
 
-type PanelTab = 'picture' | 'audio' | 'speed' | 'transition' | 'color'
+type PanelTab = 'picture' | 'audio' | 'transition' | 'color'
+
+/** 「画面」内部的五个分类（子 tab）。 */
+type PictureSubTab = 'basic' | 'crop' | 'mask' | 'chroma' | 'speed'
 
 const PANEL_TABS: readonly { id: PanelTab; label: string }[] = [
   { id: 'picture', label: '画面' },
   { id: 'audio', label: '音频' },
-  { id: 'speed', label: '变速' },
   { id: 'transition', label: '转场' },
   { id: 'color', label: '调节' },
+]
+
+/** 「画面」内部的五个分类（顺序即展示顺序）。 */
+const PICTURE_SUB_TABS: readonly { id: PictureSubTab; label: string }[] = [
+  { id: 'basic', label: '基础' },
+  { id: 'crop', label: '画面裁剪' },
+  { id: 'mask', label: '蒙版' },
+  { id: 'chroma', label: '抠像' },
+  { id: 'speed', label: '变速' },
 ]
 
 /** 每个 section 的「恢复默认值」补丁：一次命令提交，1 步撤销。 */
@@ -271,8 +291,21 @@ export function PropertiesPanel() {
   const fillSelected = useEditorStore((state) => state.fillSelected)
   const resetPosition = useEditorStore((state) => state.resetPosition)
   const beginCrop = useEditorStore((state) => state.beginCrop)
+  const setClipMask = useEditorStore((state) => state.setClipMask)
+  const setClipChromaKey = useEditorStore((state) => state.setClipChromaKey)
+  const setClipSpeedSegments = useEditorStore((state) => state.setClipSpeedSegments)
+  const setClipSpeedCurve = useEditorStore((state) => state.setClipSpeedCurve)
+  const copySpeedAttributes = useEditorStore((state) => state.copySpeedAttributes)
+  const pasteSpeedAttributes = useEditorStore((state) => state.pasteSpeedAttributes)
+  const previewMuteSegmentedSpeed =
+    useEditorStore((state) => state.previewMuteSegmentedSpeed) ?? true
+  const togglePreviewMuteSegmentedSpeed = useEditorStore(
+    (state) => state.togglePreviewMuteSegmentedSpeed,
+  )
   const resizeFreeze = useEditorStore((state) => state.resizeFreeze)
   const deleteSelectedClip = useEditorStore((state) => state.deleteSelectedClip)
+  const reverseClip = useEditorStore((state) => state.reverseClip)
+  const reverseJob = useEditorStore((state) => state.reverseJob)
   const setPreviewPatch = useEditorStore((state) => state.setPreviewPatch)
   const setClipAudio = useEditorStore((state) => state.setClipAudio)
   const detachAudio = useEditorStore((state) => state.detachAudio)
@@ -302,6 +335,9 @@ export function PropertiesPanel() {
   const canPasteAudio = Boolean(
     attributeClipboard.audio && Object.keys(attributeClipboard.audio).length > 0,
   )
+  const canPasteSpeed = Boolean(
+    attributeClipboard.speed && Object.keys(attributeClipboard.speed).length > 0,
+  )
   const applyClipDefaults = useEditorStore((state) => state.applyClipDefaults)
 
   const location = findClipLocation(project, selectedClipId)
@@ -309,6 +345,12 @@ export function PropertiesPanel() {
   // 这些状态在「无选区 / 多选 / 音频 / 文字片段」时也必须按同一次序调用，
   // 因此统一放在所有 early-return 之前。
   const [tab, setTab] = useState<PanelTab>('picture')
+  /** 变速 Tab 的两种模式：常规（单一倍率）/ 曲线（分段 & 曲线）。 */
+  const [speedMode, setSpeedMode] = useState<'normal' | 'curve'>('normal')
+  /** 曲线模式下的子模式：曲线编辑器（默认）/ 分段编辑器。 */
+  const [speedSub, setSpeedSub] = useState<'curve' | 'segments'>('curve')
+  /** 「画面」当前选中的分类（子 tab）。 */
+  const [pictureSub, setPictureSub] = useState<PictureSubTab>('basic')
   const [collapsedMap, setCollapsedMap] = useState<Record<string, boolean>>({})
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const scrollByTab = useRef<Partial<Record<PanelTab, number>>>({})
@@ -367,6 +409,15 @@ export function PropertiesPanel() {
   // 素材已被从素材库移除：画面属性（旋转/裁剪/调色…）都失去意义，但删除与移动仍可用。
   const missingAsset = !assets.some((asset) => asset.url === clip.sourceUrl)
   const disabled = isCropping || missingAsset
+  // 倒放只对 video 片段有意义：定格/图片是静帧，没有可反转的时间流。
+  const reverseDisabled = disabled || clip.type === 'freeze' || clip.type === 'image' || Boolean(reverseJob)
+  const reverseTitle = reverseJob
+    ? '已有倒放任务在进行中'
+    : clip.type === 'freeze' || clip.type === 'image'
+      ? '定格 / 图片片段不支持倒放'
+      : missingAsset
+        ? '素材已移除，无法倒放'
+        : '把该片段的源区间生成倒放素材（可作为新素材复用，可撤销）'
   // 转场作用在「本片段 → 下一片段」交界，叠加轨只在同一轨道内相邻。
   const nextTransitionClip = location.track
     ? (location.track.clips[location.track.clips.findIndex((item) => item.id === clip.id) + 1] ?? null)
@@ -377,6 +428,54 @@ export function PropertiesPanel() {
   }
 
   const clearPreview = () => setPreviewPatch(null)
+  /** 蒙版：拖动时 previewPatch 实时预览，松手提交（一步撤销）。 */
+  const commitMask = (patch: Partial<NonNullable<Clip['mask']>>) => {
+    const base = clip.mask ?? { ...MASK_DEFAULTS }
+    const next = normalizeMask({ ...base, ...patch })
+    setClipMask(clip.id, next)
+  }
+  const previewMask = (patch: Partial<NonNullable<Clip['mask']>>) => {
+    const base = clip.mask ?? { ...MASK_DEFAULTS }
+    const next = normalizeMask({ ...base, ...patch })
+    if (next) preview({ mask: next })
+  }
+  const maskSupported = supportsMask(clip.type)
+  /**
+   * 分段变速：默认「两段」= 前半原速、后半 2x；用户可以在下面调每段速度与段边界。
+   * 拖动滑块时 previewPatch 实时预览，松手提交（一步撤销）。
+   */
+  const commitSpeedSegments = (next: { at: number; speed: number }[] | undefined) => {
+    const normalized = next ? normalizeSpeedSegments(next) : undefined
+    setClipSpeedSegments(clip.id, normalized)
+  }
+  const previewSpeedSegments = (next: { at: number; speed: number }[]) => {
+    const normalized = normalizeSpeedSegments(next)
+    if (normalized) preview({ speedSegments: normalized })
+  }
+  const speedSegments = normalizeSpeedSegments(clip.speedSegments) ?? null
+  /**
+   * 平滑曲线：控制点直接写 speedCurve，并清掉 speedSegments（两者互斥）。
+   * 拖动控制点时 previewPatch 实时预览，松手提交（一步撤销）。
+   */
+  const speedCurve = normalizeSpeedCurve(clip.speedCurve) ?? null
+  const commitSpeedCurve = (next: { at: number; speed: number }[] | undefined) => {
+    setClipSpeedCurve(clip.id, next ? normalizeSpeedCurve(next) : undefined)
+  }
+  const previewSpeedCurve = (next: { at: number; speed: number }[]) => {
+    const normalized = normalizeSpeedCurve(next)
+    if (normalized) preview({ speedCurve: normalized, speedSegments: undefined })
+  }
+  /** 抠像：拖动时 previewPatch 实时预览，松手提交（一步撤销）。 */
+  const commitChromaKey = (patch: Partial<ChromaKey>) => {
+    const base = clip.chromaKey ?? { ...CHROMA_KEY_DEFAULTS }
+    const next = normalizeChromaKey({ ...base, ...patch })
+    setClipChromaKey(clip.id, next)
+  }
+  const previewChromaKey = (patch: Partial<ChromaKey>) => {
+    const base = clip.chromaKey ?? { ...CHROMA_KEY_DEFAULTS }
+    const next = normalizeChromaKey({ ...base, ...patch })
+    if (next) preview({ chromaKey: next })
+  }
 
   // 可动画属性统一走 setAnimatableValue：有关键帧时改关键帧，否则改基础值（Toast 区分）。
   const commitRotation = (angle: number) => {
@@ -510,7 +609,24 @@ export function PropertiesPanel() {
           ))}
         </div>
 
-        {tab === 'picture' && clip.type === 'freeze' && (
+        {tab === 'picture' && (
+          <div className="picture-subtabs" role="tablist" aria-label="画面分类">
+            {PICTURE_SUB_TABS.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                role="tab"
+                aria-selected={pictureSub === item.id}
+                className={`picture-subtab${pictureSub === item.id ? ' is-active' : ''}`}
+                onClick={() => setPictureSub(item.id)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {tab === 'picture' && pictureSub === 'basic' && clip.type === 'freeze' && (
           <PanelSection
             title="定格时长"
             tone="accent"
@@ -551,14 +667,30 @@ export function PropertiesPanel() {
           </PanelSection>
         )}
 
-        {tab === 'picture' && (
-          <p className="control-note keyframe-hint">
-            <span className="keyframe-hint-diamond" aria-hidden="true" />
-            行尾的 ◆ 可在当前播放头给该属性打关键帧（位置 / 缩放 / 旋转在各行，不透明度在「合成」）
-          </p>
+        {tab === 'picture' && pictureSub === 'basic' && (
+          <div className="panel-group" role="group" aria-label="基础">
+            <p className="panel-group-title">基础</p>
+            <p className="panel-group-hint">位置大小 · 合成 · 镜像 · 旋转</p>
+        {tab === 'picture' && pictureSub === 'basic' && (
+          <PanelSection
+            title="合成"
+            hint={`不透明度 ${Math.round(clipOpacity(clip) * 100)}%`}
+            collapsed={isCollapsed('compositing')}
+            onToggle={() => toggleSection('compositing')}
+            onReset={() => resetSection('compositing', '合成')}
+            resetDisabled={disabled}
+          >
+            <ClipCompositingSection
+              clip={clip}
+              bare
+              // 不透明度同样走可动画入口：有关键帧时改关键帧，否则改基础值。
+              onOpacity={(value) => setAnimatableValue('opacity', value)}
+              onBlendMode={(mode) => setClipBlendMode(clip.id, mode)}
+              onPreviewOpacity={(value) => preview({ opacity: value })}
+            />
+          </PanelSection>
         )}
-
-        {tab === 'picture' && (
+        {tab === 'picture' && pictureSub === 'basic' && (
           <PanelSection
             title="旋转"
             hint={`${round(clip.rotation, 0)}°`}
@@ -623,7 +755,7 @@ export function PropertiesPanel() {
           </PanelSection>
         )}
 
-        {tab === 'picture' && (
+        {tab === 'picture' && pictureSub === 'basic' && (
           <PanelSection
             title="镜像"
             hint={mirrorHint}
@@ -665,7 +797,7 @@ export function PropertiesPanel() {
           </PanelSection>
         )}
 
-        {tab === 'picture' && (
+        {tab === 'picture' && pictureSub === 'basic' && (
           <PanelSection
             title="缩放与位置"
             hint={`${round(clip.scale * 100, 0)}%`}
@@ -738,7 +870,7 @@ export function PropertiesPanel() {
               位置复位
             </button>
           </div>
-          <div className="position-grid">
+          <div className="position-grid is-keyframed">
             <label>
               <span>水平偏移</span>
               <CommitNumber
@@ -754,8 +886,10 @@ export function PropertiesPanel() {
                 }
                 onCommit={(value) => commitPosition(value, clip.position.y * 100)}
               />
-              <KeyframeCurveButton prop="position.x" clip={clip} />
-              <KeyframeButton prop="position.x" clip={clip} />
+              <span className="position-keyframe-group">
+                <KeyframeCurveButton prop="position.x" clip={clip} />
+                <KeyframeButton prop="position.x" clip={clip} />
+              </span>
               <AnimatedValueHint prop="position.x" clip={clip} />
             </label>
             <label>
@@ -773,36 +907,21 @@ export function PropertiesPanel() {
                 }
                 onCommit={(value) => commitPosition(clip.position.x * 100, value)}
               />
-              <KeyframeCurveButton prop="position.y" clip={clip} />
-              <KeyframeButton prop="position.y" clip={clip} />
+              <span className="position-keyframe-group">
+                <KeyframeCurveButton prop="position.y" clip={clip} />
+                <KeyframeButton prop="position.y" clip={clip} />
+              </span>
               <AnimatedValueHint prop="position.y" clip={clip} />
             </label>
           </div>
           </PanelSection>
         )}
-
-        {/* 「合成」分组：整体搬自原「合成」tab（标题 / hint / 折叠键 / 重置 / 控件顺序均未改） */}
-        {tab === 'picture' && (
-          <PanelSection
-            title="合成"
-            hint={`不透明度 ${Math.round(clipOpacity(clip) * 100)}%`}
-            collapsed={isCollapsed('compositing')}
-            onToggle={() => toggleSection('compositing')}
-            onReset={() => resetSection('compositing', '合成')}
-            resetDisabled={disabled}
-          >
-            <ClipCompositingSection
-              clip={clip}
-              bare
-              // 不透明度同样走可动画入口：有关键帧时改关键帧，否则改基础值。
-              onOpacity={(value) => setAnimatableValue('opacity', value)}
-              onBlendMode={(mode) => setClipBlendMode(clip.id, mode)}
-              onPreviewOpacity={(value) => preview({ opacity: value })}
-            />
-          </PanelSection>
+          </div>
         )}
 
-        {tab === 'picture' && (
+        {/* 「合成」分组：整体搬自原「合成」tab（标题 / hint / 折叠键 / 重置 / 控件顺序均未改） */}
+
+        {tab === 'picture' && pictureSub === 'crop' && (
           <PanelSection
             title="画面裁剪"
             hint={`${Math.round(clip.crop.w * 100)}% × ${Math.round(clip.crop.h * 100)}%`}
@@ -827,8 +946,192 @@ export function PropertiesPanel() {
             </p>
           </PanelSection>
         )}
+        {tab === 'picture' && pictureSub === 'mask' && (
+          <PanelSection
+            title="蒙版"
+            hint={
+              clip.mask
+                ? MASK_SHAPES.find((item) => item.value === clip.mask!.shape)?.label
+                : '无'
+            }
+            collapsed={isCollapsed('mask')}
+            onToggle={() => toggleSection('mask')}
+            onReset={() => setClipMask(clip.id, undefined)}
+            resetDisabled={disabled || !clip.mask}
+          >
+            {!maskSupported ? (
+              <p className="control-note">文字片段暂不支持蒙版。</p>
+            ) : (
+              <>
+                <div className="mask-shape-row" role="radiogroup" aria-label="蒙版形状">
+                  {[{ value: '' as const, label: '无' }, ...MASK_SHAPES].map((item) => {
+                    const active = item.value === '' ? !clip.mask : clip.mask?.shape === item.value
+                    return (
+                      <button
+                        key={item.value || 'none'}
+                        type="button"
+                        role="radio"
+                        aria-checked={active}
+                        className={`button mini mask-shape${active ? ' is-active' : ''}`}
+                        disabled={disabled}
+                        title={item.value === '' ? '不使用蒙版' : item.label}
+                        onClick={() => {
+                          if (item.value === '') {
+                            setClipMask(clip.id, undefined)
+                            return
+                          }
+                          commitMask({ shape: item.value })
+                        }}
+                      >
+                        {item.label}
+                      </button>
+                    )
+                  })}
+                </div>
+                {clip.mask && (
+                  <>
+                    <div className="control-with-field">
+                      <span className="section-hint">羽化</span>
+                      <CommitSlider
+                        value={Math.round(clip.mask.feather * 100)}
+                        min={0}
+                        max={100}
+                        step={1}
+                        ariaLabel="蒙版羽化"
+                        disabled={disabled}
+                        onPreview={(value) => previewMask({ feather: value / 100 })}
+                        onCommit={(value) => commitMask({ feather: value / 100 })}
+                      />
+                    </div>
+                    {clip.mask.shape === 'rect' && (
+                      <div className="control-with-field">
+                        <span className="section-hint">圆角</span>
+                        <CommitSlider
+                          value={Math.round((clip.mask.roundness ?? 0) * 100)}
+                          min={0}
+                          max={100}
+                          step={1}
+                          ariaLabel="蒙版圆角"
+                          disabled={disabled}
+                          onPreview={(value) => previewMask({ roundness: value / 100 })}
+                          onCommit={(value) => commitMask({ roundness: value / 100 })}
+                        />
+                      </div>
+                    )}
+                    <label className="control-toggle">
+                      <input
+                        type="checkbox"
+                        checked={clip.mask.invert}
+                        disabled={disabled}
+                        onChange={(event) => commitMask({ invert: event.target.checked })}
+                      />
+                      反向（只保留形状外）
+                    </label>
+                    <p className="control-note">
+                      蒙版随片段一起缩放、旋转、移动；羽化按蒙版短边换算，与分辨率无关。
+                    </p>
+                  </>
+                )}
+              </>
+            )}
+          </PanelSection>
+        )}
+        {tab === 'picture' && pictureSub === 'chroma' && (
+          <PanelSection
+            title="抠像"
+            hint={clip.chromaKey ? clip.chromaKey.color.toUpperCase() : '关'}
+            collapsed={isCollapsed('chroma')}
+            onToggle={() => toggleSection('chroma')}
+            onReset={() => setClipChromaKey(clip.id, undefined)}
+            resetDisabled={disabled || !clip.chromaKey}
+          >
+            {!maskSupported ? (
+              <p className="control-note">文字片段暂不支持抠像。</p>
+            ) : (
+              <>
+                <label className="control-toggle">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(clip.chromaKey)}
+                    disabled={disabled}
+                    onChange={(event) => {
+                      if (event.target.checked) {
+                        // 第一次开启：默认纯绿幕（自动四角取样在预览侧实现，见报告）
+                        commitChromaKey({})
+                      } else {
+                        setClipChromaKey(clip.id, undefined)
+                      }
+                    }}
+                  />
+                  开启色度抠像
+                </label>
+                {clip.chromaKey && (
+                  <>
+                    <div className="control-with-field">
+                      <span className="section-hint">幕布颜色</span>
+                      <input
+                        type="color"
+                        aria-label="抠像颜色"
+                        value={clip.chromaKey.color}
+                        disabled={disabled}
+                        onChange={(event) => commitChromaKey({ color: event.target.value })}
+                      />
+                    </div>
+                    <div className="control-with-field">
+                      <span className="section-hint">强度</span>
+                      <CommitSlider
+                        value={Math.round(clip.chromaKey.similarity * 1000) / 10}
+                        min={1}
+                        max={50}
+                        step={0.1}
+                        ariaLabel="抠像强度"
+                        disabled={disabled}
+                        onPreview={(value) => previewChromaKey({ similarity: value / 100 })}
+                        onCommit={(value) => commitChromaKey({ similarity: value / 100 })}
+                      />
+                    </div>
+                    <div className="control-with-field">
+                      <span className="section-hint">边缘柔和</span>
+                      <CommitSlider
+                        value={Math.round(clip.chromaKey.blend * 1000) / 10}
+                        min={0}
+                        max={50}
+                        step={0.1}
+                        ariaLabel="抠像边缘柔和"
+                        disabled={disabled}
+                        onPreview={(value) => previewChromaKey({ blend: value / 100 })}
+                        onCommit={(value) => commitChromaKey({ blend: value / 100 })}
+                      />
+                    </div>
+                    <div className="control-with-field">
+                      <span className="section-hint">去溢色</span>
+                      <CommitSlider
+                        value={Math.round(clip.chromaKey.spill * 100)}
+                        min={0}
+                        max={100}
+                        step={1}
+                        ariaLabel="去溢色强度"
+                        disabled={disabled}
+                        onPreview={(value) => previewChromaKey({ spill: value / 100 })}
+                        onCommit={(value) => commitChromaKey({ spill: value / 100 })}
+                      />
+                    </div>
+                    {!isOverlay && (
+                      <p className="control-note">
+                        抠掉的区域会显示画布背景，建议放在叠加轨上。
+                      </p>
+                    )}
+                    <p className="control-note">
+                      与导出的 chromakey / despill 使用同一套 FFmpeg 公式。
+                    </p>
+                  </>
+                )}
+              </>
+            )}
+          </PanelSection>
+        )}
 
-        {tab === 'picture' && (
+        {tab === 'picture' && pictureSub === 'basic' && (
           <section className="panel-section attribute-actions">
             <div className="inline-actions">
               <button
@@ -848,6 +1151,15 @@ export function PropertiesPanel() {
                 title={canPasteVisual ? '粘贴到当前选中的片段' : '先复制一个片段的属性'}
               >
                 粘贴画面属性
+              </button>
+              <button
+                type="button"
+                className="button mini"
+                disabled={reverseDisabled}
+                onClick={() => reverseClip(clip.id)}
+                title={reverseTitle}
+              >
+                倒放
               </button>
             </div>
           </section>
@@ -906,9 +1218,32 @@ export function PropertiesPanel() {
           </section>
         )}
 
-        {tab === 'speed' && canChangeClipSpeed(clip) && (
+        {tab === 'picture' && pictureSub === 'speed' && canChangeClipSpeed(clip) && (
+          <>
+            <div className="speed-mode-switch" role="radiogroup" aria-label="变速模式">
+              <button
+                type="button"
+                role="radio"
+                aria-checked={speedMode === 'normal'}
+                className={`button mini${speedMode === 'normal' ? ' is-active' : ''}`}
+                onClick={() => setSpeedMode('normal')}
+              >
+                常规变速
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={speedMode === 'curve'}
+                className={`button mini${speedMode === 'curve' ? ' is-active' : ''}`}
+                onClick={() => setSpeedMode('curve')}
+              >
+                曲线变速
+              </button>
+            </div>
+            {speedMode === 'normal' ? (
+          <>
           <PanelSection
-            title="变速"
+            title="常规变速"
             hint={`${Number(clipSpeedValue(clip).toFixed(2))}x`}
             collapsed={isCollapsed('speed')}
             onToggle={() => toggleSection('speed')}
@@ -927,9 +1262,243 @@ export function PropertiesPanel() {
               }}
             />
           </PanelSection>
+          </>
+            ) : (
+          <>
+          <div className="speed-sub-switch" role="radiogroup" aria-label="曲线变速子模式">
+            <button
+              type="button"
+              role="radio"
+              aria-checked={speedSub === 'curve'}
+              className={`button mini${speedSub === 'curve' ? ' is-active' : ''}`}
+              onClick={() => setSpeedSub('curve')}
+            >
+              曲线
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={speedSub === 'segments'}
+              className={`button mini${speedSub === 'segments' ? ' is-active' : ''}`}
+              onClick={() => setSpeedSub('segments')}
+            >
+              分段
+            </button>
+          </div>
+          <label className="control-toggle">
+            <input
+              type="checkbox"
+              checked={previewMuteSegmentedSpeed}
+              onChange={() => togglePreviewMuteSegmentedSpeed()}
+            />
+            预览时静音变速片段（导出仍保留保音高的声音）
+          </label>
+          {speedSub === 'curve' ? (
+            <>
+              <PanelSection
+                title="速度曲线"
+                hint={speedCurve ? `${speedCurve.length} 个控制点` : '无'}
+                collapsed={isCollapsed('speedCurve')}
+                onToggle={() => toggleSection('speedCurve')}
+                onReset={() => setClipSpeedCurve(clip.id, undefined)}
+                resetDisabled={disabled || !speedCurve}
+              >
+                {speedCurve ? (
+                  <>
+                    <SpeedCurveEditor
+                      curve={speedCurve}
+                      disabled={disabled}
+                      onPreview={previewSpeedCurve}
+                      onCommit={commitSpeedCurve}
+                    />
+                    <p className="control-note">
+                      横轴 = 片段进度、纵轴 = 倍率（0.1–10x，对数刻度）。拖动控制点时实时预览，
+                      松手提交为一步撤销；曲线与分段互斥，提交曲线会清掉已有分段。
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="control-note">
+                      用 3–5 个控制点描述整段速度：往上 = 加速、往下 = 慢放。两端点只调速度，中间点还能左右挪。
+                    </p>
+                    {speedSegments && (
+                      <p className="control-note">
+                        该片段当前用的是「分段」变速（{speedSegments.length} 段）：启用曲线会清掉它，
+                        想保留分段请切到上面的「分段」。
+                      </p>
+                    )}
+                    <button
+                      type="button"
+                      className="button mini"
+                      disabled={disabled}
+                      title="创建 3 个控制点的平坦曲线，之后拖动调形"
+                      onClick={() => commitSpeedCurve(createFlatSpeedCurve(clipSpeedValue(clip)))}
+                    >
+                      启用曲线变速
+                    </button>
+                  </>
+                )}
+              </PanelSection>
+              <section className="panel-section attribute-actions">
+                <div className="inline-actions">
+                  <button
+                    type="button"
+                    className="button mini"
+                    disabled={disabled}
+                    onClick={() => copySpeedAttributes(clip.id)}
+                    title="把该片段的倍率 / 分段 / 曲线复制到变速剪贴板"
+                  >
+                    复制变速属性
+                  </button>
+                  <button
+                    type="button"
+                    className="button mini"
+                    disabled={disabled || !canPasteSpeed}
+                    onClick={() => pasteSpeedAttributes(pasteTargets)}
+                    title={
+                      canPasteSpeed
+                        ? '粘贴到当前选中的片段（定格 / 图片片段会跳过）'
+                        : '先复制一个片段的变速属性'
+                    }
+                  >
+                    粘贴变速属性
+                  </button>
+                </div>
+              </section>
+            </>
+          ) : (
+          <>
+          <PanelSection
+            title="变速分段"
+            hint={speedSegments ? `${speedSegments.length} 段` : '无'}
+            collapsed={isCollapsed('speedSegments')}
+            onToggle={() => toggleSection('speedSegments')}
+            onReset={() => setClipSpeedSegments(clip.id, undefined)}
+            resetDisabled={disabled || !speedSegments}
+          >
+            {!speedSegments ? (
+              <>
+                <p className="control-note">
+                  把片段拆成「前半原速 + 后半 2 倍速」，之后可以逐段调整速度与分界点。
+                </p>
+                <button
+                  type="button"
+                  className="button mini"
+                  disabled={disabled}
+                  title="创建两段变速（前后各 1 段）"
+                  onClick={() =>
+                    commitSpeedSegments([
+                      { at: 0, speed: 1 },
+                      { at: 0.5, speed: 2 },
+                    ])
+                  }
+                >
+                  拆成两段
+                </button>
+              </>
+            ) : (
+              <>
+                {speedSegments.map((segment: { at: number; speed: number }, index: number) => {
+                  const boundary = index > 0 ? Math.round(segment.at * 100) : null
+                  return (
+                    <div className="speed-segment" key={`speed-seg-${index}`}>
+                      <span className="speed-segment-label">第 {index + 1} 段</span>
+                      {boundary !== null && (
+                        <div className="control-with-field">
+                          <span className="section-hint">起点</span>
+                          <CommitSlider
+                            value={boundary}
+                            min={5}
+                            max={95}
+                            step={1}
+                            ariaLabel={`第 ${index + 1} 段起点（百分比）`}
+                            disabled={disabled}
+                            format={(value) => `${Math.round(value)}%`}
+                            onPreview={(value) => {
+                              const next = speedSegments.map((item: { at: number; speed: number }, itemIndex: number) =>
+                                itemIndex === index ? { ...item, at: value / 100 } : item,
+                              )
+                              previewSpeedSegments(next)
+                            }}
+                            onCommit={(value) => {
+                              const next = speedSegments.map((item: { at: number; speed: number }, itemIndex: number) =>
+                                itemIndex === index ? { ...item, at: value / 100 } : item,
+                              )
+                              commitSpeedSegments(next)
+                            }}
+                          />
+                        </div>
+                      )}
+                      <div className="control-with-field">
+                        <span className="section-hint">速度</span>
+                        <CommitSlider
+                          value={Math.round(segment.speed * 100) / 100}
+                          min={0.1}
+                          max={10}
+                          step={0.05}
+                          ariaLabel={`第 ${index + 1} 段速度`}
+                          disabled={disabled}
+                          format={(value) => `${Number(value.toFixed(2))}x`}
+                          onPreview={(value) =>
+                            previewSpeedSegments(
+                              speedSegments.map((item: { at: number; speed: number }, itemIndex: number) =>
+                                itemIndex === index ? { ...item, speed: value } : item,
+                              ),
+                            )
+                          }
+                          onCommit={(value) =>
+                            commitSpeedSegments(
+                              speedSegments.map((item: { at: number; speed: number }, itemIndex: number) =>
+                                itemIndex === index ? { ...item, speed: value } : item,
+                              ),
+                            )
+                          }
+                        />
+                      </div>
+                    </div>
+                  )
+                })}
+                <div className="inline-actions">
+                  <button
+                    type="button"
+                    className="button mini"
+                    disabled={disabled || speedSegments.length >= 8}
+                    title="在末尾追加一段（上限 8 段）"
+                    onClick={() => {
+                      const last = speedSegments[speedSegments.length - 1]
+                      const nextAt = Math.min(0.95, last.at + (1 - last.at) / 2)
+                      commitSpeedSegments([
+                        ...speedSegments,
+                        { at: nextAt, speed: last.speed },
+                      ])
+                    }}
+                  >
+                    追加一段
+                  </button>
+                  <button
+                    type="button"
+                    className="button mini"
+                    disabled={disabled || speedSegments.length <= 2}
+                    title="删除最后一段（最少 2 段）"
+                    onClick={() => commitSpeedSegments(speedSegments.slice(0, -1))}
+                  >
+                    删除末段
+                  </button>
+                </div>
+                <p className="control-note">
+                  段内常速、段间硬切换。导出按段变速（音频保音高）；预览按段切换播放速率。
+                </p>
+              </>
+            )}
+          </PanelSection>
+          </>
+            )}
+            </>
+          )}
+          </>
         )}
 
-        {tab === 'speed' && !canChangeClipSpeed(clip) && (
+        {tab === 'picture' && pictureSub === 'speed' && !canChangeClipSpeed(clip) && (
           <section className="panel-section">
             <p className="control-note">定格片段不支持变速。</p>
           </section>

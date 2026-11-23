@@ -1,11 +1,13 @@
 import { Icon } from './Icon'
 import { CommitNumber } from './Toast'
 import { CommitSlider } from './CommitSlider'
+import { TransitionThumb } from './TransitionThumb'
 import {
   clipTransitionOut,
   maxTransitionDuration,
   TRANSITION_MAX_DURATION,
   TRANSITION_MIN_DURATION,
+  TRANSITION_GROUPS,
   TRANSITION_TYPES,
   transitionLabel,
 } from '../core/transition'
@@ -114,29 +116,40 @@ export function ClipTransitionSection({
         </p>
       )}
 
-      <div className="transition-grid" role="radiogroup" aria-label="转场类型">
-        {TRANSITION_TYPES.map((item) => {
-          const active = current?.type === item.value
-          return (
-            <button
-              key={item.value}
-              type="button"
-              role="radio"
-              aria-checked={active}
-              className={`transition-card${active ? ' is-active' : ''}`}
-              disabled={blocked}
-              title={item.label}
-              onClick={() => onSet(item.value, duration)}
+      {TRANSITION_GROUPS.map((group) => {
+        const items = TRANSITION_TYPES.filter((item) => item.group === group.id)
+        if (items.length === 0) return null
+        return (
+          <div className="transition-group" key={group.id}>
+            <p className="transition-group-title">{group.label}</p>
+            <div
+              className="transition-grid"
+              role="radiogroup"
+              aria-label={`转场类型：${group.label}`}
             >
-              <span
-                className={`transition-thumb is-${item.value}`}
-                aria-hidden="true"
-              />
-              <span className="transition-card-label">{item.label}</span>
-            </button>
-          )
-        })}
-      </div>
+              {items.map((item) => {
+                const active = current?.type === item.value
+                return (
+                  <button
+                    key={item.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    className={`transition-card${active ? ' is-active' : ''}`}
+                    disabled={blocked}
+                    title={item.label}
+                    onClick={() => onSet(item.value, duration)}
+                  >
+                    <TransitionThumb type={item.value} />
+                    <span className="transition-card-label">{item.label}</span>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })}
+
 
       <div className="control-with-field transition-duration">
         <CommitSlider

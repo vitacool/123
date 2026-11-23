@@ -14,6 +14,8 @@ interface TrackControlsProps {
   /** Audio track is silenced by another track's solo. */
   suppressedBySolo?: boolean
   onRemove?: () => void
+  /** 拖动开始（由父组件实现实际的拖动交互；未提供时手柄只做提示）。 */
+  onDragStart?: (event: React.PointerEvent<HTMLButtonElement>) => void
   /** 叠加轨层级调整：'up' = 更靠上层；已在边界时对应按钮置灰。 */
   canMoveUp?: boolean
   canMoveDown?: boolean
@@ -43,6 +45,7 @@ export function TrackControls({
   canMoveDown,
   onMoveUp,
   onMoveDown,
+  onDragStart,
   onOpenCover,
 }: TrackControlsProps) {
   const toggleTrackFlag = useEditorStore((store) => store.toggleTrackFlag)
@@ -52,12 +55,21 @@ export function TrackControls({
   // 叠加轨现在也带声音（参与预览混音与导出 amix），只有文本轨没有独立音频。
   const noAudio = textOnly
   const toggle = (flag: TrackFlag) => toggleTrackFlag(kind, trackId, flag)
-  const reorderable = kind === 'overlay' && Boolean(onMoveUp && onMoveDown)
+  // 叠加轨 / 音频轨 / 文字轨都可以调整顺序（主轨固定不动）。
+  const reorderable = kind !== 'main' && Boolean(onMoveUp && onMoveDown)
 
   return (
     <div
       className={`track-controls-row${reorderable ? ' is-reorderable' : ''}`}
       style={{ height }}
+      onKeyDown={(event) => {
+        if (!event.altKey) return
+        if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+        if (!onMoveUp || !onMoveDown) return
+        event.preventDefault()
+        if (event.key === 'ArrowUp') onMoveUp()
+        else onMoveDown()
+      }}
       onContextMenu={
         reorderable
           ? (event) => {
@@ -74,6 +86,23 @@ export function TrackControls({
       <div className="track-controls-buttons" role="group" aria-label={`${name}控制`}>
         {reorderable && (
           <span className="track-move-stack" role="group" aria-label={`${name}层级`}>
+      {reorderable && (
+        <button
+          type="button"
+          className="track-control track-drag-handle"
+          aria-label={`拖动调整「${name}」的顺序`}
+          title={state.locked ? `轨道已锁定，无法拖动` : `拖动调整顺序（也可用 Alt+↑/↓）`}
+          disabled={state.locked}
+          onPointerDown={(event) => {
+            if (state.locked) return
+            event.preventDefault()
+            event.stopPropagation()
+            onDragStart?.(event)
+          }}
+        >
+          <Icon name="grip" size={12} />
+        </button>
+      )}
             <button
               type="button"
               className="track-control track-move"

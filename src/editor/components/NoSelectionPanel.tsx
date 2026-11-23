@@ -21,6 +21,9 @@ const SHORTCUTS: { keys: string; label: string }[] = [
   { keys: 'Space', label: '播放 / 暂停' },
   { keys: '← / →', label: '逐帧后退 / 前进' },
   { keys: 'Shift + Z', label: '时间轴适应窗口' },
+  { keys: 'I / O', label: '在播放头设导出入点 / 出点' },
+  { keys: 'Alt + X', label: '清除导出区间' },
+  { keys: 'Ctrl/⌘ + Shift + S', label: '导出当前帧为 PNG' },
 ]
 
 /**

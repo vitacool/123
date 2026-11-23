@@ -83,6 +83,11 @@ export function bakeAnimatedClip(clip: Clip, sourceUrl: string, duration: number
     sourceStart: 0,
     sourceEnd: duration,
     speed: 1,
+    // 变速必须整条清掉：中间视频是按「时间轴时长」逐帧渲染的，画面里已经含了
+    // speedSegments / speedCurve 的效果；如果留着，exportPlan 会在烘焙结果上再变速
+    // 一次（时长被二次缩放，且 setpts 与帧序列对不上）。
+    speedSegments: undefined,
+    speedCurve: undefined,
     keepPitch: true,
     crop: { x: 0, y: 0, w: 1, h: 1 },
     scale: 1,

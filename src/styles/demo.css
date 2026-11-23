@@ -121,3 +121,63 @@
   outline: 2px solid #e4573d;
   outline-offset: 3px;
 }
+/* ---------------------------------------------------------------------------
+ * 宿主平台自带样式（CSS 隔离验证用，?hostDemo=1 时显示）
+ *
+ * 故意和编辑器**重名**：`.button`、`.badge`、`@keyframes spin`。
+ * 编辑器样式已按 `.framecut-root` 与 `fc-` 前缀隔离，所以：
+ * - 这里的 .button 只作用于宿主自己的 DOM（编辑器的 .button 不受影响）；
+ * - 宿主的 @keyframes spin 与编辑器的 @keyframes fc-spin 互不覆盖。
+ * ------------------------------------------------------------------------- */
+.host-chrome {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 9999;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 14px;
+  font: 12px/1.4 system-ui, sans-serif;
+  color: #f8f5ee;
+  background: #14131a;
+  border: 1px solid #3a3846;
+  border-radius: 12px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+}
+
+.button {
+  padding: 6px 12px;
+  font: inherit;
+  color: #14131a;
+  cursor: pointer;
+  background: #ffd166;
+  border: 2px dashed #14131a;
+  border-radius: 6px;
+}
+
+.badge {
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #14131a;
+  background: #7ee787;
+  border-radius: 999px;
+}
+
+.host-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #ffd166;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 900ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(1turn);
+  }
+}

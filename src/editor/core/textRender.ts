@@ -51,8 +51,40 @@ export function drawTextClip(
   const y = overrides.position?.y ?? clip.y
   const family = clip.fontFamily ?? DEFAULT_FONT
   const weight = clip.bold ? 700 : 400
+  const rawShadowColor = clip.shadowColor?.trim()
+  const hasShadow = Boolean(
+    rawShadowColor && rawShadowColor.toLowerCase() !== 'transparent',
+  )
+  const finiteOr = (value: unknown, fallback: number): number =>
+    typeof value === 'number' && Number.isFinite(value) ? value : fallback
+  // 阴影的 blur/offset 都按 fontSize 比例存储，保证 480p / 1080p 观感一致。
+  const shadowBlur = hasShadow
+    ? Math.max(0, finiteOr(clip.shadowBlur, 0)) * fontSize
+    : 0
+  const shadowOffsetX = hasShadow
+    ? finiteOr(clip.shadowOffsetX, 0) * fontSize
+    : 0
+  const shadowOffsetY = hasShadow
+    ? finiteOr(clip.shadowOffsetY, 0) * fontSize
+    : 0
   context.save()
   context.globalAlpha = opacity
+  const applyTextShadow = (): void => {
+    if (!hasShadow) return
+    context.shadowColor = rawShadowColor ?? 'transparent'
+    context.shadowBlur = shadowBlur
+    context.shadowOffsetX = shadowOffsetX
+    context.shadowOffsetY = shadowOffsetY
+  }
+  const clearTextShadow = (): void => {
+    if (!hasShadow) return
+    context.shadowColor = 'transparent'
+    context.shadowBlur = 0
+    context.shadowOffsetX = 0
+    context.shadowOffsetY = 0
+  }
+  // 背景框不能带阴影：先确保阴影关闭，再由文字绘制单独打开。
+  if (hasShadow) clearTextShadow()
   context.font = `${weight} ${fontSize}px ${family}`
   context.textBaseline = 'middle'
   const maxWidth = width * 0.86
@@ -94,8 +126,10 @@ export function drawTextClip(
     clip.strokeWidth && clip.strokeWidth > 0
       ? Math.max(1.2, clip.strokeWidth * fontSize)
       : 0
-  if (strokeWidth > 0 && clip.strokeColor) {
-    context.strokeStyle = clip.strokeColor
+  const strokeColor = clip.strokeColor
+  const hasStroke = strokeWidth > 0 && Boolean(strokeColor)
+  if (hasStroke) {
+    context.strokeStyle = strokeColor ?? '#000000'
     context.lineWidth = strokeWidth
     context.lineJoin = 'round'
     context.miterLimit = 2
@@ -106,10 +140,15 @@ export function drawTextClip(
       : clip.align === 'right'
         ? left + boxWidth - padX
         : left + boxWidth / 2
+  // 有描边时只给描边那次绘制开阴影。描边定义外轮廓，阴影跟着它最干净；
+  // 若把阴影开在随后的填充上，阴影会盖在已经画好的描边上，边缘发灰。
+  if (hasShadow && !hasStroke) applyTextShadow()
   lines.forEach((line, index) => {
     const y = top + padY + lineHeight * (index + 0.5)
-    if (strokeWidth > 0 && clip.strokeColor) {
+    if (hasStroke) {
+      if (hasShadow) applyTextShadow()
       context.strokeText(line, textLeft, y, maxWidth)
+      if (hasShadow) clearTextShadow()
     }
     context.fillText(line, textLeft, y, maxWidth)
   })

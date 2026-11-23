@@ -125,3 +125,90 @@ export function ffmpegColorFilters(color: ColorAdjustments): string[] {
   }
   return filters
 }
+/** `#rgb` / `#rrggbb` → [r, g, b]（0–255）；识别不了返回 null。 */
+function hexToRgb(value: string): [number, number, number] | null {
+  const raw = value.trim().replace(/^#/, '')
+  if (!/^[0-9a-fA-F]+$/.test(raw)) return null
+  if (raw.length === 3) {
+    return [
+      parseInt(raw[0] + raw[0], 16),
+      parseInt(raw[1] + raw[1], 16),
+      parseInt(raw[2] + raw[2], 16),
+    ]
+  }
+  if (raw.length === 6) {
+    return [
+      parseInt(raw.slice(0, 2), 16),
+      parseInt(raw.slice(2, 4), 16),
+      parseInt(raw.slice(4, 6), 16),
+    ]
+  }
+  return null
+}
+
+/**
+ * 解析一个 CSS 颜色的不透明度（0–1）：支持 `#rrggbbaa` / `rgba(...)`，
+ * 其余（`#rrggbb`、`rgb(...)`、颜色名、transparent）按不透明处理。
+ * 无法识别时返回 null。
+ */
+export function colorAlphaOf(value: string | null | undefined): number | null {
+  if (typeof value !== 'string') return null
+  const text = value.trim().toLowerCase()
+  if (!text) return null
+  if (text === 'transparent') return 0
+  const hex = /^#([0-9a-f]{8})$/.exec(text)
+  if (hex) return parseInt(hex[1].slice(6, 8), 16) / 255
+  const rgba = /^rgba?\(([^)]+)\)$/.exec(text)
+  if (rgba) {
+    const parts = rgba[1].split(',').map((part) => part.trim())
+    if (parts.length === 4) {
+      const alpha = Number.parseFloat(parts[3])
+      return Number.isFinite(alpha) ? Math.min(1, Math.max(0, alpha)) : null
+    }
+    return parts.length === 3 ? 1 : null
+  }
+  if (hexToRgb(text) || /^[a-z]+$/.test(text)) return 1
+  return null
+}
+
+/** 把颜色转成 `<input type="color">` 需要的 `#rrggbb`（识别不了时用 fallback）。 */
+export function colorToHex(value: string | null | undefined, fallback = '#000000'): string {
+  if (typeof value !== 'string') return fallback
+  const text = value.trim()
+  const rgb = hexToRgb(text)
+  if (rgb) {
+    return `#${rgb.map((channel) => channel.toString(16).padStart(2, '0')).join('')}`
+  }
+  const rgba = /^rgba?\(([^)]+)\)$/.exec(text.toLowerCase())
+  if (rgba) {
+    const parts = rgba[1].split(',').map((part) => Number.parseFloat(part.trim()))
+    if (parts.length >= 3 && parts.slice(0, 3).every((part) => Number.isFinite(part))) {
+      return `#${parts
+        .slice(0, 3)
+        .map((channel) =>
+          Math.min(255, Math.max(0, Math.round(channel))).toString(16).padStart(2, '0'),
+        )
+        .join('')}`
+    }
+  }
+  return fallback
+}
+
+/**
+ * 用色板选了一个新颜色，但**保留原来的不透明度**。
+ *
+ * 颜色选择器只能给 `#rrggbb`（没有 alpha），直接写回会把 `rgba(0,0,0,0.55)`
+ * 变成不透明的 `#rrggbb`，阴影会突然变重。这里统一写成 rgba(...)。
+ */
+export function recolorKeepingAlpha(
+  nextHex: string,
+  previous: string | null | undefined,
+  fallbackAlpha = 1,
+): string {
+  const rgb = hexToRgb(nextHex) ?? hexToRgb(colorToHex(previous)) ?? [0, 0, 0]
+  const alpha = colorAlphaOf(previous) ?? fallbackAlpha
+  const safeAlpha = Math.min(1, Math.max(0, Number.isFinite(alpha) ? alpha : fallbackAlpha))
+  const rounded = Math.round(safeAlpha * 1000) / 1000
+  if (rounded >= 1) return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`
+  return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${rounded})`
+}

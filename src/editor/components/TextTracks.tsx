@@ -1,3 +1,4 @@
+import { isDragging, matchesPointer } from './pointerDrag'
 import { useEffect, useRef, useState } from 'react'
 import type {
   MouseEvent as ReactMouseEvent,
@@ -52,10 +53,10 @@ export function TextTracks({
   const edgeRef = useRef<EdgeState | null>(null)
 
   useEffect(() => {
-    if (!drag?.pointerId) return
+    if (!isDragging(drag)) return
     const handleMove = (event: PointerEvent) => {
       const current = dragRef.current
-      if (!current || event.pointerId !== current.pointerId) return
+      if (!matchesPointer(current, event)) return
       const next = {
         ...current,
         start: Math.max(0, current.originalStart + (event.clientX - current.startX) / pps),
@@ -83,13 +84,13 @@ export function TextTracks({
       window.removeEventListener('pointerup', finish)
       window.removeEventListener('pointercancel', cancel)
     }
-  }, [drag?.pointerId, pps, moveTextClip])
+  }, [isDragging(drag), pps, moveTextClip])
 
   useEffect(() => {
-    if (!edge?.pointerId) return
+    if (!isDragging(edge)) return
     const handleMove = (event: PointerEvent) => {
       const current = edgeRef.current
-      if (!current || event.pointerId !== current.pointerId) return
+      if (!matchesPointer(current, event)) return
       const delta = clamp(
         (event.clientX - current.startX) / pps,
         current.minDelta,
@@ -119,7 +120,7 @@ export function TextTracks({
       window.removeEventListener('pointerup', finish)
       window.removeEventListener('pointercancel', cancel)
     }
-  }, [edge?.pointerId, pps, resizeTextClipEdge])
+  }, [isDragging(edge), pps, resizeTextClipEdge])
 
   const startDrag = (
     event: ReactPointerEvent<HTMLDivElement>,

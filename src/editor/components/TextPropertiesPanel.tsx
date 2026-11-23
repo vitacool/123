@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { CAPTION_STYLE_PRESETS, resolveCaptionStyle, textClipDuration } from '../core/text'
+import {
+  CAPTION_STYLE_PRESETS,
+  TEXT_SHADOW_ENABLED_DEFAULTS,
+  resolveCaptionStyle,
+  textClipDuration,
+} from '../core/text'
 import type { CaptionStyle, TextClip, TextTrack } from '../core/types'
+import { colorToHex, recolorKeepingAlpha } from '../core/color'
 import { useEditorStore } from '../store/EditorProvider'
 import { CommitNumber } from './Toast'
 import { CommitSlider } from './CommitSlider'
@@ -59,6 +65,12 @@ export function TextPropertiesPanel({ track, clip }: TextPropertiesPanelProps) {
   const hasBackground = style.background !== 'transparent'
   const scalePercent = Math.round((clip.scale ?? 1) * 100)
   const opacityPercent = Math.round((clip.opacity ?? 1) * 100)
+  const shadowEnabled = Boolean(
+    style.shadowColor && style.shadowColor.trim().toLowerCase() !== 'transparent',
+  )
+  const shadowBlurPercent = Math.round((style.shadowBlur ?? 0) * 1000) / 10
+  const shadowOffsetXPercent = Math.round((style.shadowOffsetX ?? 0) * 1000) / 10
+  const shadowOffsetYPercent = Math.round((style.shadowOffsetY ?? 0) * 1000) / 10
 
   const commitText = () => {
     if (pendingRef.current !== null) {
@@ -77,6 +89,25 @@ export function TextPropertiesPanel({ track, clip }: TextPropertiesPanelProps) {
       return
     }
     commitStyle(prop === 'position.x' ? { x: value } : { y: value }, '调整文本位置')
+  }
+
+  const previewShadow = (patch: Partial<CaptionStyle>) => {
+    setCaptionStylePreview({ trackId: track.id, style: { ...style, ...patch } })
+  }
+
+  const commitShadow = (patch: Partial<CaptionStyle>, label: string) => {
+    setCaptionStylePreview(null)
+    commitStyle(patch, label)
+  }
+
+  const setShadowEnabled = (enabled: boolean) => {
+    setCaptionStylePreview(null)
+    if (enabled) {
+      commitStyle({ ...TEXT_SHADOW_ENABLED_DEFAULTS }, '开启文字阴影')
+    } else {
+      // 必须写 transparent 而不是 undefined，否则组样式里的阴影会重新透出来。
+      commitStyle({ shadowColor: 'transparent' }, '关闭文字阴影')
+    }
   }
 
   const updateText = (value: string) => {
@@ -400,6 +431,103 @@ export function TextPropertiesPanel({ track, clip }: TextPropertiesPanelProps) {
               }
             />
           </div>
+        </section>
+
+        <section className="panel-section">
+          <div className="section-title">
+            <span>阴影</span>
+            <span className="section-hint">模糊 / 偏移按字号比例</span>
+          </div>
+          <div className="text-color-row">
+            <label>
+              <input
+                type="checkbox"
+                checked={shadowEnabled}
+                aria-label="启用文字阴影"
+                onChange={(event) => setShadowEnabled(event.target.checked)}
+              />
+              <span>启用阴影</span>
+            </label>
+            {shadowEnabled && (
+              <label>
+                颜色
+                <input
+                  type="color"
+                  value={colorToHex(style.shadowColor, '#000000')}
+                  aria-label="阴影颜色"
+                  onChange={(event) =>
+                    // 颜色选择器没有 alpha：保留原有不透明度，否则 rgba(0,0,0,0.55)
+                    // 会被写成不透明的 #rrggbb，阴影突然变重。
+                    commitShadow(
+                      { shadowColor: recolorKeepingAlpha(event.target.value, style.shadowColor, 0.55) },
+                      '修改阴影颜色',
+                    )
+                  }
+                />
+              </label>
+            )}
+            {shadowEnabled && <span className="text-color-value">{style.shadowColor}</span>}
+          </div>
+          {shadowEnabled && (
+            <>
+              <div className="control-with-field">
+                <span className="section-hint">模糊</span>
+                <CommitSlider
+                  value={shadowBlurPercent}
+                  min={0}
+                  max={20}
+                  step={0.5}
+                  ariaLabel="阴影模糊"
+                  onPreview={(value) => previewShadow({ shadowBlur: value / 100 })}
+                  onCommit={(value) =>
+                    commitShadow({ shadowBlur: value / 100 }, '调整阴影模糊')
+                  }
+                  format={(value) => `${Number(value.toFixed(1))}%`}
+                />
+                <CommitNumber
+                  value={shadowBlurPercent}
+                  min={0}
+                  max={20}
+                  step={0.5}
+                  unit="%"
+                  ariaLabel="阴影模糊百分比"
+                  onCommit={(value) =>
+                    commitShadow({ shadowBlur: value / 100 }, '调整阴影模糊')
+                  }
+                />
+              </div>
+              <div className="position-grid">
+                <label>
+                  <span>偏移 X</span>
+                  <CommitNumber
+                    value={shadowOffsetXPercent}
+                    min={-20}
+                    max={20}
+                    step={0.5}
+                    unit="%"
+                    ariaLabel="阴影水平偏移"
+                    onCommit={(value) =>
+                      commitShadow({ shadowOffsetX: value / 100 }, '调整阴影水平偏移')
+                    }
+                  />
+                </label>
+                <label>
+                  <span>偏移 Y</span>
+                  <CommitNumber
+                    value={shadowOffsetYPercent}
+                    min={-20}
+                    max={20}
+                    step={0.5}
+                    unit="%"
+                    ariaLabel="阴影垂直偏移"
+                    onCommit={(value) =>
+                      commitShadow({ shadowOffsetY: value / 100 }, '调整阴影垂直偏移')
+                    }
+                  />
+                </label>
+              </div>
+            </>
+          )}
         </section>
 
         <section className="panel-section">
