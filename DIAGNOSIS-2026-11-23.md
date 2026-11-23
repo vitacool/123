@@ -565,6 +565,22 @@ Ctrl+Z ×2 → 片段 1 / 素材 0 / 片段文字「素材已移除」/ 预览�
 
 **本轮验证**：全量单测 **1088 passed / 2 skipped**（+5）；`tsc` 0 错误；`eslint` 0 错误；真实导出 e2e 通过。
 
+### N6｜换轨命中用全局查询 → 同页两个编辑器会串台
+
+- 位置：`components/Timeline.tsx` 的片段拖动 `handleMove`
+- 根因：`document.querySelector('.clip-lane')` / `document.querySelectorAll('[data-overlay-track-id]')` 都是**全局查询**。同一文件里落点识别（`handleAssetDrop` 那条路径）特意注释过「不用 document.querySelector」，这里没跟上 —— 宿主页面嵌两个 `<VideoEditor>` 时，拖 A 的片段会命中 B 的泳道，片段被丢进另一个实例的轨道
+- 修法：改为从当前时间轴的 `contentRef.current` 内查询
+- 验证：主轨片段拖进叠加轨 `main 1→0 / overlay 0→1`（实例内查询仍能正确命中）。**注**：真正的「双实例」现场没构造（demo 只挂一个编辑器），隔离性由代码作用域保证
+
+### N7｜`window` 的 pointerup 收尾不校验 pointerId → 多指误提交
+
+- 位置：`Timeline.tsx`（边缘裁剪 / 片段拖动）、`AudioTracks.tsx`、`TextTracks.tsx` 共 7 处 `window.pointerup` 的 `finish`
+- 根因：`finish` 是无参函数，任何指针抬起都会提交当前拖拽。鼠标单指无感，但**触屏/手写笔第二根手指抬起**会把进行中的裁剪/拖动提前提交
+- 修法：`finish(event)` 接收事件 + 复用既有的 `matchesPointer(current, event)`（注意不能写 `if (!drag.pointerId)` —— Firefox 鼠标 pointerId 可能是 0）
+- 验证（运行时）：边缘裁剪 274→224、片段拖动 13→73（守卫没破坏正常拖拽）；拖动中伪造 `pointerId=99` 的 pointerup → 位置不变（未提前提交），真实抬起才提交（73→13）
+
+**本轮验证**：全量单测 **1088 passed / 2 skipped**；`tsc` / `eslint` 0 错误；完整 e2e **22 passed**。
+
 ---
 
 ## 附录：证据文件
