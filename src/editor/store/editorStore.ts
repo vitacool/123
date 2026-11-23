@@ -75,7 +75,6 @@ import {
   createMergeCaptionWithPreviousCommand,
   createSplitCaptionCommand,
   createMoveTrackCommand,
-  createRelinkCaptionsCommand,
   createUpdateTextClipCommand,
   createUpdateTextTrackCommand,
 } from '../core/commands'
@@ -83,7 +82,6 @@ import type { EditorCommand } from '../core/commands'
 import type { TrackOrderKind } from '../core/operations'
 import type { DraftSettings } from '../core/draft'
 import {
-  DEFAULT_FRAMECUT_THEME,
   type FrameCutTheme,
   type ResolvedTheme,
 } from '../core/theme'
@@ -94,7 +92,8 @@ import {
   type ExportRange,
 } from '../core/exportRange'
 import { formatClock } from '../core/format'
-import { clampMainTrackStart, createStoreInternals, type HistoryState } from './internal'
+import { createStoreInternals, type HistoryState } from './internal'
+import { createUiSlice } from './slices/ui'
 import {
   clampCrop,
   createEmptyProject,
@@ -152,7 +151,6 @@ import {
   projectThumbnail,
 } from '../core/projectLibrary'
 import { readAssetFile } from '../services/assetReader'
-import { clearThemeTokenCache } from '../services/themeTokens'
 import {
   countLinkedCaptions,
   matchesReverseOrigin,
@@ -742,7 +740,6 @@ const resolvePasteTargets = (state: EditorState, ids: readonly string[]): string
 
 export function createEditorStore() {
   const initial = createEmptyProject()
-  let toastCounter = 0
 
   return createStore<EditorState>()((set, get) => {
   /** 共享内核：历史栈、命令执行、状态同步、素材回收（见 store/internal.ts）。 */
@@ -787,6 +784,7 @@ export function createEditorStore() {
     }
 
     return {
+      ...createUiSlice({ get, set, internals }),
       project: initial,
       source: null,
       assets: [],
@@ -802,23 +800,10 @@ export function createEditorStore() {
       projectNameEdited: false,
       timelineViewportWidth: 960,
       exportRange: null,
-      theme: DEFAULT_FRAMECUT_THEME,
-      resolvedTheme: 'light',
-      previewFullscreen: false,
-      timelineSettings: {
-        mainTrackMagnet: false,
-        autoSnap: true,
-        linkage: false,
-        previewAxis: true,
-      },
       cropSession: null,
-      previewPatch: null,
       reverseJob: null,
-      markerEditorId: null,
       exportDialogOpen: false,
       colorClipboard: null,
-      coverPreview: false,
-      coverPanelOpen: false,
       history: {
         stack: internals.history,
         pastLength: 0,
@@ -826,11 +811,6 @@ export function createEditorStore() {
         version: 0,
       },
       lastAction: '',
-      toast: null,
-      asrWordsBySource: null,
-      captionApplyAll: true,
-      captionFollow: true,
-      captionStylePreview: null,
 
       loadSource: (source) => {
         cancelReverseForProjectSwap()
@@ -1835,9 +1815,6 @@ export function createEditorStore() {
         if (width > 0) set({ timelineViewportWidth: width })
       },
 
-      setPreviewFullscreen: (fullscreen) => {
-        set({ previewFullscreen: fullscreen })
-      },
 
       setPlaying: (playing) => {
         const state = get()
@@ -1873,43 +1850,10 @@ export function createEditorStore() {
         set({ timelineZoom: clamp(zoom, TIMELINE_MIN_ZOOM, TIMELINE_MAX_ZOOM) })
       },
 
-      toggleTimelineSetting: (key) => {
-        const state = get()
-        const next = !state.timelineSettings[key]
-        set((current) => ({
-          timelineSettings: {
-            ...current.timelineSettings,
-            [key]: next,
-          },
-        }))
-        if (key === 'mainTrackMagnet' && next) {
-          const project = get().project
-          if (project.clips[0] && (project.clips[0].gapBefore ?? 0) > 0.0001) {
-            run({
-              label: '主轨首段贴齐',
-              selectionAfter: get().selectedClipId,
-              execute: (current) => clampMainTrackStart(current),
-            })
-          }
-        }
-      },
 
-      setPreviewPatch: (patch) => set({ previewPatch: patch }),
 
-      togglePreviewMuteSegmentedSpeed: () =>
-        set((current) => ({ previewMuteSegmentedSpeed: !current.previewMuteSegmentedSpeed })),
 
-      setTheme: (theme) => {
-        if (get().theme === theme) return
-        set({ theme })
-      },
 
-      setResolvedTheme: (theme) => {
-        if (get().resolvedTheme === theme) return
-        // Canvas 界面元素按主题缓存颜色 token：切换时清掉，随后重绘取新值。
-        clearThemeTokenCache()
-        set({ resolvedTheme: theme })
-      },
 
       renameProject: (name) => {
         const next = normalizeProjectName(name)
@@ -2678,14 +2622,8 @@ export function createEditorStore() {
         state.notify('该属性已启用动画，此修改只在无关键帧时生效', 'warning')
       },
 
-      openCoverPanel: () => set({ coverPanelOpen: true }),
 
-      closeCoverPanel: () => set({ coverPanelOpen: false, coverPreview: false }),
 
-      setCoverPreview: (active) => {
-        if (get().coverPreview === active) return
-        set({ coverPreview: active })
-      },
 
       moveTrack: (kind, trackId, targetDisplayIndex) => {
         run(createMoveTrackCommand(kind, trackId, targetDisplayIndex))
@@ -3017,9 +2955,6 @@ export function createEditorStore() {
         return 0
       },
 
-      setAsrWordsBySource: (words) => {
-        set({ asrWordsBySource: words })
-      },
 
       realignCaptions: () => {
         const words = get().asrWordsBySource
@@ -3057,23 +2992,8 @@ export function createEditorStore() {
         }
       },
 
-      setCaptionApplyAll: (applyAll) => {
-        set({ captionApplyAll: applyAll })
-      },
 
-      setCaptionFollow: (follow) => {
-        if (follow === get().captionFollow) return
-        set({ captionFollow: follow })
-        if (follow) {
-          // 开启时立即执行一次 relink，作为一个独立可撤销命令。
-          const urlToAssetId = new Map(get().assets.map((asset) => [asset.url, asset.id]))
-          run(createRelinkCaptionsCommand(urlToAssetId))
-        }
-      },
 
-      setCaptionStylePreview: (preview) => {
-        set({ captionStylePreview: preview })
-      },
 
       updateCaptionStyle: (trackId, clipId, patch, applyAll, label) => {
         const project = get().project
@@ -3334,13 +3254,7 @@ export function createEditorStore() {
         }
       },
 
-      openMarkerEditor: (id) => {
-        if (get().project.markers.some((marker) => marker.id === id)) {
-          set({ markerEditorId: id, isPlaying: false })
-        }
-      },
 
-      closeMarkerEditor: () => set({ markerEditorId: null }),
 
       updateMarker: (marker) => {
         const state = get()
@@ -3624,12 +3538,7 @@ export function createEditorStore() {
         if (get().exportDialogOpen) set({ exportDialogOpen: false })
       },
 
-      notify: (message, kind = 'info') => {
-        toastCounter += 1
-        set({ toast: { id: toastCounter, kind, message } })
-      },
 
-      clearToast: () => set({ toast: null }),
     }
   })
 }

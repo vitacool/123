@@ -23,9 +23,10 @@ import type { EditorState, PendingReclaimEntry } from './editorStore'
  */
 
 export type StoreGet = () => EditorState
-export type StoreSet = (
-  patch: Partial<EditorState> | ((state: EditorState) => Partial<EditorState>),
-) => void
+export interface StoreSet {
+  (patch: Partial<EditorState>): void
+  (updater: (state: EditorState) => Partial<EditorState>): void
+}
 
 /**
  * store 里可见的历史摘要。
