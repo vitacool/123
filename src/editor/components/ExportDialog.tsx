@@ -2,15 +2,19 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { getOutputDimensions } from '../core/aspect'
 import { clipTimelineDuration } from '../core/clipTime'
 import { animationPerformanceHint } from '../core/animationExport'
+import { buildAudioExportPlan } from '../core/exportPlan'
+import { exportRangeDuration } from '../core/exportRange'
 import { textAnimationPerformanceHint } from '../core/textAnimation'
 import { formatFileSize, formatPlayhead } from '../core/format'
-import type { ExportFps, ExportResolution } from '../core/types'
+import type { ExportFps, ExportLoudness, ExportResolution, SourceInfo } from '../core/types'
 import { useEditorStore } from '../store/EditorProvider'
 import {
   exportProject,
   getRuntimeCapabilities,
   inspectExportAudio,
+  isMp3EncoderAvailable,
   type AudioInspection,
+  type ExportFormat,
   type ExportResult,
   type ExportStage,
 } from '../services/ffmpegExporter'
@@ -63,6 +67,18 @@ const RESOLUTIONS: { id: ExportResolution; label: string; hint: string }[] = [
 
 const FRAME_RATES: ExportFps[] = [24, 30, 60]
 
+const LOUDNESS_OPTIONS: { id: ExportLoudness; label: string; hint: string }[] = [
+  { id: 'off', label: '关闭', hint: '原音量' },
+  { id: 'platform', label: '短视频平台', hint: '-14 LUFS' },
+  { id: 'broadcast', label: '广播', hint: '-23 LUFS' },
+]
+
+const FORMAT_OPTIONS: { id: ExportFormat; label: string; hint: string }[] = [
+  { id: 'mp4', label: 'MP4', hint: '视频' },
+  { id: 'm4a', label: 'M4A', hint: 'AAC 音频' },
+  { id: 'mp3', label: 'MP3', hint: 'MP3 音频' },
+]
+
 function sanitizeBase(name: string): string {
   return (
     name
@@ -73,7 +89,8 @@ function sanitizeBase(name: string): string {
   )
 }
 
-function triggerDownload(blob: Blob, filename: string) {
+/** 触发浏览器下载（导出对话框与「导出当前帧」共用）。 */
+export function triggerDownload(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
@@ -90,7 +107,9 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
   const project = useEditorStore((state) => state.project)
   const source = useEditorStore((state) => state.source)
   const assets = useEditorStore((state) => state.assets)
+  const exportRange = useEditorStore((state) => state.exportRange)
   const close = useEditorStore((state) => state.closeExportDialog)
+  const notify = useEditorStore((state) => state.notify)
   const setExportQuality = useEditorStore((state) => state.setExportQuality)
 
   const [phase, setPhase] = useState<Phase>('config')
@@ -103,11 +122,71 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
   const [audioCheckError, setAudioCheckError] = useState<string | null>(null)
   const [checkingAudio, setCheckingAudio] = useState(false)
   const [stage, setStage] = useState<ExportStage>('loading-core')
+  /** 导出封装格式（会话状态，不写进 Project）。 */
+  const [format, setFormat] = useState<ExportFormat>('mp4')
+  /** MP3 编码器支持情况：null = 还没检测过。 */
+  const [mp3Support, setMp3Support] = useState<boolean | null>(null)
+  /** 正在检测 MP3 编码器。 */
+  const [checkingMp3, setCheckingMp3] = useState(false)
+  /** 导出范围：全部 / 入出点区间（会话状态，不写进 Project）。 */
+  const [rangeMode, setRangeMode] = useState<'all' | 'range'>('all')
   /** 已请求取消、正在等待运行时停止。 */
   const [stopping, setStopping] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
 
   const runtime = getRuntimeCapabilities()
+
+  /** 纯音频 plan 只依赖素材与音频轨；有 audioLabel 才允许选择 M4A/MP3。 */
+  const exportSources = useMemo<SourceInfo[]>(() => {
+    const list: SourceInfo[] = [...assets]
+    if (source && !list.some((asset) => asset.url === source.url)) list.unshift(source)
+    return list
+  }, [assets, source])
+  const audioExportPlan = useMemo(() => {
+    if (exportSources.length === 0) return null
+    try {
+      const plan = buildAudioExportPlan(project, exportSources, true)
+      return plan.audioLabel ? plan : null
+    } catch {
+      return null
+    }
+  }, [project, exportSources])
+  const audioAvailable = audioExportPlan !== null
+
+  /**
+   * 选择导出格式：MP3 依赖 libmp3lame，首次选择时实际检测一次编码器
+   * （结果在 ffmpegExporter 里缓存）。不支持就退回 M4A 并说明原因，
+   * 之后再点 MP3 会直接禁用。
+   */
+  const pickFormat = async (next: ExportFormat): Promise<void> => {
+    if (next !== 'mp3') {
+      setFormat(next)
+      return
+    }
+    if (mp3Support === false || checkingMp3) return
+    if (mp3Support === true) {
+      setFormat('mp3')
+      return
+    }
+    setCheckingMp3(true)
+    try {
+      const supported = await isMp3EncoderAvailable()
+      setMp3Support(supported)
+      if (supported) {
+        setFormat('mp3')
+      } else {
+        setFormat('m4a')
+        notify('当前 FFmpeg 核心不支持 MP3 编码，已改用 M4A', 'warning')
+      }
+    } finally {
+      setCheckingMp3(false)
+    }
+  }
+  useEffect(() => {
+    if (audioAvailable) return
+    setFormat((current) => (current === 'mp4' ? current : 'mp4'))
+  }, [audioAvailable])
+  const primarySource = source ?? assets[0] ?? null
 
   /** 粗略内存预检：只统计真正参与导出的素材（主轨 + 叠加轨 + 音频轨）。 */
   const exportAssetBytes = useMemo(() => {
@@ -128,6 +207,7 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
   }, [project.clips, project.overlayTracks, project.audioTracks, assets, source])
   const animationHint = animationPerformanceHint(project, project.exportQuality.fps)
   const textAnimationHint = textAnimationPerformanceHint(project, project.exportQuality.fps)
+  const loudness = project.exportQuality.loudness ?? 'off'
   const memoryWarning = exportAssetBytes > MEMORY_WARN_BYTES
 
   /** 「关闭 / Esc / 点遮罩」的统一入口：导出中先取消，其余情况直接关闭。 */
@@ -155,7 +235,14 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
     setAudioCheck(null)
     setAudioCheckError(null)
     setCheckingAudio(false)
+    // 有入/出点时默认导出该区间；没有时只能导出全部。
+    setRangeMode(exportRange ? 'range' : 'all')
   }, [open])
+
+  // 区间在弹窗打开期间被清除（Alt+X / 撤销导致）时退回「全部」，避免导出空区间。
+  useEffect(() => {
+    if (!exportRange) setRangeMode('all')
+  }, [exportRange])
 
   // 组件卸载（编辑器销毁）时不要留下还在跑的 wasm 任务。
   useEffect(
@@ -184,12 +271,24 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
     (total, clip) => total + Math.max(0, clipTimelineDuration(clip)),
     0,
   )
-  const filename = source ? `${sanitizeBase(source.name)}-framecut.mp4` : 'framecut.mp4'
+  /** 选中的导出范围：没有区间或选了「全部」时为 null（导出整条时间轴）。 */
+  const exportedRange = rangeMode === 'range' ? exportRange : null
+  const exportedDuration = exportedRange ? exportRangeDuration(exportedRange) : duration
+  const filenameSource = format === 'mp4' ? source : primarySource
+  const extension = format === 'mp4' ? 'mp4' : format
+  const filename = filenameSource
+    ? `${sanitizeBase(filenameSource.name)}-framecut.${extension}`
+    : `framecut.${extension}`
   const isLargeFile = Boolean(source && source.size > 500 * 1024 * 1024)
   const coverFilename = source ? `${sanitizeBase(source.name)}-cover.jpg` : 'framecut-cover.jpg'
 
   const startExport = async () => {
-    if (!source || project.clips.length === 0) return
+    const exportSource = format === 'mp4' ? source : primarySource
+    if (!exportSource) return
+    if (format === 'mp4' && project.clips.length === 0) return
+    if (format !== 'mp4' && !audioAvailable) return
+    // MP3 已经检测过且不支持时不再放行（exportProject 里还有一层兜底）。
+    if (format === 'mp3' && mp3Support === false) return
     const controller = new AbortController()
     abortRef.current = controller
     setPhase('running')
@@ -204,14 +303,14 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
     try {
       const exported = await exportProject(
         project,
-        source,
+        exportSource,
         assets,
         {
           onStatus: setStatus,
           onProgress: setProgress,
           onStage: setStage,
         },
-        { signal: controller.signal },
+        { signal: controller.signal, format, range: exportedRange },
       )
       setResult(exported)
       setPhase('done')
@@ -219,7 +318,7 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
         try {
           await Promise.resolve(onExport(exported.blob))
         } catch {
-          setCallbackError('宿主平台的 onExport 回调执行失败，视频已生成但未提交。')
+          setCallbackError('宿主平台的 onExport 回调执行失败，文件已生成但未提交。')
         }
       } else {
         triggerDownload(exported.blob, filename)
@@ -367,6 +466,48 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
 
             <section className="export-section">
               <div className="export-section-head">
+                <h3>格式</h3>
+                <span>MP4 含视频；M4A / MP3 仅导出音频</span>
+              </div>
+              <div className="fps-row" role="group" aria-label="导出格式">
+                {FORMAT_OPTIONS.map((option) => {
+                  const audioOption = option.id !== 'mp4'
+                  const mp3Unsupported = option.id === 'mp3' && mp3Support === false
+                  const disabled = (audioOption && !audioAvailable) || mp3Unsupported || checkingMp3
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      className={`fps-option${format === option.id ? ' is-active' : ''}`}
+                      onClick={() => void pickFormat(option.id)}
+                      aria-pressed={format === option.id}
+                      disabled={disabled}
+                      title={
+                        mp3Unsupported
+                          ? '当前 FFmpeg 核心不支持 MP3 编码，请改用 M4A'
+                          : audioOption && !audioAvailable
+                            ? '当前工程没有可用音频，只能导出 MP4'
+                            : checkingMp3
+                              ? '正在检测 MP3 编码器…'
+                              : option.id === 'mp4'
+                                ? '导出视频 MP4'
+                                : `仅音频导出 ${option.label}`
+                      }
+                    >
+                      {option.label} <span>{option.hint}</span>
+                    </button>
+                  )
+                })}
+              </div>
+              {!audioAvailable && (
+                <p className="control-note">
+                  当前工程没有可用音频，M4A / MP3 已禁用。
+                </p>
+              )}
+            </section>
+
+            <section className="export-section">
+              <div className="export-section-head">
                 <h3>画质</h3>
                 <span>输出不会超过源视频分辨率</span>
               </div>
@@ -420,6 +561,70 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
               </div>
             </section>
 
+            <section className="export-section">
+              <div className="export-section-head">
+                <h3>导出范围</h3>
+                <span>时间轴上按 I / O 打入点与出点，Alt+X 清除</span>
+              </div>
+              <div className="fps-row" role="group" aria-label="导出范围">
+                <button
+                  type="button"
+                  className={`fps-option${rangeMode === 'all' ? ' is-active' : ''}`}
+                  onClick={() => setRangeMode('all')}
+                  aria-pressed={rangeMode === 'all'}
+                >
+                  全部 <span>整条时间轴</span>
+                </button>
+                <button
+                  type="button"
+                  className={`fps-option${rangeMode === 'range' ? ' is-active' : ''}`}
+                  onClick={() => setRangeMode('range')}
+                  aria-pressed={rangeMode === 'range'}
+                  disabled={!exportRange}
+                  title={
+                    exportRange
+                      ? '只导出入点与出点之间的这一段'
+                      : '还没有入点 / 出点：在时间轴上按 I 设入点、O 设出点'
+                  }
+                >
+                  入出点区间
+                  <span>
+                    {exportRange ? `${exportRangeDuration(exportRange).toFixed(1)} 秒` : '未设置'}
+                  </span>
+                </button>
+              </div>
+              {!exportRange && (
+                <p className="control-note">
+                  还没有入点 / 出点：在时间轴上按 I 设入点、O 设出点，Alt+X 清除。
+                </p>
+              )}
+            </section>
+
+            <section className="export-section">
+              <div className="export-section-head">
+                <h3>音量标准化</h3>
+                <span>关闭时保持原音量；平台 -14 LUFS，广播 -23 LUFS</span>
+              </div>
+              <div className="fps-row" role="group" aria-label="音量标准化">
+                {LOUDNESS_OPTIONS.map((option) => (
+                  <button
+                    key={option.id}
+                    type="button"
+                    className={`fps-option${loudness === option.id ? ' is-active' : ''}`}
+                    onClick={() =>
+                      setExportQuality({
+                        ...project.exportQuality,
+                        loudness: option.id,
+                      })
+                    }
+                    aria-pressed={loudness === option.id}
+                  >
+                    {option.label} <span>{option.hint}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+
             <div className="export-summary">
               <div>
                 <span>成片</span>
@@ -429,7 +634,7 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
               </div>
               <div>
                 <span>时长</span>
-                <strong>{formatPlayhead(duration, project.exportQuality.fps)}</strong>
+                <strong>{formatPlayhead(exportedDuration, project.exportQuality.fps)}</strong>
               </div>
               <div>
                 <span>片段</span>
@@ -531,18 +736,39 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
             <span className="done-icon">
               <Icon name="check" size={27} />
             </span>
-            <h3>影片已经准备好</h3>
-            <p>文件已在浏览器内合成完成。</p>
+            <h3>{format === 'mp4' ? '影片已经准备好' : '音频已经准备好'}</h3>
+            <p>
+              {format === 'mp4'
+                ? '文件已在浏览器内合成完成。'
+                : '音频文件已在浏览器内合成完成。'}
+            </p>
             <div className="done-stats">
+              {format === 'mp4' ? (
+                <div>
+                  <span>分辨率</span>
+                  <strong>
+                    {result.width} × {result.height}
+                  </strong>
+                </div>
+              ) : (
+                <div>
+                  <span>格式</span>
+                  <strong>{format.toUpperCase()}</strong>
+                </div>
+              )}
               <div>
-                <span>分辨率</span>
+                <span>{format === 'mp4' ? '帧率' : '时长'}</span>
                 <strong>
-                  {result.width} × {result.height}
+                  {format === 'mp4'
+                    ? `${result.fps} fps`
+                    : formatPlayhead(
+                        // 有区间时按区间时长显示（audioExportPlan 是按完整时间轴构建的）。
+                        exportedRange
+                          ? exportRangeDuration(exportedRange)
+                          : (audioExportPlan?.totalDuration ?? duration),
+                        project.exportQuality.fps,
+                      )}
                 </strong>
-              </div>
-              <div>
-                <span>帧率</span>
-                <strong>{result.fps} fps</strong>
               </div>
               <div>
                 <span>大小</span>

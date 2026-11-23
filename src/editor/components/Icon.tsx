@@ -9,6 +9,7 @@ export type IconName =
   | 'play'
   | 'pause'
   | 'replay'
+  | 'reverse'
   | 'split'
   | 'trimLeft'
   | 'trimRight'
@@ -47,6 +48,9 @@ export type IconName =
   | 'text'
   | 'unlink'
   | 'camera'
+  | 'grip'
+  | 'sun'
+  | 'moon'
 
 interface IconProps extends SVGProps<SVGSVGElement> {
   name: IconName
@@ -91,6 +95,12 @@ const paths: Record<IconName, ReactNode> = {
     <>
       <path d="M6.7 7.5A7.2 7.2 0 1 1 4.8 12" />
       <path d="M4.5 4.8v4.4h4.4" />
+    </>
+  ),
+  reverse: (
+    <>
+      <path d="M11.5 6.5v11L4.5 12l7-5.5Z" />
+      <path d="M19.5 6.5v11L12.5 12l7-5.5Z" />
     </>
   ),
   split: (
@@ -323,6 +333,30 @@ const paths: Record<IconName, ReactNode> = {
       <circle cx="12" cy="13" r="3.2" />
     </>
   ),
+  grip: (
+    <>
+      <circle cx="9" cy="7" r="1.15" />
+      <circle cx="15" cy="7" r="1.15" />
+      <circle cx="9" cy="12" r="1.15" />
+      <circle cx="15" cy="12" r="1.15" />
+      <circle cx="9" cy="17" r="1.15" />
+      <circle cx="15" cy="17" r="1.15" />
+    </>
+  ),
+  sun: (
+    <>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 3v2.2" />
+      <path d="M12 18.8V21" />
+      <path d="M3 12h2.2" />
+      <path d="M18.8 12H21" />
+      <path d="m5.6 5.6 1.6 1.6" />
+      <path d="m16.8 16.8 1.6 1.6" />
+      <path d="m18.4 5.6-1.6 1.6" />
+      <path d="m7.2 16.8-1.6 1.6" />
+    </>
+  ),
+  moon: <path d="M20 14.5A8 8 0 0 1 9.5 4 8.2 8.2 0 1 0 20 14.5Z" />,
   unlink: (
     <>
       <path d="M9.5 14.5 6.2 17.8a2.9 2.9 0 0 1-4.1-4.1l3.3-3.3" />

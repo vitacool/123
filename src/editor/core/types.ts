@@ -1,3 +1,4 @@
+import type { ChromaKey } from './chromaKey'
 /** A ratio preset shown in the top bar. `original` follows the source media. */
 export type AspectRatioPreset = 'original' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4'
 
@@ -5,9 +6,14 @@ export type ExportResolution = '480p' | '720p' | '1080p' | '4K'
 
 export type ExportFps = 24 | 30 | 60
 
+/** 响度标准化目标：关闭 / 短视频平台（-14 LUFS） / 广播（-23 LUFS）。 */
+export type ExportLoudness = 'off' | 'platform' | 'broadcast'
+
 export interface ExportQuality {
   resolution: ExportResolution
   fps: ExportFps
+  /** 缺省 `off`（旧草稿/工程没有该字段时按 off 处理）。 */
+  loudness?: ExportLoudness
 }
 
 /** Normalised crop rectangle. Values are fractions of the source frame (0…1). */
@@ -28,7 +34,44 @@ export interface Point {
 export type BlendMode = 'normal' | 'screen' | 'multiply' | 'overlay' | 'lighten' | 'darken'
 
 /** 转场类型：与 FFmpeg xfade 的 transition 名称一一对应。 */
-export type TransitionType = 'fade' | 'fadeblack' | 'wipeleft' | 'slideleft' | 'circleopen'
+export type TransitionType =
+  // 基础
+  | 'fade'
+  | 'fadeblack'
+  | 'fadewhite'
+  | 'fadegrays'
+  // 擦除（硬边）
+  | 'wipeleft'
+  | 'wiperight'
+  | 'wipeup'
+  | 'wipedown'
+  // 柔边擦除
+  | 'smoothleft'
+  | 'smoothright'
+  | 'smoothup'
+  | 'smoothdown'
+  // 滑动
+  | 'slideleft'
+  | 'slideright'
+  | 'slideup'
+  | 'slidedown'
+  // 形状
+  | 'circleopen'
+  | 'circleclose'
+  | 'circlecrop'
+  | 'rectcrop'
+  | 'vertopen'
+  | 'vertclose'
+  | 'horzopen'
+  | 'horzclose'
+  | 'radial'
+  // 特效
+  | 'dissolve'
+  | 'pixelize'
+  | 'hblur'
+  | 'zoomin'
+  | 'squeezeh'
+  | 'squeezev'
 
 /** 片段尾部的转场（作用在「本片段 → 下一片段」交界）。 */
 export interface ClipTransition {
@@ -48,6 +91,40 @@ export interface CanvasBackground {
   color?: string
   blurAmount?: number
   imageUrl?: string
+}
+
+/** 蒙版形状：矩形 / 椭圆 / 线性（一刀切）/ 镜面（条带）。 */
+export type MaskShape = 'rect' | 'ellipse' | 'linear' | 'mirror'
+
+/**
+ * 片段形状蒙版（阶段 A：静态，不支持关键帧）。
+ *
+ * 坐标定义在「裁切 + 翻转之后、旋转与缩放之前」的画面里，
+ * x/y/width/height 是画面宽高的比例（0..1），因此跟随片段一起变换且与分辨率无关。
+ * linear 不使用 width/height；mirror 只用 height 作为条带宽度。
+ */
+export interface ClipMask {
+  shape: MaskShape
+  x: number
+  y: number
+  width: number
+  height: number
+  /** 旋转角度（度）。 */
+  rotation: number
+  /** 仅 rect：圆角 0..1。 */
+  roundness?: number
+  /** 羽化 0..1，按蒙版短边换算成像素。 */
+  feather: number
+  invert: boolean
+}
+
+/**
+ * 分段变速的一段：`at` 是「源区间内的相对位置」（0..1，首段固定 0），
+ * `speed` 是这一段的播放倍率（0.1–10）。段内常速、段间硬切换。
+ */
+export interface SpeedSegment {
+  at: number
+  speed: number
 }
 
 export interface Clip {
@@ -97,12 +174,27 @@ export interface Clip {
   opacity?: number
   /** 混合模式，缺省 normal。 */
   blendMode?: BlendMode
+  /**
+   * 分段变速（2–8 段，段内常速）：缺省表示用单一的 `speed`。
+   * 时长 = Σ(段源长 / 段速)，见 core/speed.ts 的 segmentPlan。
+   */
+  speedSegments?: SpeedSegment[]
+  /**
+   * 平滑变速曲线（控制点，`at` 0..1、`speed` 0.1–10）。
+   * 有曲线且没有显式 speedSegments 时，按 16 段采样成段表参与时长/导出/预览
+   * （等价于「分段变速」的加密近似，不需要逐帧烘焙）。
+   */
+  speedCurve?: SpeedSegment[]
   /** 与下一片段之间的转场；缺省无转场。 */
   transitionOut?: ClipTransition
   /** 片段级背景覆盖；缺省沿用工程级 canvasBackground。 */
   background?: CanvasBackground
   /** 关键帧动画；缺省表示没有动画（旧草稿无此字段）。 */
   anim?: AnimationMap
+  /** 形状蒙版；缺省表示没有蒙版（旧草稿无此字段）。阶段 A 为静态参数。 */
+  mask?: ClipMask
+  /** 色度抠像（阶段 B）；缺省表示不抠像（旧草稿无此字段）。 */
+  chromaKey?: ChromaKey
   /**
    * 调色参数：四项各 -100…100，缺省 0（旧草稿读取时统一归一化为 0）。
    * 预览用 Canvas filter/叠加层，导出用 FFmpeg eq/colorbalance。
@@ -195,6 +287,14 @@ export interface CaptionStyle {
   color?: string
   strokeColor?: string
   strokeWidth?: number
+  /** 文字阴影颜色；未设置或 transparent 表示关闭。 */
+  shadowColor?: string
+  /** 阴影模糊半径，按 fontSize 的比例存储。 */
+  shadowBlur?: number
+  /** 阴影水平偏移，按 fontSize 的比例存储（可为负）。 */
+  shadowOffsetX?: number
+  /** 阴影垂直偏移，按 fontSize 的比例存储（可为负）。 */
+  shadowOffsetY?: number
   background?: string
   x?: number
   y?: number
@@ -254,6 +354,14 @@ export interface TextClip {
   /** Optional outline; width is a fraction of font size. */
   strokeColor?: string
   strokeWidth?: number
+  /** 文字阴影颜色；未设置或 transparent 表示关闭。 */
+  shadowColor?: string
+  /** 阴影模糊半径，按 fontSize 的比例存储。 */
+  shadowBlur?: number
+  /** 阴影水平偏移，按 fontSize 的比例存储（可为负）。 */
+  shadowOffsetX?: number
+  /** 阴影垂直偏移，按 fontSize 的比例存储（可为负）。 */
+  shadowOffsetY?: number
   /** Per-clip override that ranks above the track's group style. */
   styleOverride?: CaptionStyle
   /** Word-level timestamps used for accurate Enter-splitting. */
@@ -338,6 +446,22 @@ export interface SourceInfo {
 /** A video in the project media library. `url` matches `Clip.sourceUrl`. */
 export interface MediaAsset extends SourceInfo {
   id: string
+  /**
+   * 「倒放」生成的新素材会记录来源区间，便于同一片段同一区间重复倒放时复用，
+   * 以及刷新草稿后仍能识别。缺省表示普通导入素材（旧数据同样没有该字段）。
+   */
+  reversedFrom?: ReverseAssetOrigin
+}
+
+/**
+ * 倒放素材的来源记录：原素材（id 稳定；url 仅用于旧数据兜底）与源区间。
+ * 区间用原始素材时间（秒）。
+ */
+export interface ReverseAssetOrigin {
+  assetId?: string
+  sourceUrl?: string
+  start: number
+  end: number
 }
 
 export interface TimelineSegment {

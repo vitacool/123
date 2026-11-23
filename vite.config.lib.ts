@@ -1,9 +1,16 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import framecutScope from './tools/postcss-framecut-scope.mjs'
 
 // Embeddable ES module build. React stays external; the host serves the
 // `public/ffmpeg` assets or passes `ffmpegBaseUrl` to <VideoEditor />.
 export default defineConfig({
+  // 样式隔离：所有选择器加 .framecut-root 前缀、@keyframes 加 fc- 前缀（构建时处理）。
+  css: {
+    postcss: {
+      plugins: [framecutScope()],
+    },
+  },
   plugins: [react()],
   publicDir: false,
   resolve: {

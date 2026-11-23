@@ -16,6 +16,7 @@ import {
   clipTimelineDuration,
 } from './clipTime'
 import { findClipLocation, findSegmentById, getProjectDuration, getTimeline, clamp } from './timeline'
+import { sliceSpeedRange, clipEdgeSpeed } from './speed'
 import {
   clampTransitionDuration,
   clipTransitionOut,
@@ -178,10 +179,22 @@ export function splitProjectAt(
   if (offset < MIN_CLIP_DURATION || segment.duration - offset < MIN_CLIP_DURATION) return null
 
   const splitSourceTime = clipSpanSourceAt(segment.clip, offset)
+  const span = clipSourceSpan(segment.clip)
   const fraction = segment.duration > 0 ? offset / segment.duration : 0.5
   const splitAnim = remapAnimAfterSplit(segment.clip, fraction)
+  // 变速段表 / 曲线的 at 是相对源区间的比例，改成新源区间后必须重新裁剪归一化，
+  // 否则 0.5 处的分界点会从「源 5s」漂到「源 2.5s」（后半段突然变成 4x）。
+  const leftSpeeds = sliceSpeedRange(segment.clip, span.start, splitSourceTime)
+  const rightSpeeds = sliceSpeedRange(segment.clip, splitSourceTime, span.end)
   const left: Clip = withAnim(
-    { ...segment.clip, sourceEnd: splitSourceTime },
+    {
+      ...segment.clip,
+      sourceEnd: splitSourceTime,
+      // 左半的下一段就是右半（同一素材接着播），保留 transitionOut 会在接缝处凭空
+      // 多出一个转场；转场属于「整段的出点」，应该只跟着右半。
+      transitionOut: undefined,
+      ...leftSpeeds,
+    },
     splitAnim.left,
   )
   const right: Clip = withAnim(
@@ -189,8 +202,9 @@ export function splitProjectAt(
       ...segment.clip,
       id: rightId,
       sourceStart: splitSourceTime,
-      sourceEnd: clipSourceSpan(segment.clip).end,
+      sourceEnd: span.end,
       gapBefore: 0,
+      ...rightSpeeds,
     },
     splitAnim.right,
   )
@@ -219,10 +233,13 @@ export function trimProjectLeft(project: Project, clipId: string, time: number):
   if (clipSpanSourceAt(segment.clip, delta) >= clipSourceSpan(segment.clip).end - MIN_CLIP_DURATION) return null
 
   // Keep the right edge in place and leave a recoverable gap on the left.
+  const newStart = clipSpanSourceAt(segment.clip, delta)
   const updated: Clip = withAnim(
     {
       ...segment.clip,
-      sourceStart: clipSpanSourceAt(segment.clip, delta),
+      sourceStart: newStart,
+      // 左裁改了源区间 → 变速比例要按 [newStart, sourceEnd] 重新裁出来。
+      ...sliceSpeedRange(segment.clip, newStart, clipSourceSpan(segment.clip).end),
       gapBefore: (segment.clip.gapBefore ?? 0) + delta,
     },
     remapAnimAfterTrim(segment.clip, 'left', segment.duration, segment.duration - delta, delta).anim,
@@ -248,9 +265,12 @@ export function trimProjectRight(project: Project, clipId: string, time: number)
   // behind a draggable right edge.
   const clips = project.clips.map((clip, index) => {
     if (clip.id === clipId) {
+      // 右裁改了源区间 → 变速比例按 [sourceStart, newEnd] 重新裁出来。
+      const newEnd = clipSpanSourceAt(clip, clipTimelineDuration(clip) - delta)
       const trimmed = {
         ...clip,
-        sourceEnd: clipSpanSourceAt(clip, clipTimelineDuration(clip) - delta),
+        sourceEnd: newEnd,
+        ...sliceSpeedRange(clip, clipSourceSpan(clip).start, newEnd),
       }
       return withAnim(
         trimmed,
@@ -291,19 +311,31 @@ export function resizeClipEdge(
 
   if (edge === 'left') {
     const gap = Math.max(0, clip.gapBefore ?? 0)
+    // 端点段速：静帧（图片 / 定格）没有段表 → 走单一 speed（通常 1）。
+    const startSpeed = clipEdgeSpeed(clip, 'start')
     // 静帧（图片）没有“更早的源素材”概念，左边缘只受空隙与最大时长限制。
+    // 非静帧：能往回恢复的时间轴长度 = 可用的源长度 / 端点段速（2x 段里 1s 时间轴要 2s 源）。
     const maxRestore = Math.min(
       gap,
-      image ? Number.POSITIVE_INFINITY : Math.max(0, clipSpanSourceAt(clip, 0)),
+      image ? Number.POSITIVE_INFINITY : Math.max(0, clip.sourceStart) / Math.max(1e-9, startSpeed),
       Math.max(0, maxDuration - duration),
     )
     const maxTrim = Math.max(0, duration - minDuration)
     const actual = clamp(delta, -maxRestore, maxTrim)
     if (Math.abs(actual) < 0.0001) return null
+    // 内收：按段表把本地时间映射回源时间；外扩：本地时间越过了段表起点，
+    // clipSpanSourceAt 会把它夹到 0（这就是「分段片段左边缘拉不回去」的原因），
+    // 所以外扩按端点段速直接换算源增量。
+    const newStart =
+      actual >= 0
+        ? clipSpanSourceAt(clip, actual)
+        : Math.max(0, clip.sourceStart + actual * startSpeed)
     const updated: Clip = withAnim(
       {
         ...clip,
-        sourceStart: clipSpanSourceAt(clip, actual),
+        sourceStart: newStart,
+        // 拖左边缘改了源区间（裁掉或恢复素材）→ 变速比例重新裁出来。
+        ...sliceSpeedRange(clip, newStart, clipSourceSpan(clip).end),
         gapBefore: gap + actual,
       },
       remapAnimAfterTrim(clip, 'left', duration, duration - actual, actual).anim,
@@ -314,11 +346,13 @@ export function resizeClipEdge(
 
   const next = project.clips[segment.index + 1] ?? null
   const nextGap = Math.max(0, next?.gapBefore ?? 0)
+  const endSpeed = clipEdgeSpeed(clip, 'end')
+  // 可外扩的时间轴长度：freeze/图片按时长上限；普通素材按「剩余源长 / 端点段速」。
   const sourceGrow = freeze
     ? Math.max(0, FREEZE_MAX_DURATION - duration)
     : clip.type === 'image'
       ? Math.max(0, IMAGE_MAX_DURATION - duration)
-      : Math.max(0, sourceDuration - clipSourceSpan(clip).end)
+      : Math.max(0, sourceDuration - clipSourceSpan(clip).end) / Math.max(1e-9, endSpeed)
   const maxGrow = next ? Math.min(sourceGrow, nextGap) : sourceGrow
   const maxShrink = Math.max(0, duration - minDuration)
   const actual = clamp(delta, -maxShrink, maxGrow)
@@ -326,9 +360,20 @@ export function resizeClipEdge(
 
   const clips = project.clips.map((item, index) => {
     if (item.id === clipId) {
+      // 内收按段表映射（本地时间仍在段表内）；外扩的本地时间越过段表末端，
+      // clipSpanSourceAt 会夹回原位（原来分段片段右边缘拉不开就是这个原因），
+      // 因此外扩按端点段速换算：源增量 = 时间轴增量 × 末端段速。
+      const grownEnd = clipSourceSpan(item).end + actual * clipEdgeSpeed(item, 'end')
+      const newEnd =
+        actual <= 0
+          ? clipSpanSourceAt(item, clipTimelineDuration(item) + actual)
+          : freeze || item.type === 'image'
+            ? grownEnd
+            : Math.min(sourceDuration, grownEnd)
       const resized = {
         ...item,
-        sourceEnd: clipSpanSourceAt(item, clipTimelineDuration(item) + actual),
+        sourceEnd: newEnd,
+        ...sliceSpeedRange(item, clipSourceSpan(item).start, newEnd),
       }
       return withAnim(
         resized,
@@ -401,13 +446,24 @@ export function insertFreezeAt(
 
   if (inside) {
     const splitSource = clipSpanSourceAt(inside.clip, t - inside.start)
-    const left: Clip = { ...inside.clip, sourceEnd: splitSource }
+    const insideSpan = clipSourceSpan(inside.clip)
+    // 插入定格会把原片段一分为二：两半各自按新的源区间裁剪变速比例。
+    const leftSpeeds = sliceSpeedRange(inside.clip, insideSpan.start, splitSource)
+    const rightSpeeds = sliceSpeedRange(inside.clip, splitSource, insideSpan.end)
+    const left: Clip = {
+      ...inside.clip,
+      sourceEnd: splitSource,
+      // 接缝处不该有转场：出点转场只跟着右半（右半才是真正接下一段的那半）。
+      transitionOut: undefined,
+      ...leftSpeeds,
+    }
     const right: Clip = {
       ...inside.clip,
       id: rightSplitId ?? createId('clip'),
       sourceStart: splitSource,
       sourceEnd: inside.clip.sourceEnd,
       gapBefore: 0,
+      ...rightSpeeds,
     }
     if (inside.clip.type === 'freeze') {
       const frame = clipFreezeFrame(inside.clip)
@@ -767,9 +823,20 @@ export function splitOverlayClipAt(
     return null
   }
   const splitSource = clipSpanSourceAt(segment.clip, offset)
+  const overlaySpan = clipSourceSpan(segment.clip)
   const splitFraction = segment.duration > 0 ? offset / segment.duration : 0.5
   const overlaySplitAnim = remapAnimAfterSplit(segment.clip, splitFraction)
-  const left: Clip = withAnim({ ...segment.clip, sourceEnd: splitSource }, overlaySplitAnim.left)
+  const overlayLeftSpeeds = sliceSpeedRange(segment.clip, overlaySpan.start, splitSource)
+  const overlayRightSpeeds = sliceSpeedRange(segment.clip, splitSource, overlaySpan.end)
+  const left: Clip = withAnim(
+    {
+      ...segment.clip,
+      sourceEnd: splitSource,
+      transitionOut: undefined,
+      ...overlayLeftSpeeds,
+    },
+    overlaySplitAnim.left,
+  )
   const right: Clip = withAnim(
     {
       ...segment.clip,
@@ -777,6 +844,7 @@ export function splitOverlayClipAt(
       sourceStart: splitSource,
       sourceEnd: segment.clip.sourceEnd,
       gapBefore: 0,
+      ...overlayRightSpeeds,
     },
     overlaySplitAnim.right,
   )
@@ -821,11 +889,15 @@ export function trimOverlayClipAt(
     const clips = track.clips.map((clip) =>
       clip.id === clipId
         ? withAnim(
-            {
-              ...clip,
-              sourceStart: clipSpanSourceAt(clip, delta),
-              gapBefore: (clip.gapBefore ?? 0) + delta,
-            },
+            (() => {
+              const newStart = clipSpanSourceAt(clip, delta)
+              return {
+                ...clip,
+                sourceStart: newStart,
+                ...sliceSpeedRange(clip, newStart, clipSourceSpan(clip).end),
+                gapBefore: (clip.gapBefore ?? 0) + delta,
+              }
+            })(),
             remapAnimAfterTrim(clip, 'left', segment.duration, segment.duration - delta, delta).anim,
           )
         : clip,
@@ -842,9 +914,11 @@ export function trimOverlayClipAt(
   if (segment.duration - delta < MIN_CLIP_DURATION) return null
   const clips = track.clips.map((clip, index) => {
     if (clip.id === clipId) {
+      const newEnd = clipSpanSourceAt(clip, clipTimelineDuration(clip) - delta)
       const overlayTrimmed = {
         ...clip,
-        sourceEnd: clipSpanSourceAt(clip, clipTimelineDuration(clip) - delta),
+        sourceEnd: newEnd,
+        ...sliceSpeedRange(clip, clipSourceSpan(clip).start, newEnd),
       }
       return withAnim(
         overlayTrimmed,
@@ -884,9 +958,10 @@ export function resizeOverlayClipEdge(
 
   if (edge === 'left') {
     const gap = Math.max(0, clip.gapBefore ?? 0)
+    const startSpeed = clipEdgeSpeed(clip, 'start')
     const maxRestore = Math.min(
       gap,
-      Math.max(0, clip.sourceStart),
+      Math.max(0, clip.sourceStart) / Math.max(1e-9, startSpeed),
       Math.max(0, maxDuration - duration),
     )
     const maxTrim = Math.max(0, duration - minDuration)
@@ -895,11 +970,19 @@ export function resizeOverlayClipEdge(
     const clips = track.clips.map((item) =>
       item.id === clipId
         ? withAnim(
-            {
-              ...item,
-              sourceStart: clipSpanSourceAt(item, actual),
-              gapBefore: gap + actual,
-            },
+            (() => {
+              // 外扩按端点段速换算源增量（clipSpanSourceAt 会把越过段表起点的本地时间夹到 0）。
+              const newStart =
+                actual >= 0
+                  ? clipSpanSourceAt(item, actual)
+                  : Math.max(0, item.sourceStart + actual * clipEdgeSpeed(item, 'start'))
+              return {
+                ...item,
+                sourceStart: newStart,
+                ...sliceSpeedRange(item, newStart, clipSourceSpan(item).end),
+                gapBefore: gap + actual,
+              }
+            })(),
             remapAnimAfterTrim(item, 'left', duration, duration - actual, actual).anim,
           )
         : item,
@@ -914,20 +997,30 @@ export function resizeOverlayClipEdge(
 
   const next = track.clips[segment.index + 1] ?? null
   const nextGap = Math.max(0, next?.gapBefore ?? 0)
+  const endSpeed = clipEdgeSpeed(clip, 'end')
   const sourceGrow = freeze
     ? Math.max(0, FREEZE_MAX_DURATION - duration)
     : clip.type === 'image'
       ? Math.max(0, IMAGE_MAX_DURATION - duration)
-      : Math.max(0, sourceDuration - clipSourceSpan(clip).end)
+      : Math.max(0, sourceDuration - clipSourceSpan(clip).end) / Math.max(1e-9, endSpeed)
   const maxGrow = next ? Math.min(sourceGrow, nextGap) : sourceGrow
   const maxShrink = Math.max(0, duration - minDuration)
   const actual = clamp(delta, -maxShrink, maxGrow)
   if (Math.abs(actual) < 0.0001) return null
   const clips = track.clips.map((item, index) => {
     if (item.id === clipId) {
+      // 外扩按端点段速换算（原因同主轨：本地时间越界会被夹回）。
+      const grownEnd = clipSourceSpan(item).end + actual * clipEdgeSpeed(item, 'end')
+      const newEnd =
+        actual <= 0
+          ? clipSpanSourceAt(item, clipTimelineDuration(item) + actual)
+          : freeze || item.type === 'image'
+            ? grownEnd
+            : Math.min(sourceDuration, grownEnd)
       const overlayResized = {
         ...item,
-        sourceEnd: clipSpanSourceAt(item, clipTimelineDuration(item) + actual),
+        sourceEnd: newEnd,
+        ...sliceSpeedRange(item, clipSourceSpan(item).start, newEnd),
       }
       return withAnim(
         overlayResized,
@@ -1098,6 +1191,81 @@ export function setExportQualityInProject(project: Project, quality: ExportQuali
  * 已在最上层/最下层（或轨道不存在）时返回原 project，因此不产生撤销历史。
  * 主轨不参与重排。
  */
+/** 三类可排序的轨道（主轨固定不动）。 */
+export type TrackOrderKind = 'overlay' | 'audio' | 'text'
+
+/**
+ * 界面显示顺序 ↔ 数组顺序的换算。
+ * - overlayTracks 是 bottom-to-top（数组末尾最上层），界面倒序显示；
+ * - audioTracks / textTracks 与界面顺序一致。
+ */
+export function displayToArrayIndex(
+  kind: TrackOrderKind,
+  displayIndex: number,
+  length: number,
+): number {
+  return kind === 'overlay' ? length - 1 - displayIndex : displayIndex
+}
+
+function trackListOf(project: Project, kind: TrackOrderKind): { id: string }[] {
+  if (kind === 'overlay') return project.overlayTracks ?? []
+  if (kind === 'audio') return project.audioTracks ?? []
+  return project.textTracks ?? []
+}
+
+/**
+ * 把指定轨道移动到目标**界面下标**（0 = 界面最上面）。
+ * 插入语义：其他轨道依次让位，不是两两互换。位置没变化时返回原 project。
+ */
+export function moveTrackInProject(
+  project: Project,
+  kind: TrackOrderKind,
+  trackId: string,
+  targetDisplayIndex: number,
+): Project {
+  const list = trackListOf(project, kind)
+  const from = list.findIndex((track) => track.id === trackId)
+  if (from < 0) return project
+  const fromDisplay = displayToArrayIndex(kind, from, list.length)
+  const clamped = Math.min(list.length - 1, Math.max(0, Math.round(targetDisplayIndex)))
+  if (clamped === fromDisplay) return project
+  const next = [...list]
+  const [moved] = next.splice(from, 1)
+  // 移除后的剩余列表里，目标界面下标 d 对应的插入位置：
+  // - 叠加轨数组是倒序（末尾=最上层）→ 插入到 next.length - d（d=0 时压到末尾=最上面）；
+  // - 音频/文字轨与界面同序 → 直接就是 d。
+  const toArray = kind === 'overlay' ? next.length - clamped : clamped
+  next.splice(toArray, 0, moved)
+
+  if (kind === 'overlay') return { ...project, overlayTracks: next as Project['overlayTracks'] }
+  if (kind === 'audio') return { ...project, audioTracks: next as Project['audioTracks'] }
+  return { ...project, textTracks: next as Project['textTracks'] }
+}
+
+/** 音频轨：按界面上下移动一层。 */
+export function moveAudioTrackInProject(
+  project: Project,
+  trackId: string,
+  direction: 'up' | 'down',
+): Project {
+  const list = project.audioTracks ?? []
+  const index = list.findIndex((track) => track.id === trackId)
+  if (index < 0) return project
+  return moveTrackInProject(project, 'audio', trackId, direction === 'up' ? index - 1 : index + 1)
+}
+
+/** 文字轨：按界面上下移动一层。 */
+export function moveTextTrackInProject(
+  project: Project,
+  trackId: string,
+  direction: 'up' | 'down',
+): Project {
+  const list = project.textTracks ?? []
+  const index = list.findIndex((track) => track.id === trackId)
+  if (index < 0) return project
+  return moveTrackInProject(project, 'text', trackId, direction === 'up' ? index - 1 : index + 1)
+}
+
 export function moveOverlayTrackInProject(
   project: Project,
   trackId: string,
@@ -1106,12 +1274,15 @@ export function moveOverlayTrackInProject(
   const tracks = project.overlayTracks ?? []
   const index = tracks.findIndex((track) => track.id === trackId)
   if (index < 0) return project
+  // 数组是 bottom-to-top：界面「上移」= 数组下标 +1。
   const targetIndex = direction === 'up' ? index + 1 : index - 1
   if (targetIndex < 0 || targetIndex >= tracks.length) return project
-  const next = [...tracks]
-  const [moved] = next.splice(index, 1)
-  next.splice(targetIndex, 0, moved)
-  return { ...project, overlayTracks: next }
+  const displayIndex = displayToArrayIndex(
+    'overlay',
+    targetIndex,
+    tracks.length,
+  )
+  return moveTrackInProject(project, 'overlay', trackId, displayIndex)
 }
 
 /** 素材删除时需要一并删掉的片段（主轨 + 叠加轨 + 音频轨 + 字幕 link）。 */

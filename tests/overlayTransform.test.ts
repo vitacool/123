@@ -18,7 +18,7 @@ function makeOverlayStore() {
   store.getState().addOverlayTrack()
   const overlayTrackId = store.getState().project.overlayTracks![0].id
   const assetId = store.getState().assets[0].id
-  store.getState().addAssetToTimeline(assetId, overlayTrackId, 0)
+  store.getState().addAssetToTimeline(assetId, { kind: 'track', trackKind: 'overlay', trackId: overlayTrackId, time: 0 })
   const overlayClip = store.getState().project.overlayTracks![0].clips[0]
   store.getState().selectClip(overlayClip.id)
   return { store, clipId: overlayClip.id }

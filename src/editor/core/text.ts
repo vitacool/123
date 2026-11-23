@@ -16,6 +16,22 @@ export const TEXT_MIN_DURATION = 0.2
 export const CAPTION_STROKE_COLOR = '#000000'
 export const CAPTION_STROKE_WIDTH = 0.06
 
+/** 旧草稿没有阴影字段时的归一化默认值：关闭、无模糊、无偏移。 */
+export const TEXT_SHADOW_DEFAULTS = {
+  shadowColor: 'transparent',
+  shadowBlur: 0,
+  shadowOffsetX: 0,
+  shadowOffsetY: 0,
+} as const
+
+/** 面板里打开阴影时使用的一套轻微右下阴影，按 fontSize 比例。 */
+export const TEXT_SHADOW_ENABLED_DEFAULTS = {
+  shadowColor: 'rgba(0, 0, 0, 0.55)',
+  shadowBlur: 0.08,
+  shadowOffsetX: 0.03,
+  shadowOffsetY: 0.05,
+} as const
+
 /** Portrait canvases use a smaller caption so text stays proportionate. */
 export function captionFontSize(aspectRatio: AspectRatioPreset): number {
   return aspectRatio === '9:16' || aspectRatio === '3:4' ? 0.042 : 0.055
@@ -36,6 +52,21 @@ export const CAPTION_STYLE_PRESETS: CaptionStylePreset[] = [
       color: '#ffffff',
       strokeColor: CAPTION_STROKE_COLOR,
       strokeWidth: CAPTION_STROKE_WIDTH,
+      background: 'transparent',
+      bold: false,
+      x: 0.5,
+      y: 0.86,
+      align: 'center',
+    },
+  },
+  {
+    id: 'shadow',
+    label: '白字黑边阴影',
+    style: {
+      color: '#ffffff',
+      strokeColor: CAPTION_STROKE_COLOR,
+      strokeWidth: CAPTION_STROKE_WIDTH,
+      ...TEXT_SHADOW_ENABLED_DEFAULTS,
       background: 'transparent',
       bold: false,
       x: 0.5,
@@ -94,6 +125,10 @@ export function deriveCaptionStyle(clip: TextClip): CaptionStyle {
     color: clip.color,
     strokeColor: clip.strokeColor,
     strokeWidth: clip.strokeWidth,
+    shadowColor: clip.shadowColor,
+    shadowBlur: clip.shadowBlur,
+    shadowOffsetX: clip.shadowOffsetX,
+    shadowOffsetY: clip.shadowOffsetY,
     background: clip.background,
     x: clip.x,
     y: clip.y,
@@ -126,6 +161,10 @@ export function resolveCaptionStyle(
     color: override?.color ?? group?.color ?? clip.color,
     strokeColor: override?.strokeColor ?? group?.strokeColor ?? clip.strokeColor,
     strokeWidth: override?.strokeWidth ?? group?.strokeWidth ?? clip.strokeWidth,
+    shadowColor: override?.shadowColor ?? group?.shadowColor ?? clip.shadowColor,
+    shadowBlur: override?.shadowBlur ?? group?.shadowBlur ?? clip.shadowBlur,
+    shadowOffsetX: override?.shadowOffsetX ?? group?.shadowOffsetX ?? clip.shadowOffsetX,
+    shadowOffsetY: override?.shadowOffsetY ?? group?.shadowOffsetY ?? clip.shadowOffsetY,
     background: override?.background ?? group?.background ?? clip.background,
     x: override?.x ?? group?.x ?? clip.x,
     y: override?.y ?? group?.y ?? clip.y,

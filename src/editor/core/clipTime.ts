@@ -1,4 +1,5 @@
 import type { Clip } from './types'
+import { segmentedTimelineDuration, segmentPlan } from './speed'
 
 /**
  * 片段时间映射的唯一入口。
@@ -33,6 +34,9 @@ export interface TimeMappable {
   speed?: number
   /** 变速时是否保持音调，缺省 true。 */
   keepPitch?: boolean
+  /** 分段变速（2–8 段）；缺省表示用单一 speed。 */
+  speedSegments?: { at: number; speed: number }[]
+  speedCurve?: { at: number; speed: number }[]
 }
 
 /** 静帧片段（定格 / 图片）：显示帧恒定，没有可跳转的源时间。 */
@@ -65,6 +69,12 @@ export function clipTimelineDuration(
   options: ClipTimeOptions = {},
 ): number {
   const span = clip.sourceEnd - clip.sourceStart
+  // 分段变速：时长 = Σ(段源长 / 段速)，不能再用「总长 / 单一速度」。
+  // 显式传了 options.speed 时说明调用方在试探另一个倍率，不走分段。
+  if (options.speed === undefined) {
+    const segmented = segmentedTimelineDuration(clip)
+    if (segmented !== null) return segmented
+  }
   const speed = clipSpeed(clip, options)
   return speed === DEFAULT_SPEED ? span : span / speed
 }
@@ -96,6 +106,28 @@ export function clipSpanSourceAt(
   localTime: number,
   options: ClipTimeOptions = {},
 ): number {
+  // 分段变速：在「段表」上做反查（段内线性），与导出的分段 setpts 表达式互为逆映射。
+  if (options.speed === undefined) {
+    const plan = segmentPlan(clip)
+    if (plan && plan.length >= 2) {
+      const last = plan[plan.length - 1]
+      const total = last.timelineOffset + last.timelineDuration
+      const local = Math.min(Math.max(0, localTime), total)
+      let segment = last
+      for (const candidate of plan) {
+        if (local < candidate.timelineOffset + candidate.timelineDuration) {
+          segment = candidate
+          break
+        }
+      }
+      const inside = Math.max(0, local - segment.timelineOffset)
+      const forward = segment.sourceStart + inside * segment.speed
+      if (clipReversed(clip, options)) {
+        return clip.sourceEnd - (forward - clip.sourceStart)
+      }
+      return forward
+    }
+  }
   const speed = clipSpeed(clip, options)
   const localSource = localTime * speed
   if (clipReversed(clip, options)) return clip.sourceEnd - localSource
@@ -116,8 +148,27 @@ export function clipFrameSourceAt(
 }
 
 /**
+ * 胶片条（时间轴缩略图）的取样区间。
+ *
+ * 定格片段必须用「冻结帧」这一个时间点：它的 `sourceStart` / `sourceEnd`
+ * 编码的是停留时长（两者之差 = 定格持续多久），拿这个区间去取样会得到
+ * 一串往后走的不同帧，缩略条看起来像正常播放而不是定格。
+ * 普通片段则用真实的源区间。
+ */
+export function clipFilmstripRange(clip: TimeMappable): { start: number; end: number } {
+  if (clip.type === 'freeze') {
+    const frame = clipFreezeFrame(clip)
+    // 起止相同：由胶片条服务按「最小跨度」补一个极小窗口，取到的都是同一帧。
+    return { start: frame, end: frame }
+  }
+  return { start: clip.sourceStart, end: clip.sourceEnd }
+}
+
+/**
  * 源时间 → 时间轴局部时间（clipSpanSourceAt 的逆运算）。
  * freeze 片段没有可逆的局部时间（恒定格），返回 0。
+ *
+ * 分段 / 曲线变速也走同一条段表（段内线性），否则倒放 + 分段的往返映射会不自洽。
  */
 export function clipLocalAt(
   clip: TimeMappable,
@@ -125,10 +176,27 @@ export function clipLocalAt(
   options: ClipTimeOptions = {},
 ): number {
   if (isStill(clip)) return 0
-  const speed = clipSpeed(clip, options)
   const raw = clipReversed(clip, options)
     ? clip.sourceEnd - sourceTime
     : sourceTime - clip.sourceStart
+  // 分段变速：在段表的「跨度坐标」上反查（与 clipSpanSourceAt 的镜像口径一致：
+  // 仍然先把源时间折回跨度坐标，再在段表里找段，最后换算成时间轴偏移）。
+  if (options.speed === undefined) {
+    const plan = segmentPlan(clip)
+    if (plan && plan.length >= 2) {
+      const span = Math.max(0, clip.sourceEnd - clip.sourceStart)
+      const target = Math.min(Math.max(0, raw), span)
+      for (const segment of plan) {
+        const offset = segment.sourceStart - clip.sourceStart
+        const length = segment.sourceEnd - segment.sourceStart
+        if (target < offset + length - 1e-9 || segment === plan[plan.length - 1]) {
+          const inside = Math.max(0, target - offset)
+          return segment.timelineOffset + inside / segment.speed
+        }
+      }
+    }
+  }
+  const speed = clipSpeed(clip, options)
   const local = speed === DEFAULT_SPEED ? raw : raw / speed
   return Number.isFinite(local) ? local : 0
 }

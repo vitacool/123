@@ -1,4 +1,4 @@
-import type { Clip, MediaAsset, Project } from './types'
+import type { Clip, MediaAsset, Project, ReverseAssetOrigin } from './types'
 
 /**
  * 素材与片段之间的引用关系判断（素材库、时间轴、预览、导出共用同一套规则）。
@@ -39,8 +39,22 @@ export function isAssetReferenced(project: Project, asset: { id: string; url: st
   return countAssetReferences(project, asset) > 0
 }
 
+/**
+ * 这些工程快照里是否**任意一个**仍在引用该素材。
+ *
+ * 用于素材的「延迟回收」：历史栈里的 past / present / future 都是撤销/重做可能
+ * 回到的状态，只要其中还有引用，就不能 revoke objectURL / 删 blob，否则撤销回来
+ * 的片段会指向已经失效的源。
+ */
+export function assetsReferencedBy(
+  projects: readonly Project[],
+  asset: { id: string; url: string },
+): boolean {
+  return projects.some((project) => isAssetReferenced(project, asset))
+}
+
 /** 未被任何片段引用的素材（用于「清理未使用」）。 */
-export function unusedAssets<T extends { id: string; url: string }>(
+export function unusedAssets<T extends { id: string; url: string; reversedFrom?: ReverseAssetOrigin }>(
   project: Project,
   assets: readonly T[],
 ): T[] {
@@ -58,7 +72,40 @@ export function unusedAssets<T extends { id: string; url: string }>(
       if (clip.link?.sourceUrl) note(clip.link.sourceUrl)
     }
   }
+  // 倒放素材的「原素材」也算已使用：删掉它就没法恢复正放了。
+  // 反复迭代到不动点，覆盖「倒放的倒放」这类链式引用。
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const asset of assets) {
+      if (!asset.reversedFrom) continue
+      const inUse = usedUrls.has(asset.url) || usedAssetIds.has(asset.id)
+      if (!inUse) continue
+      const origin = asset.reversedFrom
+      if (origin.assetId && !usedAssetIds.has(origin.assetId)) {
+        usedAssetIds.add(origin.assetId)
+        changed = true
+      }
+      if (origin.sourceUrl && !usedUrls.has(origin.sourceUrl)) {
+        usedUrls.add(origin.sourceUrl)
+        changed = true
+      }
+    }
+  }
   return assets.filter((asset) => !usedUrls.has(asset.url) && !usedAssetIds.has(asset.id))
+}
+
+/** 素材库里有哪些倒放素材是从这个素材倒放出来的（删原素材后它们无法恢复正放）。 */
+export function reversedDependents<T extends { reversedFrom?: ReverseAssetOrigin }>(
+  assets: readonly T[],
+  asset: { id: string; url: string },
+): T[] {
+  return assets.filter((item) => {
+    const origin = item.reversedFrom
+    if (!origin) return false
+    if (origin.assetId) return origin.assetId === asset.id
+    return origin.sourceUrl === asset.url
+  })
 }
 // ===================== 分类与搜索（素材库三个 Tab / 搜索共用） =====================
 

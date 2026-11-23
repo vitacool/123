@@ -1,9 +1,16 @@
 import type { FFmpeg, LogEvent, ProgressEvent } from '@ffmpeg/ffmpeg'
 import {
+  applyExportRangeTrim,
+  applyTextOverlayGraph,
+  buildAudioExportArgs,
+  buildAudioExportPlan,
   buildExportArgs,
   buildExportPlan,
+  exportInputLayout,
   getExportCrf,
+  type AudioExportFormat,
 } from '../core/exportPlan'
+import type { ExportRange } from '../core/exportRange'
 import { drawTextClip } from '../core/textRender'
 import { buildCoverJpeg, buildCoverPng, coverFrameSeconds } from '../core/cover'
 import { animationFrameCount, animatedClips, bakeAnimatedClip, hasAnyAnimation } from '../core/animationExport'
@@ -14,22 +21,48 @@ import {
   hasAnyTextAnimation,
   resolveTextOverrides,
 } from '../core/textAnimation'
-import { renderAnimatedClipToFile } from './animationRenderer'
+import {
+  createAnimationSourcePool,
+  renderAnimatedClipToFile,
+  type AnimationSourcePool,
+} from './animationRenderer'
+import { ExportResources, isAudioRelatedFailure } from './exportResources'
+import {
+  PROBE_OUTPUT,
+  acquireRuntime,
+  createAbortError,
+  execOnRuntime,
+  fallbackToSingleThread,
+  getRuntimeCapabilities,
+  isGenerationCurrent,
+  isMp3EncoderAvailable,
+  probeRuntimeForAudio,
+  probeRuntimeForExport,
+  terminateRuntime,
+  type RuntimeHandle,
+  type RuntimeMode,
+} from './ffmpegRuntime'
+
+/**
+ * 运行时相关能力的对外入口仍然从这里导出（历史调用点不用改）：
+ * 真正的实现在 `services/ffmpegRuntime.ts`（队列 + 代次 + 超时/取消）。
+ */
+export {
+  configureFFmpegAssets,
+  getRuntimeCapabilities,
+  isMp3EncoderAvailable,
+  loadExecRuntime,
+  loadFFmpegRuntime,
+  terminateFFmpegRuntime,
+} from './ffmpegRuntime'
+export type { RuntimeCapabilities, RuntimeMode } from './ffmpegRuntime'
 import { clipTimelineDuration } from '../core/clipTime'
+import { drawMaskShape } from '../core/mask'
+import { computeClipGeometry } from '../core/geometry'
 import { findSegmentAt } from '../core/timeline'
 import { resolveCaptionStyle, textClipDuration } from '../core/text'
 import { buildTextOverlayTimeline } from '../core/textOverlay'
 import type { CaptionStyle, Clip, Project, SourceInfo, TextClip } from '../core/types'
-
-export type RuntimeMode = 'multi-thread' | 'single-thread'
-
-export interface RuntimeCapabilities {
-  crossOriginIsolated: boolean
-  hasSharedArrayBuffer: boolean
-  multiThread: boolean
-  forcedSingleThread?: boolean
-  reason?: string
-}
 
 export interface ExportResult {
   blob: Blob
@@ -42,6 +75,9 @@ export interface ExportResult {
   /** mode=separate 时单独产出的封面 JPEG（未设置封面或 first-frame 模式为 undefined）。 */
   cover?: Blob
 }
+
+/** 单个动画字幕分块编码的硬超时（2 分钟）：超时由运行时层直接 terminate 重启。 */
+const ANIMATED_TEXT_CHUNK_TIMEOUT_MS = 120_000
 
 /** 导出阶段：加载核心 → 写入素材 → 编码 → 收尾。 */
 export type ExportStage =
@@ -62,68 +98,24 @@ export interface ExportCallbacks {
 export interface ExportOptions {
   /** 取消导出：abort 后终止 wasm 运行时并抛出 AbortError。 */
   signal?: AbortSignal
+  /** 默认 mp4；m4a / mp3 为仅音频导出。 */
+  format?: ExportFormat
+  /** 只导出该时间区间（入点 / 出点，秒）；缺省导出整条时间轴。 */
+  range?: ExportRange | null
 }
 
-let forceSingleThread = false
-let forceSingleReason: string | undefined
+/** 导出封装格式。 */
+export type ExportFormat = 'mp4' | AudioExportFormat
 
-export function getRuntimeCapabilities(): RuntimeCapabilities {
-  const crossOriginIsolated =
-    typeof window !== 'undefined' && window.crossOriginIsolated === true
-  const hasSharedArrayBuffer = typeof SharedArrayBuffer !== 'undefined'
-  const multiThread = crossOriginIsolated && hasSharedArrayBuffer && !forceSingleThread
-  let reason: string | undefined
-  if (forceSingleThread) {
-    reason = forceSingleReason
-  } else if (!hasSharedArrayBuffer) {
-    reason = '浏览器未提供 SharedArrayBuffer，自动使用单线程 FFmpeg。'
-  } else if (!crossOriginIsolated) {
-    reason = '页面缺少 COOP/COEP 跨域隔离响应头，自动使用单线程 FFmpeg。'
-  }
-  return {
-    crossOriginIsolated,
-    hasSharedArrayBuffer,
-    multiThread,
-    forcedSingleThread: forceSingleThread,
-    reason,
-  }
-}
-
-let instance: FFmpeg | null = null
-let loadedMode: RuntimeMode | null = null
-let modeWarning: string | undefined
-let loading: Promise<{ ffmpeg: FFmpeg; mode: RuntimeMode; warning?: string }> | null = null
-let ffmpegAssetBase: string | undefined
-
-/**
- * 当前进行中导出的取消信号。放在模块级，`ffmpeg.on('progress')` 回调每帧据此
- * 判断是否已被取消；导出结束时（含取消路径）必须清空，避免影响下一次导出。
- */
 let activeExportSignal: AbortSignal | null = null
 
-const ABORT_ERROR_MESSAGE = '已取消'
-
-/** 运行时「代次」：每次 terminate 递增，用来识别作废的异步加载结果。 */
-let runtimeGeneration = 0
-
-function createAbortError(): DOMException {
-  return new DOMException(ABORT_ERROR_MESSAGE, 'AbortError')
-}
-
-function isAbortError(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    (error as { name?: string }).name === 'AbortError'
-  )
-}
-
 /**
- * 取消导出：先终止 wasm 运行时（挂起的 exec 会立即 reject，worker 也就地销毁），
- * 再抛出 AbortError 让调用方走取消分支。
+ * 取消导出：立刻终止共享运行时（它是唯一能打断卡住的 wasm exec 的办法）。
+ * 代次会 +1，正在跑的倒放 / ASR 会收到明确的「运行时已重启，请重试」并自动重做一次，
+ * 而不是看到一个不明失败。
  */
 function abortExport(): never {
-  terminateRuntime()
+  terminateRuntime('导出取消')
   throw createAbortError()
 }
 
@@ -135,7 +127,7 @@ function throwIfAborted(signal: AbortSignal | null): void {
 
 /**
  * 让不可中断的异步步骤（加载核心、写文件、读结果）也能被 signal 打断：
- * 取消时立即以 AbortError reject，并终止运行时。
+ * 取消时立即以 AbortError reject，并终止运行时（worker 卡住时只能这样）。
  */
 function raceWithAbort<T>(task: Promise<T>, signal: AbortSignal | null): Promise<T> {
   if (!signal) return task
@@ -144,7 +136,7 @@ function raceWithAbort<T>(task: Promise<T>, signal: AbortSignal | null): Promise
   }
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => {
-      terminateRuntime()
+      terminateRuntime('导出取消')
       reject(createAbortError())
     }
     signal.addEventListener('abort', onAbort, { once: true })
@@ -161,175 +153,6 @@ function raceWithAbort<T>(task: Promise<T>, signal: AbortSignal | null): Promise
   })
 }
 
-/** Point the exporter at a host-served directory containing `core/` and `core-mt/`. */
-export function configureFFmpegAssets(baseUrl?: string): void {
-  ffmpegAssetBase = baseUrl?.trim() ? baseUrl.trim() : undefined
-}
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-const PROBE_TIMEOUT_MS = 12_000
-const PROBE_OUTPUT = 'framecut-selftest.mp4'
-
-const coreUrl = (path: string): string => {
-  const defaultBase = `${(import.meta.env.BASE_URL || '/').replace(/\/?$/, '/')}ffmpeg/`
-  const base = ffmpegAssetBase ?? defaultBase
-  const normalizedBase = base.endsWith('/') ? base : `${base}/`
-  return new URL(`${normalizedBase}${path}`, window.location.href).href
-}
-
-async function loadCore(mode: RuntimeMode): Promise<FFmpeg> {
-  const { FFmpeg: FFmpegClass } = await import('@ffmpeg/ffmpeg')
-  const ffmpeg = new FFmpegClass()
-  if (mode === 'multi-thread') {
-    await ffmpeg.load({
-      coreURL: coreUrl('core-mt/ffmpeg-core.js'),
-      wasmURL: coreUrl('core-mt/ffmpeg-core.wasm'),
-      workerURL: coreUrl('core-mt/ffmpeg-core.worker.js'),
-    })
-  } else {
-    await ffmpeg.load({
-      coreURL: coreUrl('core/ffmpeg-core.js'),
-      wasmURL: coreUrl('core/ffmpeg-core.wasm'),
-    })
-  }
-  return ffmpeg
-}
-
-async function getFFmpeg(): Promise<{ ffmpeg: FFmpeg; mode: RuntimeMode; warning?: string }> {
-  if (instance && loadedMode) {
-    return { ffmpeg: instance, mode: loadedMode, warning: modeWarning }
-  }
-  if (loading) return loading
-
-  // 加载期间可能被取消（terminateRuntime 会把 generation +1）：
-  // 这一代加载出来的运行时必须丢弃并销毁，否则会留下没人引用的孤儿 worker。
-  const generation = runtimeGeneration
-  const adopt = (ffmpeg: FFmpeg): FFmpeg => {
-    if (generation === runtimeGeneration) return ffmpeg
-    try {
-      ffmpeg.terminate()
-    } catch {
-      // 已经被停掉了。
-    }
-    throw createAbortError()
-  }
-
-  const task = (async () => {
-    const capabilities = getRuntimeCapabilities()
-    if (capabilities.multiThread) {
-      try {
-        const ffmpeg = adopt(await loadCore('multi-thread'))
-        instance = ffmpeg
-        loadedMode = 'multi-thread'
-        modeWarning = undefined
-        return { ffmpeg, mode: loadedMode }
-      } catch (error) {
-        // 取消不能被当作「多线程加载失败」而降级重试。
-        if (isAbortError(error)) throw error
-        forceSingleThread = true
-        forceSingleReason = '多线程核心加载失败，已自动降级为单线程 FFmpeg。'
-      }
-    }
-
-    const ffmpeg = adopt(await loadCore('single-thread'))
-    instance = ffmpeg
-    loadedMode = 'single-thread'
-    modeWarning =
-      (forceSingleThread ? forceSingleReason : undefined) ??
-      capabilities.reason ??
-      '多线程核心不可用，已降级为单线程 FFmpeg，导出速度会较慢。'
-    return { ffmpeg, mode: loadedMode, warning: modeWarning }
-  })()
-  loading = task
-
-  try {
-    return await task
-  } catch (error) {
-    // 只清理「这一代」的状态，避免把后续新一代加载的实例清掉。
-    if (generation === runtimeGeneration) {
-      instance = null
-      loadedMode = null
-      modeWarning = undefined
-    }
-    throw error
-  } finally {
-    if (loading === task) loading = null
-  }
-}
-
-/** Shared FFmpeg runtime for non-export tasks such as HEVC import proxies. */
-export async function loadFFmpegRuntime(): Promise<FFmpeg> {
-  const { ffmpeg, warning } = await getFFmpeg()
-  if (warning) console.info('[FrameCut]', warning)
-  return ffmpeg
-}
-
-/**
- * 释放共享的 FFmpeg 运行时（停 worker / wasm）。
- * 宿主卸载编辑器（`api.destroy()`）时调用，避免留下占用内存的孤儿 worker。
- */
-export function terminateFFmpegRuntime(): void {
-  terminateRuntime()
-}
-
-function terminateRuntime(): void {
-  // 作废进行中的加载：它们完成时不会再把实例装回去（见 getFFmpeg 的 adopt）。
-  runtimeGeneration += 1
-  if (instance) {
-    try {
-      instance.terminate()
-    } catch {
-      // The worker may already be gone.
-    }
-  }
-  instance = null
-  loadedMode = null
-  modeWarning = undefined
-  loading = null
-}
-
-async function fallbackToSingleThread(
-  reason: string,
-): Promise<{ ffmpeg: FFmpeg; mode: RuntimeMode; warning?: string }> {
-  forceSingleThread = true
-  forceSingleReason = reason
-  terminateRuntime()
-  return getFFmpeg()
-}
-
-async function probeMultiThreadRuntime(
-  ffmpeg: FFmpeg,
-  inputName: string,
-): Promise<'ok' | 'failed' | 'timeout'> {
-  const probe = ffmpeg
-    .exec([
-      '-hide_banner',
-      '-i',
-      inputName,
-      '-t',
-      '0.25',
-      '-map',
-      '0:v:0',
-      '-map',
-      '0:a:0?',
-      '-c:v',
-      'libx264',
-      '-preset',
-      'ultrafast',
-      '-pix_fmt',
-      'yuv420p',
-      '-c:a',
-      'aac',
-      '-shortest',
-      PROBE_OUTPUT,
-    ])
-    .then((code): 'ok' | 'failed' => (code === 0 ? 'ok' : 'failed'))
-    .catch((): 'failed' => 'failed')
-  return Promise.race([
-    probe,
-    sleep(PROBE_TIMEOUT_MS).then(() => 'timeout' as const),
-  ])
-}
 
 async function readSource(source: SourceInfo): Promise<Uint8Array> {
   if (source.file) {
@@ -444,10 +267,11 @@ async function renderAnimatedTextOverlayLayer(
   totalDuration: number,
   fps: number,
   inputIndex: number,
-  ffmpeg: FFmpeg,
+  runtime: RuntimeHandle,
   signal: AbortSignal | null,
   onStatus?: (message: string) => void,
 ): Promise<TextOverlayLayer | null> {
+  const ffmpeg = runtime.ffmpeg
   const intervals = buildTextOverlayTimeline(project, { duration: totalDuration })
   if (intervals.length === 0) return null
   const segments = buildTextOverlayRenderSegments(intervals, totalDuration, fps)
@@ -506,10 +330,10 @@ async function renderAnimatedTextOverlayLayer(
 
   const encodeChunk = async (args: string[], chunkFile: string): Promise<void> => {
     throwIfAborted(signal)
-    const code = await raceWithAbort(
-      ffmpeg.exec(['-hide_banner', '-y', ...args, chunkFile]),
+    const code = await execOnRuntime(runtime, ['-hide_banner', '-y', ...args, chunkFile], {
       signal,
-    )
+      timeoutMs: ANIMATED_TEXT_CHUNK_TIMEOUT_MS,
+    })
     if (code !== 0) {
       throw new Error(`动画字幕中间片段编码失败（退出码 ${code}）。`)
     }
@@ -657,50 +481,50 @@ async function renderAnimatedTextOverlayLayer(
 }
 
 /**
- * Appends a single text overlay to the video filter graph. The text layer is
- * one RGBA image-sequence input, resampled to the project fps and overlaid once
- * at 0:0 — instead of one input + one overlay per clip.
- */
-function applyTextOverlayGraph(
-  plan: ReturnType<typeof buildExportPlan>,
-  inputIndex: number,
-): void {
-  const original = plan.graph
-  const marker = `[${plan.videoLabel}]`
-  const at = original.lastIndexOf(marker)
-  if (at < 0) return
-  const base = `${plan.videoLabel}_textbase`
-  const graph =
-    `${original.slice(0, at)}[${base}]${original.slice(at + marker.length)}` +
-    `;\n[${inputIndex}:v]format=rgba,fps=${plan.fps},setpts=PTS-STARTPTS[textlayer]` +
-    `;\n[${base}][textlayer]overlay=0:0:eof_action=pass:format=auto[${plan.videoLabel}]`
-  plan.graph = graph
-}
-
-/**
- * 动画片段预处理：逐帧渲染 → 编码中间视频 → 把片段的 sourceUrl 换成中间文件。
+ * 动画片段预处理：逐帧渲染 → 分块编码中间视频 → 把片段的 sourceUrl 换成中间文件。
  *
- * 逐片段独立进行，渲染完一个片段立刻删除它的帧文件（renderer 内部负责），
+ * 逐片段独立进行，渲染完一个片段的帧文件立刻删除（renderer 内部按块删），
  * 只把最终的 File 留在内存里作为导出输入。
+ *
+ * 源文件「同一源只写一份」：整个流程共用同一个 {@link AnimationSourcePool}，结束后统一删除。
  *
  * 取舍（重要）：几何/不透明度/调色/动画全部烘焙进中间视频，因此 exportPlan 不需要任何改动；
  * 代价是该片段多了一次 H.264 重编码（crf 18 / veryfast）。
  * 叠加轨片段用「背景烘焙」代替真透明（libx264 的 yuva420p 兼容性太差）：
  * 该片段下方如果还有动态画面，中间视频里的背景会盖住它。
  */
-async function prepareAnimatedProject(args: {
+async function prepareAnimatedProject(
+  args: PrepareAnimatedProjectArgs,
+): Promise<{ project: Project; sources: SourceInfo[]; urls: string[] } | null> {
+  const sourcePool = createAnimationSourcePool()
+  try {
+    return await prepareAnimatedProjectInner(args, sourcePool)
+  } finally {
+    await sourcePool.dispose(args.runtime)
+  }
+}
+
+interface PrepareAnimatedProjectArgs {
   project: Project
   assets: SourceInfo[]
   width: number
   height: number
   fps: number
-  ffmpeg: FFmpeg
+  /** 导出持有的运行时句柄（带代次）：渲染器的 exec 走它的队列，超时/取消会重启。 */
+  runtime: RuntimeHandle
   signal: AbortSignal | null
+  /** 清理器：中间视频的 objectURL 一创建就登记，中途失败/取消也不会泄漏。 */
+  resources: ExportResources
   onStage?: (stage: ExportStage) => void
   onStatus?: (message: string) => void
   onProgress?: (progress: number) => void
-}): Promise<{ project: Project; sources: SourceInfo[]; urls: string[] } | null> {
-  const { project, assets, width, height, fps, ffmpeg, signal, onStage, onStatus, onProgress } = args
+}
+
+async function prepareAnimatedProjectInner(
+  args: PrepareAnimatedProjectArgs,
+  sourcePool: AnimationSourcePool,
+): Promise<{ project: Project; sources: SourceInfo[]; urls: string[] } | null> {
+  const { project, assets, width, height, fps, runtime, signal, resources, onStage, onStatus, onProgress } = args
   const refs = animatedClips(project)
   if (refs.length === 0) return null
   onStage?.('rendering-animations')
@@ -738,7 +562,8 @@ async function prepareAnimatedProject(args: {
       height,
       fps,
       index,
-      ffmpeg,
+      runtime,
+      sources: sourcePool,
       signal,
       underlay,
       onFrame: (done) => {
@@ -747,6 +572,8 @@ async function prepareAnimatedProject(args: {
       },
     })
     const url = URL.createObjectURL(file)
+    // 立刻登记：即使下一轮渲染抛错/取消，这个 URL 也会在 finally 里被回收。
+    resources.registerUrl(url)
     urls.push(url)
     const duration = clipTimelineDuration(ref.clip)
     const source: SourceInfo = {
@@ -786,11 +613,13 @@ async function prepareAnimatedProject(args: {
 }
 
 /**
- * 把封面 PNG 作为「额外一路输入」接到 [outv] 上，只覆盖首帧。
- * 与文本层一致：先改名最终标签，再追加 overlay，因此对 contiguous / gapped / overlay
- * 三条构建路径同时生效，且不影响音频与总时长（eof_action=pass，图案 EOF 后直接透传底图）。
+ * 把封面 PNG 作为「额外一路输入」接到 `plan.videoLabel` 上，只覆盖首帧。
+ *
+ * 必须**在区间 trim 之后**调用：此时 overlay 的 t=0 就是导出段的第一帧，
+ * 所以「区间 3–8 秒 + 首帧封面」导出的第一帧仍然是封面（而不是被 trim 掉）。
+ * 与文本层一致：先改名最终标签，再追加 overlay，因此对三条构建路径同时生效。
  */
-function applyCoverOverlayGraph(
+export function applyCoverOverlayGraph(
   plan: ReturnType<typeof buildExportPlan>,
   inputIndex: number,
 ): void {
@@ -808,7 +637,78 @@ function applyCoverOverlayGraph(
 [${base}][coverpng]overlay=0:0:eof_action=pass:format=auto:enable='between(t,0,${hold.toFixed(6)})'[${plan.videoLabel}]`
 }
 
-function injectTextInputArgs(args: string[], layer: TextOverlayLayer | null): string[] {
+/** 工程里所有带蒙版、且会出现在画面上的片段（主轨 + 叠加轨，按出现顺序去重）。 */
+export function maskedClips(project: Project): Clip[] {
+  const out: Clip[] = []
+  for (const clip of project.clips) if (clip.mask) out.push(clip)
+  for (const track of project.overlayTracks ?? []) {
+    for (const clip of track.clips) if (clip.mask) out.push(clip)
+  }
+  return out
+}
+
+/**
+ * 把每个带蒙版片段的蒙版渲染成灰度 PNG（尺寸 = 该片段的裁切尺寸），
+ * 写进 FFmpeg 虚拟文件系统，供滤镜链里的 alphamerge 使用。
+ * 与预览共用 core/mask.drawMaskShape，保证形状/羽化逐像素一致。
+ */
+/** 蒙版 PNG 在共享 MEMFS 里的文件名（清理时也用它，避免两处拼串不一致）。 */
+export function maskFileName(clipId: string): string {
+  return `framecut-mask-${clipId}.png`
+}
+
+async function writeMaskFiles(
+  ffmpeg: FFmpeg,
+  clips: readonly Clip[],
+  sources: readonly SourceInfo[],
+  width: number,
+  height: number,
+  /** 每写入一个蒙版就登记，保证中途失败时已写的也能被清理。 */
+  register?: (file: string) => void,
+): Promise<Map<string, string>> {
+  const files = new Map<string, string>()
+  for (const clip of clips) {
+    if (!clip.mask) continue
+    const source = sources.find((item) => item.url === clip.sourceUrl)
+    if (!source) continue
+    const geometry = computeClipGeometry(clip, source, width, height)
+    const maskWidth = Math.max(1, Math.round(geometry.source.w))
+    const maskHeight = Math.max(1, Math.round(geometry.source.h))
+    const canvas = document.createElement('canvas')
+    canvas.width = maskWidth
+    canvas.height = maskHeight
+    const ctx = canvas.getContext('2d')
+    if (!ctx) continue
+    drawMaskShape(ctx, maskWidth, maskHeight, clip.mask, (w, h) => {
+      const off = document.createElement('canvas')
+      off.width = Math.max(1, Math.round(w))
+      off.height = Math.max(1, Math.round(h))
+      const inner = off.getContext('2d')
+      return inner ? { canvas: off, ctx: inner } : null
+    })
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob((result) => resolve(result), 'image/png'),
+    )
+    if (!blob) continue
+    const file = maskFileName(clip.id)
+    await ffmpeg.writeFile(file, new Uint8Array(await blob.arrayBuffer()))
+    register?.(file)
+    files.set(clip.id, file)
+  }
+  return files
+}
+
+/** 把蒙版 PNG 作为额外输入插到文字层之前（编号随之整体后移）。 */
+export function injectMaskInputArgs(args: string[], files: readonly string[]): string[] {
+  if (files.length === 0) return args
+  const at = args.indexOf('-filter_complex_script')
+  if (at < 0) return args
+  const injected: string[] = []
+  for (const file of files) injected.push('-loop', '1', '-i', file)
+  return [...args.slice(0, at), ...injected, ...args.slice(at)]
+}
+
+export function injectTextInputArgs(args: string[], layer: TextOverlayLayer | null): string[] {
   if (!layer) return args
   const at = args.indexOf('-filter_complex_script')
   if (at < 0) return args
@@ -828,7 +728,7 @@ function injectTextInputArgs(args: string[], layer: TextOverlayLayer | null): st
  * 把封面 PNG 追加为最后一路输入（在文本层输入之后，因为封面盖在字幕之上）。
  * 与文本层同样插在 `-filter_complex_script` 之前，保证输入序号与 graph 里的一致。
  */
-function injectCoverInputArgs(args: string[], coverFile: string | null): string[] {
+export function injectCoverInputArgs(args: string[], coverFile: string | null): string[] {
   if (!coverFile) return args
   const at = args.indexOf('-filter_complex_script')
   if (at < 0) return args
@@ -868,20 +768,26 @@ function logTail(lines: string[]): string {
   return lines.slice(-10).join('\n')
 }
 
+/**
+ * 在**导出自己持有的运行时句柄**上执行一次编码命令（不能重新 acquire：那可能拿到
+ * 新实例，之前写入的 MEMFS 文件就不在了）。超时/取消由运行时层统一处理（立即重启）。
+ */
 async function runExportCommand(
-  ffmpeg: FFmpeg,
+  runtime: RuntimeHandle,
   args: string[],
   outputName: string,
   lines: string[],
   signal: AbortSignal | null = null,
 ): Promise<void> {
-  try {
-    await ffmpeg.deleteFile(outputName)
-  } catch {
-    // Output may not exist yet.
+  if (isGenerationCurrent(runtime.generation)) {
+    try {
+      await runtime.ffmpeg.deleteFile(outputName)
+    } catch {
+      // Output may not exist yet.
+    }
   }
   throwIfAborted(signal)
-  const code = await raceWithAbort(ffmpeg.exec(args), signal)
+  const code = await execOnRuntime(runtime, args, { signal })
   if (code !== 0) {
     throw new Error(`FFmpeg 合成失败（退出码 ${code}）。\n${logTail(lines)}`)
   }
@@ -905,284 +811,386 @@ export async function exportProject(
     : (assetsOrCallbacks ?? {})
   const { onStatus, onProgress, onLog, onStage } = resolvedCallbacks
   const signal = options.signal ?? null
+  const format = options.format ?? 'mp4'
+  const audioOnly = format !== 'mp4'
+  // 区间导出：plan 里记录入/出点（totalDuration 变成区间时长），
+  // trim 在文字 / 封面层合成之后由 applyExportRangeTrim 追加。
+  const range = options.range ?? null
   activeExportSignal = signal
-  throwIfAborted(signal)
 
-  const assetByUrl = new Map(assets.map((asset) => [asset.url, asset]))
-  const primary = assetByUrl.get(source.url) ?? source
-  const sources: SourceInfo[] = [primary]
-  for (const asset of assets) {
-    if (asset.url !== primary.url) sources.push(asset)
-  }
-
-  let plan = buildExportPlan(project, sources, true)
-  const sourceByUrl = new Map(sources.map((item) => [item.url, item]))
-  const resolvedInputs: ResolvedInput[] = []
-  const seenFiles = new Set<string>()
-  for (const input of plan.inputs) {
-    if (seenFiles.has(input.file)) continue
-    seenFiles.add(input.file)
-    resolvedInputs.push({
-      file: input.file,
-      source: sourceByUrl.get(input.url) ?? primary,
-    })
-  }
-
-  const capabilities = getRuntimeCapabilities()
-  const renderTextLayer = async (
-    instance: FFmpeg,
-    signal: AbortSignal | null,
-  ): Promise<TextOverlayLayer | null> => {
-    // 无文本动画：完全走原有「按状态变化生成 PNG」路径，零改动。
-    if (!hasAnyTextAnimation(project)) {
-      return renderTextOverlayLayer(
-        project,
-        plan.width,
-        plan.height,
-        plan.totalDuration,
-        plan.inputs.length,
-      )
-    }
-    return renderAnimatedTextOverlayLayer(
-      project,
-      plan.width,
-      plan.height,
-      plan.totalDuration,
-      plan.fps,
-      plan.inputs.length,
-      instance,
-      signal,
-      onStatus,
-    )
-  }
-  onStage?.('loading-core')
-  onStatus?.(capabilities.multiThread ? '正在加载多线程 FFmpeg…' : '正在加载 FFmpeg…')
-  // 封面：first-frame 模式需要把封面渲染成 PNG 作为额外输入；separate 模式只在收尾时出图。
-  const cover = project.cover
-  let coverPng: Uint8Array | null = null
-  if (cover && cover.mode === 'first-frame') {
-    coverPng = await buildCoverPng(plan.width, plan.height, cover)
-  }
-  const coverFileName = 'framecut-cover.png'
-  // 多线程降级后输入要重新写入，封面 PNG 也按需重算。
-  const renderCoverPng = async (): Promise<Uint8Array | null> =>
-    cover && cover.mode === 'first-frame' ? buildCoverPng(plan.width, plan.height, cover) : null
-
-  let loaded = await raceWithAbort(getFFmpeg(), signal)
-  throwIfAborted(signal)
-  let ffmpeg = loaded.ffmpeg
-  let mode = loaded.mode
-  let warning = loaded.warning
-
-  // 动画片段预处理：只对带动画的片段生效；没有动画时这一步完全跳过（导出路径与原来一致）。
-  const animationUrls: string[] = []
-  if (hasAnyAnimation(project)) {
-    // 关键：动画渲染要在**单线程**核心上做。多线程 core 在本环境的 exec 会挂起
-    // （导出流程本来也会在自检后降级），而这一步发生在自检之前，若沿用多线程实例
-    // 会卡死在图像序列编码上。这里先主动降级，代价是本次导出使用单线程编码。
-    if (mode === 'multi-thread') {
-      onStatus?.('动画片段需要单线程 FFmpeg 核心，正在切换…')
-      loaded = await fallbackToSingleThread('动画片段渲染需要单线程 FFmpeg 核心。')
-      ffmpeg = loaded.ffmpeg
-      mode = loaded.mode
-      warning = loaded.warning
-    }
-    const prepared = await prepareAnimatedProject({
-      project,
-      assets: [...assets],
-      width: plan.width,
-      height: plan.height,
-      fps: plan.fps,
-      ffmpeg,
-      signal,
-      onStage,
-      onStatus,
-      onProgress,
-    })
-    if (prepared) {
-      animationUrls.push(...prepared.urls)
-      project = prepared.project
-      sources.push(...prepared.sources)
-      plan = buildExportPlan(project, sources, true)
-      sourceByUrl.clear()
-      for (const item of sources) sourceByUrl.set(item.url, item)
-      resolvedInputs.length = 0
-      seenFiles.clear()
-      for (const input of plan.inputs) {
-        if (seenFiles.has(input.file)) continue
-        seenFiles.add(input.file)
-        resolvedInputs.push({
-          file: input.file,
-          source: sourceByUrl.get(input.url) ?? primary,
-        })
-      }
-    }
-  }
-  // 动画字幕的中间片段同样需要 exec；本环境多线程 core 的 exec 会挂起，
-  // 因此在生成逐帧字幕前主动切到单线程（与视觉动画预处理一致）。
-  if (hasAnyTextAnimation(project) && mode === 'multi-thread') {
-    onStatus?.('动画字幕需要单线程 FFmpeg 核心，正在切换…')
-    loaded = await fallbackToSingleThread('动画字幕渲染需要单线程 FFmpeg 核心。')
-    ffmpeg = loaded.ffmpeg
-    mode = loaded.mode
-    warning = loaded.warning
-  }
-  let textLayer = await renderTextLayer(ffmpeg, signal)
-  // 封面 overlay 的输入序号：媒体输入 + 文本层（若存在）之后。
-  const coverInputIndex = plan.inputs.length + (textLayer ? 1 : 0)
-
-  const outputName = 'framecut-output.mp4'
+  // 从这一刻起就可能创建 objectURL / 往共享 MEMFS 写文件，失败或取消都必须回收。
+  const resources = new ExportResources()
+  /** 清理时用「当前」实例：多线程降级后旧 worker 的文件系统已经不存在。 */
+  let cleanupTarget: FFmpeg | null = null
+  const outputExtension = format === 'mp4' ? 'mp4' : format
+  const outputName = `framecut-output.${outputExtension}`
   const graphName = 'framecut-filtergraph.txt'
   const lines: string[] = []
   let attachedFfmpeg: FFmpeg | null = null
   let logHandler: ((event: LogEvent) => void) | null = null
   let progressHandler: ((event: ProgressEvent) => void) | null = null
-
+  // 名字确定的产物先登记（删不存在的文件是安全的），避免某条分支忘了清理。
+  resources.registerFiles([graphName, outputName, PROBE_OUTPUT])
   try {
-    onStage?.('writing-inputs')
-    onStatus?.(
-      resolvedInputs.length > 1
-        ? `正在读取 ${resolvedInputs.length} 个素材到本地内存…`
-        : '正在读取素材到本地内存…',
-    )
-    await writeInputs(ffmpeg, resolvedInputs, onStatus, onProgress, signal)
-    await writeTextOverlayLayer(ffmpeg, textLayer)
-    if (coverPng) await ffmpeg.writeFile(coverFileName, coverPng)
+    throwIfAborted(signal)
 
-    const probeInput = resolvedInputs[0]?.file
-    if (mode === 'multi-thread' && probeInput) {
-      onStatus?.('正在自检多线程 FFmpeg 核心…')
-      const probe = await raceWithAbort(
-        probeMultiThreadRuntime(ffmpeg, probeInput),
+    const assetByUrl = new Map(assets.map((asset) => [asset.url, asset]))
+    const primary = assetByUrl.get(source.url) ?? source
+    const sources: SourceInfo[] = [primary]
+    for (const asset of assets) {
+      if (asset.url !== primary.url) sources.push(asset)
+    }
+
+    let plan = audioOnly
+      ? buildAudioExportPlan(project, sources, true, { range })
+      : buildExportPlan(project, sources, true, { range })
+    if (audioOnly && !plan.audioLabel) {
+      throw new Error('当前工程没有可导出的音频。')
+    }
+    // MP3 依赖 libmp3lame：先确认核心支持，避免生成一个坏文件。
+    if (format === 'mp3' && !(await isMp3EncoderAvailable())) {
+      throw new Error('当前 FFmpeg 核心不支持 MP3 编码，请改用 M4A 导出。')
+    }
+    const sourceByUrl = new Map(sources.map((item) => [item.url, item]))
+    const resolvedInputs: ResolvedInput[] = []
+    const seenFiles = new Set<string>()
+    for (const input of plan.inputs) {
+      if (seenFiles.has(input.file)) continue
+      seenFiles.add(input.file)
+      resolvedInputs.push({
+        file: input.file,
+        source: sourceByUrl.get(input.url) ?? primary,
+      })
+    }
+    // 输入副本一确定就登记：即使 writeInputs 中途失败/取消，已写入的那几个也会被删掉。
+    resources.registerFiles(resolvedInputs.map((input) => input.file))
+
+    const capabilities = getRuntimeCapabilities()
+    const renderTextLayer = async (
+      runtime: RuntimeHandle,
+      signal: AbortSignal | null,
+      inputIndex: number,
+    ): Promise<TextOverlayLayer | null> => {
+      // 文字 PNG 层始终按**完整时间轴**生成：区间导出时它在最终 trim 之前合成，
+      // 否则字幕会被区间起点平移，与预览的同一段对不上。
+      const textTimelineDuration = plan.fullDuration ?? plan.totalDuration
+      // 无文本动画：完全走原有「按状态变化生成 PNG」路径，零改动。
+      if (!hasAnyTextAnimation(project)) {
+        return renderTextOverlayLayer(
+          project,
+          plan.width,
+          plan.height,
+          textTimelineDuration,
+          inputIndex,
+        )
+      }
+      return renderAnimatedTextOverlayLayer(
+        project,
+        plan.width,
+        plan.height,
+        textTimelineDuration,
+        plan.fps,
+        // 必须用调用方算好的文字层输入序号（媒体 + 蒙版之后）。这里原先传的是
+        // plan.inputs.length（只是媒体输入数），有蒙版时 [N:v] 会指到蒙版 PNG。
+        inputIndex,
+        runtime,
         signal,
+        onStatus,
       )
-      if (probe !== 'ok') {
-        const reason =
-          probe === 'timeout'
-            ? '多线程 FFmpeg 核心自检超时，已自动降级为单线程导出。'
-            : '多线程 FFmpeg 核心未能完成自检，已自动降级为单线程导出。'
-        loaded = await fallbackToSingleThread(reason)
+    }
+    onStage?.('loading-core')
+    onStatus?.(capabilities.multiThread ? '正在加载多线程 FFmpeg…' : '正在加载 FFmpeg…')
+    // 封面：first-frame 模式需要把封面渲染成 PNG 作为额外输入；separate 模式只在收尾时出图。
+    const cover = audioOnly ? undefined : project.cover
+    let coverPng: Uint8Array | null = null
+    if (cover && cover.mode === 'first-frame') {
+      coverPng = await buildCoverPng(plan.width, plan.height, cover)
+    }
+    const coverFileName = 'framecut-cover.png'
+    resources.registerFile(coverFileName)
+    // 多线程降级后输入要重新写入，封面 PNG 也按需重算。
+    const renderCoverPng = async (): Promise<Uint8Array | null> =>
+      cover && cover.mode === 'first-frame' ? buildCoverPng(plan.width, plan.height, cover) : null
+
+    let loaded = await raceWithAbort(acquireRuntime({ signal }), signal)
+    throwIfAborted(signal)
+    let ffmpeg = loaded.ffmpeg
+    cleanupTarget = ffmpeg
+    let mode = loaded.mode
+    let warning = loaded.warning
+
+    // 动画片段预处理：只对带动画的片段生效；没有动画时这一步完全跳过（导出路径与原来一致）。
+    // （中间视频的 objectURL 由 resources 登记回收，这里不再单独维护数组。）
+    if (!audioOnly && hasAnyAnimation(project)) {
+      // 关键：动画渲染要在**单线程**核心上做。多线程 core 在本环境的 exec 会挂起
+      // （导出流程本来也会在自检后降级），而这一步发生在自检之前，若沿用多线程实例
+      // 会卡死在图像序列编码上。这里先主动降级，代价是本次导出使用单线程编码。
+      if (mode === 'multi-thread') {
+        onStatus?.('动画片段需要单线程 FFmpeg 核心，正在切换…')
+        loaded = await fallbackToSingleThread('动画片段渲染需要单线程 FFmpeg 核心。')
         ffmpeg = loaded.ffmpeg
+        cleanupTarget = ffmpeg
         mode = loaded.mode
         warning = loaded.warning
-        onStatus?.('已切换为单线程，正在重新写入素材…')
-        onProgress?.(0)
-        // The previous worker owns the transferred buffers, so re-read every
-        // input before writing it into the new file system.
-        onStage?.('writing-inputs')
-        await writeInputs(ffmpeg, resolvedInputs, onStatus, onProgress, signal)
-        textLayer = await renderTextLayer(ffmpeg, signal)
-        await writeTextOverlayLayer(ffmpeg, textLayer)
-        coverPng = await renderCoverPng()
-        if (coverPng) await ffmpeg.writeFile(coverFileName, coverPng)
+      }
+      const prepared = await prepareAnimatedProject({
+        project,
+        assets: [...assets],
+        width: plan.width,
+        height: plan.height,
+        fps: plan.fps,
+        runtime: loaded,
+        signal,
+        resources,
+        onStage,
+        onStatus,
+        onProgress,
+      })
+      if (prepared) {
+        project = prepared.project
+        sources.push(...prepared.sources)
+        plan = buildExportPlan(project, sources, true, { range })
+        sourceByUrl.clear()
+        for (const item of sources) sourceByUrl.set(item.url, item)
+        resolvedInputs.length = 0
+        seenFiles.clear()
+        for (const input of plan.inputs) {
+          if (seenFiles.has(input.file)) continue
+          seenFiles.add(input.file)
+          resolvedInputs.push({
+            file: input.file,
+            source: sourceByUrl.get(input.url) ?? primary,
+          })
+        }
+        resources.registerFiles(resolvedInputs.map((input) => input.file))
       }
     }
-
-    logHandler = (event: LogEvent) => {
-      lines.push(event.message)
-      if (lines.length > 120) lines.shift()
-      onLog?.(event.message)
+    // 动画字幕的中间片段同样需要 exec；本环境多线程 core 的 exec 会挂起，
+    // 因此在生成逐帧字幕前主动切到单线程（与视觉动画预处理一致）。
+    if (!audioOnly && hasAnyTextAnimation(project) && mode === 'multi-thread') {
+      onStatus?.('动画字幕需要单线程 FFmpeg 核心，正在切换…')
+      loaded = await fallbackToSingleThread('动画字幕渲染需要单线程 FFmpeg 核心。')
+      ffmpeg = loaded.ffmpeg
+      cleanupTarget = ffmpeg
+      mode = loaded.mode
+      warning = loaded.warning
     }
-    progressHandler = (event: ProgressEvent) => {
-      // 每帧检查取消信号：一旦取消立刻终止 wasm 运行时（挂起的 exec 会 reject），
-      // 然后抛出 AbortError。terminateRuntime 之后不会再有 progress 事件。
-      const value = Number.isFinite(event.progress) ? event.progress : 0
-      onProgress?.(Math.min(1, Math.max(0, value)))
-      if (activeExportSignal?.aborted) {
-        abortExport()
+    // ---- 形状蒙版 ----
+    // 蒙版 PNG 是额外输入：序号 = 媒体输入之后、文字层与封面之前。
+    // 先按「没有蒙版」构建出 plan 拿到 inputs 数量，再把序号喂回去重建 graph。
+    let maskInputBase = plan.inputs.length
+    let maskClipList: Clip[] = []
+    let maskFileByName: Map<string, string> = new Map()
+    if (!audioOnly) {
+      maskClipList = maskedClips(project)
+      if (maskClipList.length > 0) {
+        // 蒙版 PNG 每次导出都会写一份（共享 MEMFS），必须登记清理，否则会一直累积。
+        const registerMask = (file: string): void => {
+          resources.registerFile(file)
+        }
+        for (const clip of maskClipList) registerMask(maskFileName(clip.id))
+        const maskInputs = new Map(maskClipList.map((clip, index) => [clip.id, maskInputBase + index]))
+        plan = buildExportPlan(project, sources, true, { range, maskInputs })
+        maskFileByName = await writeMaskFiles(
+          ffmpeg,
+          maskClipList,
+          sources,
+          plan.width,
+          plan.height,
+          registerMask,
+        )
+        if (maskFileByName.size !== maskClipList.length) {
+          throw new Error('蒙版渲染失败，无法导出。')
+        }
       }
     }
-    attachedFfmpeg = ffmpeg
-    ffmpeg.on('log', logHandler)
-    ffmpeg.on('progress', progressHandler)
+    const maskInputOrder: string[] = maskClipList
+      .map((clip) => maskFileByName.get(clip.id))
+      .filter((file): file is string => Boolean(file))
+    /** 文字层输入序号：媒体输入 + 蒙版输入之后（统一由 exportInputLayout 计算）。 */
+    const textInputBase = exportInputLayout(maskInputBase, maskInputOrder.length, false).textInputBase
+    let textLayer: TextOverlayLayer | null = audioOnly
+      ? null
+      : await renderTextLayer(loaded, signal, textInputBase)
+    /** 文字层的 PNG / concat 列表文件都要登记清理（它们是每次导出新写进 MEMFS 的）。 */
+    const registerTextLayerFiles = (layer: TextOverlayLayer | null): void => {
+      if (!layer) return
+      resources.registerFiles(layer.assets.map((asset) => asset.file))
+      resources.registerFile(layer.listFile)
+      resources.registerFiles(layer.cleanupFiles ?? [])
+    }
+    registerTextLayerFiles(textLayer)
+    // 封面 overlay 的输入序号：媒体输入 + 蒙版输入 + 文本层（若存在）之后。
+    const coverInputIndex = exportInputLayout(
+      maskInputBase,
+      maskInputOrder.length,
+      Boolean(textLayer),
+    ).coverInputIndex
 
-    // Start optimistic: assume the used sources have audio. If a filter graph
-    // references a missing audio stream, FFmpeg exits and we retry silently.
-    onStatus?.(
-      `正在合成 ${plan.width}×${plan.height} · ${plan.fps}fps ${plan.hasAudio ? '含原声' : '无音轨'}…`,
-    )
-    if (textLayer) applyTextOverlayGraph(plan, textLayer.inputIndex)
-    if (coverPng) applyCoverOverlayGraph(plan, coverInputIndex)
-    await ffmpeg.writeFile(graphName, plan.graph)
 
-    let commandArgs = injectCoverInputArgs(
-      injectTextInputArgs(buildExportArgs(plan, graphName, outputName), textLayer),
-      coverPng ? coverFileName : null,
-    )
-    onStage?.('rendering')
-    try {
-      await runExportCommand(ffmpeg, commandArgs, outputName, lines, signal)
-    } catch (error) {
-      // 取消不是「音频轨失败」，不能走无声重试。
-      throwIfAborted(signal)
-      if (!plan.hasAudio) throw error
-      warning = `${warning ? `${warning} ` : ''}原声轨合成失败，已改为导出无声视频。`
-      onStatus?.('音频合成失败，正在重试无声导出…')
-      onProgress?.(0)
-      plan = buildExportPlan(project, sources, false)
+      onStage?.('writing-inputs')
+      onStatus?.(
+        resolvedInputs.length > 1
+          ? `正在读取 ${resolvedInputs.length} 个素材到本地内存…`
+          : '正在读取素材到本地内存…',
+      )
+      await writeInputs(ffmpeg, resolvedInputs, onStatus, onProgress, signal)
+      await writeTextOverlayLayer(ffmpeg, textLayer)
+      if (coverPng) await ffmpeg.writeFile(coverFileName, coverPng)
+
+      const probeInput = resolvedInputs[0]?.file
+      // 音频导出也要自检：多线程核心在本环境可能直接挂起，音频输入又没有视频流，
+      // 所以用与输入无关的 lavfi 自检（probeExecRuntime），视频路径则仍探测真实输入。
+      if (mode === 'multi-thread' && (audioOnly || probeInput)) {
+        onStatus?.('正在自检多线程 FFmpeg 核心…')
+        const probe = await raceWithAbort(
+          audioOnly
+            ? probeRuntimeForAudio()
+            : probeRuntimeForExport(probeInput as string),
+          signal,
+        )
+        if (probe !== 'ok') {
+          const reason =
+            probe === 'timeout'
+              ? '多线程 FFmpeg 核心自检超时，已自动降级为单线程导出。'
+              : '多线程 FFmpeg 核心未能完成自检，已自动降级为单线程导出。'
+          loaded = await fallbackToSingleThread(reason)
+          ffmpeg = loaded.ffmpeg
+          cleanupTarget = ffmpeg
+          mode = loaded.mode
+          warning = loaded.warning
+          onStatus?.('已切换为单线程，正在重新写入素材…')
+          onProgress?.(0)
+          // The previous worker owns the transferred buffers, so re-read every
+          // input before writing it into the new file system.
+          onStage?.('writing-inputs')
+          await writeInputs(ffmpeg, resolvedInputs, onStatus, onProgress, signal)
+          if (maskClipList.length > 0) {
+            maskFileByName = await writeMaskFiles(
+              ffmpeg,
+              maskClipList,
+              sources,
+              plan.width,
+              plan.height,
+              (file) => resources.registerFile(file),
+            )
+          }
+          textLayer = await renderTextLayer(loaded, signal, textInputBase)
+          registerTextLayerFiles(textLayer)
+          await writeTextOverlayLayer(ffmpeg, textLayer)
+          coverPng = await renderCoverPng()
+          if (coverPng) await ffmpeg.writeFile(coverFileName, coverPng)
+        }
+      }
+
+      logHandler = (event: LogEvent) => {
+        lines.push(event.message)
+        if (lines.length > 120) lines.shift()
+        onLog?.(event.message)
+      }
+      progressHandler = (event: ProgressEvent) => {
+        // 每帧检查取消信号：一旦取消立刻终止 wasm 运行时（挂起的 exec 会 reject），
+        // 然后抛出 AbortError。terminateRuntime 之后不会再有 progress 事件。
+        const value = Number.isFinite(event.progress) ? event.progress : 0
+        onProgress?.(Math.min(1, Math.max(0, value)))
+        if (activeExportSignal?.aborted) {
+          abortExport()
+        }
+      }
+      attachedFfmpeg = ffmpeg
+      ffmpeg.on('log', logHandler)
+      ffmpeg.on('progress', progressHandler)
+
+      // Start optimistic: assume the used sources have audio. If a filter graph
+      // references a missing audio stream, FFmpeg exits and we retry silently.
+      onStatus?.(
+        audioOnly
+          ? `正在合成音频 ${format.toUpperCase()}（${format === 'm4a' ? 'AAC 192k' : 'MP3 192k'}）…`
+          : `正在合成 ${plan.width}×${plan.height} · ${plan.fps}fps ${plan.hasAudio ? '含原声' : '无音轨'}…`,
+      )
       if (textLayer) applyTextOverlayGraph(plan, textLayer.inputIndex)
+      // 文字层必须在 trim 之前合成（字幕不能跟着区间平移）；封面则相反：
+      // 先把视频裁到区间，再叠封面，封面就会落在**导出段的第一帧**上。
+      plan = applyExportRangeTrim(plan)
       if (coverPng) applyCoverOverlayGraph(plan, coverInputIndex)
       await ffmpeg.writeFile(graphName, plan.graph)
-      commandArgs = injectCoverInputArgs(
-        injectTextInputArgs(buildExportArgs(plan, graphName, outputName), textLayer),
-        coverPng ? coverFileName : null,
-      )
-      await runExportCommand(ffmpeg, commandArgs, outputName, lines, signal)
-    }
 
-    onStage?.('finalizing')
-    onStatus?.('正在读取导出结果…')
-    throwIfAborted(signal)
-    const data = await raceWithAbort(ffmpeg.readFile(outputName), signal)
-    if (typeof data === 'string') throw new Error('FFmpeg 返回了文本而非视频数据。')
-    if (data.byteLength === 0) throw new Error('导出结果为空。')
-    const copy = new Uint8Array(data.byteLength)
-    copy.set(data)
-    const blob = new Blob([copy.buffer], { type: 'video/mp4' })
+      let commandArgs = audioOnly
+        ? buildAudioExportArgs(
+            plan,
+            graphName,
+            outputName,
+            format as AudioExportFormat,
+          )
+        : injectCoverInputArgs(
+            injectMaskInputArgs(injectTextInputArgs(buildExportArgs(plan, graphName, outputName), textLayer), maskInputOrder),
+            coverPng ? coverFileName : null,
+          )
+      onStage?.('rendering')
+      try {
+        await runExportCommand(loaded, commandArgs, outputName, lines, signal)
+      } catch (error) {
+        // 取消不是「音频轨失败」，不能走无声重试。
+        throwIfAborted(signal)
+        if (audioOnly) throw error
+        if (!plan.hasAudio) throw error
+        // 只有**能确认是音频合成问题**时才静默重导无声版：
+        // OOM、滤镜图语法错误、编码器初始化失败等必须原样报给用户，
+        // 否则会被「已改为导出无声视频」掩盖成一次成功。
+        if (!isAudioRelatedFailure(error, lines)) throw error
+        warning = `${warning ? `${warning} ` : ''}原声轨合成失败，已改为导出无声视频。`
+        onStatus?.('音频合成失败，正在重试无声导出…')
+        onProgress?.(0)
+        plan = buildExportPlan(project, sources, false, { range })
+        if (textLayer) applyTextOverlayGraph(plan, textLayer.inputIndex)
+        plan = applyExportRangeTrim(plan)
+        if (coverPng) applyCoverOverlayGraph(plan, coverInputIndex)
+        await ffmpeg.writeFile(graphName, plan.graph)
+        commandArgs = injectCoverInputArgs(
+          injectMaskInputArgs(injectTextInputArgs(buildExportArgs(plan, graphName, outputName), textLayer), maskInputOrder),
+          coverPng ? coverFileName : null,
+        )
+        await runExportCommand(loaded, commandArgs, outputName, lines, signal)
+      }
 
-    onProgress?.(1)
-    const coverBlob =
-      cover && cover.mode === 'separate' ? await buildCoverJpeg(plan.width, plan.height, cover) : undefined
-    return {
-      blob,
-      ...(coverBlob ? { cover: coverBlob } : {}),
-      mode,
-      warning,
-      width: plan.width,
-      height: plan.height,
-      fps: plan.fps,
-      hasAudio: plan.hasAudio,
-    }
+      onStage?.('finalizing')
+      onStatus?.('正在读取导出结果…')
+      throwIfAborted(signal)
+      const data = await raceWithAbort(ffmpeg.readFile(outputName), signal)
+      if (typeof data === 'string') throw new Error('FFmpeg 返回了文本而非视频数据。')
+      if (data.byteLength === 0) throw new Error('导出结果为空。')
+      const copy = new Uint8Array(data.byteLength)
+      copy.set(data)
+      const blob = new Blob([copy.buffer], {
+        type:
+          format === 'm4a'
+            ? 'audio/mp4'
+            : format === 'mp3'
+              ? 'audio/mpeg'
+              : 'video/mp4',
+      })
+
+      onProgress?.(1)
+      const coverBlob =
+        !audioOnly && cover && cover.mode === 'separate'
+          ? await buildCoverJpeg(plan.width, plan.height, cover)
+          : undefined
+      return {
+        blob,
+        ...(coverBlob ? { cover: coverBlob } : {}),
+        mode,
+        warning,
+        width: plan.width,
+        height: plan.height,
+        fps: plan.fps,
+        hasAudio: plan.hasAudio,
+      }
   } finally {
-    // 无论成功还是取消，都要清空取消信号引用，避免下一次导出被上一次的 signal 影响。
+    // 成功 / 失败 / 取消都走这里：清空取消信号、摘掉监听器、回收全部登记资源。
     if (activeExportSignal === signal) activeExportSignal = null
     if (attachedFfmpeg && logHandler) attachedFfmpeg.off('log', logHandler)
     if (attachedFfmpeg && progressHandler) attachedFfmpeg.off('progress', progressHandler)
-    const cleanup = [
-      ...resolvedInputs.map((input) => input.file),
-      ...(textLayer ? textLayer.assets.map((asset) => asset.file) : []),
-      ...(textLayer?.cleanupFiles ?? []),
-      graphName,
-      outputName,
-      coverFileName,
-      PROBE_OUTPUT,
-    ]
-    if (textLayer) cleanup.push(textLayer.listFile)
-    for (const file of new Set(cleanup)) {
-      try {
-        await ffmpeg.deleteFile(file)
-      } catch {
-        // Best-effort cleanup.
-      }
-    }
-    // 动画中间视频的 objectURL：导出结束（含取消/失败）后统一回收。
-    for (const url of animationUrls) {
-      try {
-        URL.revokeObjectURL(url)
-      } catch {
-        // 已失效的 URL 忽略。
-      }
-    }
+    await resources.dispose(cleanupTarget)
   }
 }
 
@@ -1223,7 +1231,8 @@ export async function inspectExportAudio(
   blob: Blob,
   onStatus?: (message: string) => void,
 ): Promise<AudioInspection> {
-  const { ffmpeg } = await getFFmpeg()
+  const runtime = await acquireRuntime()
+  const ffmpeg = runtime.ffmpeg
   const name = 'framecut-audio-check.mp4'
   const lines: string[] = []
   const handler = (event: LogEvent) => {
@@ -1237,7 +1246,7 @@ export async function inspectExportAudio(
     const containerHasAudio = mp4HasAudioTrack(data)
     await ffmpeg.writeFile(name, data)
     onStatus?.('正在检测音轨与音量…')
-    await ffmpeg.exec([
+    await execOnRuntime(runtime, [
       '-hide_banner',
       '-loglevel',
       'info',

@@ -4,6 +4,7 @@ import {
   countAssetReferences,
   isAssetReferenced,
   isClipAssetMissing,
+  reversedDependents,
   unusedAssets,
 } from '../src/editor/core/assets'
 import { createRemoveAssetClipsCommand } from '../src/editor/core/commands'
@@ -139,6 +140,52 @@ describe('素材引用关系（core/assets）', () => {
     expect(isClipAssetMissing(urls, { sourceUrl: 'u1' })).toBe(false)
     expect(isClipAssetMissing(urls, { sourceUrl: 'u9' })).toBe(true)
   })
+
+  it('倒放素材引用的原素材不算「未使用」（清理时保留，才能恢复正放）', () => {
+    // 片段只用了倒放素材 rev；原素材 orig 没有任何片段直接引用。
+    const project: Project = {
+      ...createInitialProject(source('orig'), 'clip-a'),
+      clips: [clip('clip-a', 'rev')],
+    }
+    const original: MediaAsset = asset('orig', 'orig')
+    const reversed: MediaAsset = {
+      ...asset('rev', 'rev'),
+      reversedFrom: { assetId: 'orig', sourceUrl: 'orig', start: 0, end: 4 },
+    }
+    expect(unusedAssets(project, [original, reversed]).map((item) => item.id)).toEqual([])
+    // 没有倒放素材依赖它时才会被清理。
+    expect(unusedAssets(project, [original]).map((item) => item.id)).toEqual(['orig'])
+  })
+
+  it('链式倒放：只保留最外层也会连带保留上游原素材', () => {
+    const project: Project = {
+      ...createInitialProject(source('orig'), 'clip-a'),
+      clips: [clip('clip-a', 'rev2')],
+    }
+    const original: MediaAsset = asset('orig', 'orig')
+    const first: MediaAsset = {
+      ...asset('rev1', 'rev1'),
+      reversedFrom: { assetId: 'orig', sourceUrl: 'orig', start: 0, end: 4 },
+    }
+    const second: MediaAsset = {
+      ...asset('rev2', 'rev2'),
+      reversedFrom: { assetId: 'rev1', sourceUrl: 'rev1', start: 0, end: 4 },
+    }
+    expect(unusedAssets(project, [original, first, second]).map((item) => item.id)).toEqual([])
+  })
+
+  it('reversedDependents 找出依赖该素材的倒放素材（删除前提示用）', () => {
+    const original: MediaAsset = asset('orig', 'orig')
+    const other: MediaAsset = asset('other', 'other')
+    const reversed: MediaAsset = {
+      ...asset('rev', 'rev'),
+      reversedFrom: { assetId: 'orig', sourceUrl: 'orig', start: 0, end: 4 },
+    }
+    expect(reversedDependents([original, other, reversed], original).map((item) => item.id)).toEqual(
+      ['rev'],
+    )
+    expect(reversedDependents([original, other, reversed], other)).toEqual([])
+  })
 })
 
 describe('删除素材关联片段（operations / commands）', () => {
@@ -220,7 +267,7 @@ describe('store：removeAsset / cleanupUnusedAssets', () => {
     expect(store.getState().source?.url).toBe('u2')
   })
 
-  it('removeClips=true：片段一起删除，Ctrl+Z 一次恢复片段（素材已不在库里）', () => {
+  it('removeClips=true：片段一起删除，Ctrl+Z 一次恢复片段**和素材**', () => {
     const store = makeStore()
     const assetId = store.getState().assets[0].id
     store.getState().setPlayhead(4)
@@ -232,9 +279,12 @@ describe('store：removeAsset / cleanupUnusedAssets', () => {
     expect(store.getState().assets).toHaveLength(0)
 
     store.getState().undo()
-    // 片段回来了，但素材不在库里 → 走「素材缺失」呈现
+    // 片段回来了 → 素材也必须回到素材库（否则片段指向已 revoke 的源，就是坏片段）
     expect(store.getState().project.clips).toHaveLength(2)
-    expect(store.getState().assets).toHaveLength(0)
+    expect(store.getState().assets).toHaveLength(1)
+    expect(store.getState().assets[0].url).toBe('u1')
+    // 撤销后不再有「待回收」素材
+    expect(store.getState().pendingReclaim).toEqual({})
   })
 
   it('removeClips=false：片段保留（引用一个已不在 assets 里的 url）', () => {

@@ -33,6 +33,7 @@ import {
   applyColorToAllClips,
   applyAttributePatch,
   moveOverlayTrackInProject,
+  moveTrackInProject,
   removeClipsForAsset,
   splitOverlayClipAt,
   splitProjectAt,
@@ -78,9 +79,10 @@ import type {
   TrackState,
 } from './types'
 import type { TransitionAllOptions } from './operations'
+import type { TrackOrderKind } from './operations'
 import type { RemoveAssetClipsOptions } from './operations'
 import type { ColorAdjustments } from './color'
-import type { AudioAttrs, VisualAttrs } from './attributeClipboard'
+import type { AudioAttrs, SpeedAttrs, VisualAttrs } from './attributeClipboard'
 import type { AnimatableProperty, Easing, ProjectCover } from './types'
 import {
   clearPropertyKeyframesInProject,
@@ -96,9 +98,12 @@ import { relinkCaptions } from './captionLink'
 import { normalizeBackground, withClipBackground } from './background'
 import type { CanvasBackground } from './types'
 import { clipFadeIn, clipFadeOut, clipVolume } from './clipAudio'
+import { canChangeClipSpeed } from './speed'
+import { speedAttrsPatch } from './attributeClipboard'
 import { contiguousRunHeads } from './selection'
 import { findClipLocation, getTimeline } from './timeline'
 import { isMainLocked, isOverlayLocked } from './tracks'
+import { replaceClipSourceInProject, type ReplaceClipSourceInput } from './reverse'
 import type { IdFactory, PastePlan } from './clipboard'
 import { applyPastePlan } from './clipboard'
 
@@ -124,6 +129,21 @@ export function createUpdateClipCommand(
       if (!clip) return project
       const patch = typeof update === 'function' ? update(clip) : update
       return updateClipInProject(project, clipId, patch) ?? project
+    },
+  }
+}
+
+/**
+ * 「倒放」：把片段指向新的倒放素材（并镜像关键帧），同时断开挂在它身上的
+ * 智能字幕链接。1 次命令 = 1 步撤销：撤销即恢复原素材引用与字幕链接。
+ */
+export function createReverseClipCommand(
+  input: ReplaceClipSourceInput & { label?: string },
+): EditorCommand {
+  return {
+    label: input.label ?? '倒放片段',
+    execute(project) {
+      return replaceClipSourceInProject(project, input)
     },
   }
 }
@@ -350,6 +370,30 @@ export function createPasteAudioAttributesCommand(
     label: '粘贴音频属性',
     execute(project) {
       return applyAttributePatch(project, ids, attrs as Partial<Clip>).project
+    },
+  }
+}
+
+/**
+ * 粘贴变速属性：倍率 / 分段 / 曲线（1 次命令 = 1 步撤销）。
+ *
+ * 定格 / 图片片段是静帧：变速会改变它们的停留时长（sourceStart..sourceEnd 即时长），
+ * 因此这里按片段类型过滤；一条可写的目标都没有时返回原 project。
+ */
+export function createPasteSpeedAttributesCommand(
+  ids: readonly string[],
+  attrs: SpeedAttrs,
+): EditorCommand {
+  return {
+    label: '粘贴变速属性',
+    execute(project) {
+      const patch = speedAttrsPatch(attrs)
+      const targets = ids.filter((id) => {
+        const location = findClipLocation(project, id)
+        return Boolean(location && canChangeClipSpeed(location.clip))
+      })
+      if (targets.length === 0) return project
+      return applyAttributePatch(project, targets, patch).project
     },
   }
 }
@@ -641,6 +685,63 @@ export function createUpdateAudioTrackCommand(
     label,
     execute(project) {
       return updateAudioTrackInProject(project, trackId, update) ?? project
+    },
+  }
+}
+
+/**
+ * 新建一条叠加轨并把片段放进去——**一个命令**，一次撤销同时撤掉轨道和片段。
+ * 轨道追加到数组末尾（渲染顺序上在最上层，符合「新轨道放最上层」）。
+ */
+/**
+ * 调整轨道顺序（按**界面下标**）。一次拖动/一次点按 = 一个命令 = 一步撤销。
+ * 只改顺序：不改变片段时间与内容，也不重命名轨道。
+ */
+export function createMoveTrackCommand(
+  kind: TrackOrderKind,
+  trackId: string,
+  targetDisplayIndex: number,
+): EditorCommand {
+  const label =
+    kind === 'overlay' ? '调整叠加轨顺序' : kind === 'audio' ? '调整音频轨顺序' : '调整文字轨顺序'
+  return {
+    label,
+    execute(project) {
+      return moveTrackInProject(project, kind, trackId, targetDisplayIndex)
+    },
+  }
+}
+
+export function createAddClipToNewOverlayTrackCommand(
+  trackId: string,
+  trackName: string,
+  clip: Clip,
+  start: number,
+): EditorCommand {
+  return {
+    label: '添加到新建叠加轨',
+    selectionAfter: clip.id,
+    execute(project) {
+      const tracks = project.overlayTracks ?? []
+      // 先建一条空轨道（追加到末尾 = 渲染顺序最上层），再用现有的插入逻辑放片段，
+      // 不改变 addClipToTrackAtTime 的内部行为。
+      const withTrack = {
+        ...project,
+        overlayTracks: [
+          ...tracks,
+          {
+            id: trackId,
+            name: trackName,
+            muted: true,
+            hidden: false,
+            enabled: true,
+            locked: false,
+            solo: false,
+            clips: [],
+          },
+        ],
+      }
+      return addClipToTrackAtTime(withTrack, clip, trackId, Math.max(0, start)) ?? project
     },
   }
 }

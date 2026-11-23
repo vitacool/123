@@ -1,3 +1,4 @@
+import { chromaKeyFilter, despillFilter } from './chromaKey'
 import { getOutputDimensions } from './aspect'
 import { buildVolumeExpression, maxVolumeKeyValue } from './animationExpr'
 import { hasVolumeAnimation } from './animation'
@@ -11,7 +12,14 @@ import {
 import { clipBlendMode, clipOpacity, ffmpegBlendMode, opacityFilters } from './blend'
 import { normalizeTransitionType, resolveTransitionDuration } from './transition'
 import { clipFreezeFrame, clipTimelineDuration } from './clipTime'
-import { clipKeepsPitch, clipSpeedValue, speedAudioFilters, speedVideoFilter } from './speed'
+import {
+  clipKeepsPitch,
+  clipSpeedValue,
+  segmentPlan,
+  speedAudioFilters,
+  speedSegmentedVideoFilter,
+  speedVideoFilter,
+} from './speed'
 import { clipColor, ffmpegColorFilters } from './color'
 import { audioClipDuration, audioProjectEnd } from './audio'
 import {
@@ -23,6 +31,7 @@ import {
 } from './tracks'
 import { getOverlayTracks, getProjectEnd, getProjectDuration, getTimeline } from './timeline'
 import { computeClipGeometry } from './geometry'
+import { clampExportRange, exportRangeDuration, type ExportRange } from './exportRange'
 import type { CanvasBackground, Clip, Project, SourceInfo } from './types'
 
 /** One FFmpeg `-i` input, resolved from a project asset. */
@@ -39,6 +48,25 @@ export interface ExportInput {
   kind?: 'video' | 'audio' | 'image'
 }
 
+/** 仅音频导出的封装格式。 */
+export type AudioExportFormat = 'm4a' | 'mp3'
+
+/** `buildExportPlan` / `buildAudioExportPlan` 的可选设置。 */
+export interface BuildExportOptions {
+  /**
+   * 只导出该时间区间；缺省 / null 表示导出整条时间轴。
+   * 传了区间时 `totalDuration`（以及 `-t`）已经是区间时长，但图上的
+   * trim / atrim 由 `applyExportRangeTrim` 追加——必须在文字 / 封面层
+   * 合成之后调用（ffmpegExporter 已按这个顺序处理）。
+   */
+  range?: ExportRange | null
+  /**
+   * clipId → 蒙版 PNG 的 -i 输入序号。由 exporter 决定（它才知道总输入数），
+   * 因此与文字层 / 封面层共用一个序列，不会冲突。
+   */
+  maskInputs?: ReadonlyMap<string, number>
+}
+
 export interface ExportPlan {
   width: number
   height: number
@@ -53,6 +81,13 @@ export interface ExportPlan {
   inputs: ExportInput[]
   /** True when overlay tracks need their own copies of their source inputs. */
   usesOverlaySource?: boolean
+  /**
+   * 区间导出时，裁剪前的完整合成时长（秒）；未设置区间时该字段缺省。
+   * 文字 / 封面层仍按这个时长生成，再在 trim 之前合成（见 applyExportRangeTrim）。
+   */
+  fullDuration?: number
+  /** 区间导出被夹取后的入 / 出点（秒）；未设置区间时该字段缺省。 */
+  exportRange?: ExportRange
 }
 
 const num = (value: number): string => {
@@ -221,7 +256,9 @@ function videoTemporalChain(clip: Clip, sourceDuration: number, fps: number): st
       'setpts=PTS-STARTPTS',
     ].join(',')
   }
-  const speedFilter = speedVideoFilter(clip.speed ?? 1)
+  // 分段变速：用一条分段线性的 setpts 表达式完成时间映射（不需要 trim+concat）。
+  const segmentedFilter = speedSegmentedVideoFilter(clip)
+  const speedFilter = segmentedFilter ?? speedVideoFilter(clip.speed ?? 1)
   return [
     `trim=start=${num(clip.sourceStart)}:end=${num(clip.sourceEnd)}`,
     'setpts=PTS-STARTPTS',
@@ -249,6 +286,66 @@ function videoTemporalChain(clip: Clip, sourceDuration: number, fps: number): st
  *   只保证方向一致（更亮 / 更高反差），不在调色系数校准范围内。
  * - 色温：预览用 overlay 叠加层近似 colorbalance，±80 时残差约 25，方向一致。
  */
+/**
+ * 带蒙版的片段：把滤镜链拆成「alphamerge 之前 / 之后」两段。
+ *
+ * 主轨结构：
+ *   [in]crop…,hflip,vflip,format=rgba[pre];
+ *   [mask:v]format=rgba,scale=cropW:cropH[mask];
+ *   [pre][mask]alphamerge[mid];
+ *   [mid]rotate(c=black@0),色,scale…,format=rgba,crop=visible,pad(透明),format=yuva420p[mid2]
+ * 之后由调用方垫背景层再 overlay —— 蒙版外露出画布背景。
+ * 叠加轨不垫背景：保留 alpha 直接叠到主轨上。
+ */
+export function maskedClipPieces(
+  clip: Clip,
+  width: number,
+  height: number,
+  source: SourceInfo,
+  overlay: boolean,
+): { prefix: string; suffix: string; maskWidth: number; maskHeight: number } | null {
+  if (!clip.mask && !clip.chromaKey) return null
+  const geometry = computeClipGeometry(clip, source, width, height)
+  const { source: crop, rendered, visible } = geometry
+  if (visible.w < 2 || visible.h < 2) return null
+  const prefix: string[] = [`crop=${crop.w}:${crop.h}:${crop.x}:${crop.y}`]
+  if (clip.flipH) prefix.push('hflip')
+  if (clip.flipV) prefix.push('vflip')
+  // 抠像：crop/flip 之后、alphamerge（蒙版）之前；先补 alpha 再 chromakey。
+  if (clip.chromaKey) {
+    prefix.push('format=yuva420p', chromaKeyFilter(clip.chromaKey))
+    const spill = despillFilter(clip.chromaKey)
+    if (spill) prefix.push(spill)
+  } else {
+    prefix.push('format=rgba')
+  }
+
+  const suffix: string[] = []
+  if (Math.abs(clip.rotation) > 0.001) {
+    suffix.push(
+      `rotate=${num((clip.rotation * Math.PI) / 180)}:ow=${geometry.rotated.w}:oh=${geometry.rotated.h}:c=black@0`,
+    )
+  }
+  suffix.push(...ffmpegColorFilters(clipColor(clip)))
+  suffix.push(`scale=${rendered.w}:${rendered.h}:in_range=full:out_range=limited:flags=lanczos`)
+  suffix.push(
+    'format=rgba',
+    `crop=${Math.round(visible.w)}:${Math.round(visible.h)}:${Math.round(visible.x)}:${Math.round(visible.y)}`,
+    `pad=${width}:${height}:${Math.round(rendered.x + visible.x)}:${Math.round(rendered.y + visible.y)}:color=0x00000000`,
+  )
+  if (overlay) {
+    suffix.push('format=rgba', 'setsar=1', ...opacityFilters(clipOpacity(clip)))
+  } else {
+    suffix.push('format=yuva420p', 'setsar=1')
+  }
+  return {
+    prefix: prefix.join(','),
+    suffix: suffix.join(','),
+    maskWidth: Math.round(crop.w),
+    maskHeight: Math.round(crop.h),
+  }
+}
+
 function videoTransformChain(
   clip: Clip,
   width: number,
@@ -343,40 +440,22 @@ function overlayTransformChain(
   return parts.join(',')
 }
 
-function audioChain(clip: Clip, sourceLabel: string | null): string {
-  const duration = clamp(clipTimelineDuration(clip), 0.02, 60 * 60)
-  if (clip.type === 'freeze' || clip.type === 'image' || sourceLabel === null) {
-    return [
-      'anullsrc=r=48000:cl=stereo',
-      `atrim=duration=${num(duration)}`,
-      'asetpts=PTS-STARTPTS',
-      'aresample=48000',
-      'aformat=sample_fmts=fltp:channel_layouts=stereo',
-    ].join(',')
-  }
+/**
+ * 音频链的「后段」：音量（含关键帧）/ 淡入淡出 / 采样格式 / 补齐与裁剪。
+ * 分段变速时它接在 concat 之后，整段只做一次；不分段时接在 atempo 之后。
+ * 音量曲线的 `t` 是片段本地时间（0…clipTimelineDuration），所以放在变速之后。
+ */
+function audioTailChain(clip: Clip, duration: number): string[] {
   const gain = clipVolume(clip)
   const fadeIn = clipFadeIn(clip)
   const fadeOut = clipFadeOut(clip)
-  // 变速：保持音调用 atempo 链（每级 0.5–2），否则用 asetrate+aresample。
-  const speedFilters = speedAudioFilters(clipSpeedValue(clip), clipKeepsPitch(clip))
-  const parts = [
-    `${sourceLabel}atrim=start=${num(clip.sourceStart)}:end=${num(clip.sourceEnd)}`,
-    'asetpts=PTS-STARTPTS',
-    ...speedFilters,
-  ]
-  // 音量关键帧的 `t` 以片段本地时间为基准。这里 volume 位于 atrim/asetpts 与
-  // 变速滤镜**之后**、afade 之前：
-  // - atrim/asetpts 把时间轴重新从 0 开始；
-  // - atempo 只改变内容速度，不改变「片段本地时间」语义（输出时长 = 时间轴时长）；
-  // - 因此 `t` 正好是 0…clipTimelineDuration 的本地时间，不需要减任何 offset。
-  // 音量曲线必须在变速之后，否则曲线会被 atempo 的时间缩放拉偏。
+  const parts: string[] = []
   if (hasVolumeAnimation(clip)) {
     const expression = buildVolumeExpression(clip.anim!.volume!, duration)
     if (expression) parts.push(`volume='${expression}':eval=frame`)
   } else if (gain !== 1) {
     parts.push(`volume=${num(gain)}`)
   }
-  // 淡入淡出始终叠加在音量曲线上：先 volume（含关键帧），再 afade。
   if (fadeIn > 0.001) parts.push(`afade=t=in:st=0:d=${num(fadeIn)}`)
   if (fadeOut > 0.001) {
     parts.push(`afade=t=out:st=${num(Math.max(0, duration - fadeOut))}:d=${num(fadeOut)}`)
@@ -388,7 +467,63 @@ function audioChain(clip: Clip, sourceLabel: string | null): string {
     `atrim=duration=${num(duration)}`,
     'asetpts=PTS-STARTPTS',
   )
+  return parts
+}
+
+function audioChain(clip: Clip, sourceLabel: string | null): string {
+  const duration = clamp(clipTimelineDuration(clip), 0.02, 60 * 60)
+  if (clip.type === 'freeze' || clip.type === 'image' || sourceLabel === null) {
+    return [
+      'anullsrc=r=48000:cl=stereo',
+      `atrim=duration=${num(duration)}`,
+      'asetpts=PTS-STARTPTS',
+      'aresample=48000',
+      'aformat=sample_fmts=fltp:channel_layouts=stereo',
+    ].join(',')
+  }
+  // 变速：保持音调用 atempo 链（每级 0.5–2），否则用 asetrate+aresample。
+  const speedFilters = speedAudioFilters(clipSpeedValue(clip), clipKeepsPitch(clip))
+  const parts = [
+    `${sourceLabel}atrim=start=${num(clip.sourceStart)}:end=${num(clip.sourceEnd)}`,
+    'asetpts=PTS-STARTPTS',
+    ...speedFilters,
+    ...audioTailChain(clip, duration),
+  ]
   return parts.join(',')
+}
+
+/**
+ * 写一条音频链到图上（接受「单行」或「多行」两种形态）。
+ *
+ * 分段变速的音频必须**逐段** `atrim + setpts + atempo`（atempo 只支持恒定倍率），
+ * 再 `concat` 回一条流；后段（音量/淡入淡出/格式）整段只做一次。
+ */
+function emitAudio(
+  lines: string[],
+  clip: Clip,
+  sourceLabel: string | null,
+  output: string,
+): void {
+  const duration = clamp(clipTimelineDuration(clip), 0.02, 60 * 60)
+  const plan = sourceLabel && clip.type === 'video' ? segmentPlan(clip) : null
+  if (!plan || plan.length < 2) {
+    lines.push(`${audioChain(clip, sourceLabel)}${output}`)
+    return
+  }
+  // 段标签用输出标签名做前缀，保证同一张图里唯一（[outa] / [a3] / [oa1]…）。
+  const base = output.replace(/[[\]]/g, '')
+  const keepPitch = clipKeepsPitch(clip)
+  const labels: string[] = []
+  plan.forEach((segment, index) => {
+    const label = `[${base}sg${index}]`
+    labels.push(label)
+    lines.push(
+      `${sourceLabel}atrim=start=${num(segment.sourceStart)}:end=${num(segment.sourceEnd)},` +
+        `asetpts=PTS-STARTPTS,${speedAudioFilters(segment.speed, keepPitch).join(',')}${label}`,
+    )
+  })
+  const tail = audioTailChain(clip, duration).join(',')
+  lines.push(`${labels.join('')}concat=n=${plan.length}:v=0:a=1,${tail}${output}`)
 }
 
 /**
@@ -401,28 +536,351 @@ export function buildExportPlan(
   project: Project,
   sourceOrSources: SourceInfo | SourceInfo[],
   sourceHasAudio: boolean,
+  options: BuildExportOptions = {},
 ): ExportPlan {
   const sources = normalizeSources(sourceOrSources)
   const mainAudio = sourceHasAudio && isMainAudioActive(project)
-  const plan = buildExportPlanWithoutAudio(project, sources, mainAudio)
-  return applyAudioTracks(project, sources, plan)
+  const plan = buildExportPlanWithoutAudio(project, sources, mainAudio, options.maskInputs)
+  const mixed = applyAudioTracks(project, sources, plan)
+  return finalizePlan(project, mixed, options.range)
+}
+
+/**
+ * 纯音频导出计划：只生成音频滤镜链，完全不创建视频分支。
+ * 这样不可能出现未被消费的 `[outv]` 等视频标签；输入也只注册真正
+ * 参与主轨/音频轨/叠加轨声音的素材。
+ */
+export function buildAudioExportPlan(
+  project: Project,
+  sourceOrSources: SourceInfo | SourceInfo[],
+  sourceHasAudio: boolean,
+  options: BuildExportOptions = {},
+): ExportPlan {
+  const sources = normalizeSources(sourceOrSources)
+  const mainAudio = sourceHasAudio && isMainAudioActive(project)
+  const base = buildAudioBasePlan(project, sources, mainAudio)
+  const mixed = applyAudioTracks(project, sources, base, true)
+  return finalizePlan(project, mixed, options.range)
+}
+
+/**
+ * 记录导出区间，并**在 plan 内裁好音频**（atrim + asetpts）。
+ *
+ * 为什么音频裁剪要放在这里而不是和视频一起在最后追加：响度标准化（loudnorm）
+ * 必须按「实际导出的那一段」测量，所以 atrim 要先于 loudnorm 出现在图里。
+ * 视频分支的裁剪仍然由 applyExportRangeTrim 在文字/封面层合成之后追加
+ * （文字层不能跟着区间平移）。
+ */
+function withExportRange(plan: ExportPlan, range: ExportRange): ExportPlan {
+  const start = num(range.start)
+  const end = num(range.end)
+  const parts: string[] = []
+  let audioLabel = plan.audioLabel
+  if (audioLabel) {
+    const nextAudioLabel = `${audioLabel}_range`
+    parts.push(
+      `[${audioLabel}]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS[${nextAudioLabel}]`,
+    )
+    audioLabel = nextAudioLabel
+  }
+  const added = parts.join(';\n')
+  return {
+    ...plan,
+    graph:
+      parts.length === 0 ? plan.graph : plan.graph.length > 0 ? `${plan.graph};\n${added}` : added,
+    audioLabel,
+    totalDuration: exportRangeDuration(range),
+    fullDuration: plan.totalDuration,
+    exportRange: range,
+  }
+}
+
+/**
+ * 收尾：区间有效时先裁音频再做响度标准化；没有区间时保持历史顺序与逐字输出
+ * （loudnorm 直接作用在最终音频标签上）。
+ */
+function finalizePlan(
+  project: Project,
+  plan: ExportPlan,
+  range: ExportRange | null | undefined,
+): ExportPlan {
+  const clamped = clampExportRange(range, plan.totalDuration)
+  if (!clamped) return applyLoudnessNormalization(project, plan)
+  return applyLoudnessNormalization(project, withExportRange(plan, clamped))
+}
+
+/**
+ * 在最终**视频**标签上裁出入点区间，并重置 PTS。
+ *
+ * 音频已经在构建 plan 时裁好（见 withExportRange）——响度标准化必须在裁剪之后执行，
+ * 所以不能把 atrim 一起放到最后追加。
+ *
+ * 调用顺序很重要（ffmpegExporter 负责）：文字层在 trim 之前合成（字幕不能跟着区间平移），
+ * 封面层在 trim 之后合成（封面要落在导出段的第一帧）。
+ * 未设置区间时原样返回 plan（graph、标签、时长逐字不变）。
+ */
+export function applyExportRangeTrim(plan: ExportPlan): ExportPlan {
+  const range = plan.exportRange
+  if (!range) return plan
+  // 纯音频计划没有 `[outv]`（只有占位的 videoLabel）：音频已裁好，无需追加。
+  if (!plan.graph.includes(`[${plan.videoLabel}]`)) return plan
+  const start = num(range.start)
+  const end = num(range.end)
+  const videoLabel = `${plan.videoLabel}_range`
+  return {
+    ...plan,
+    graph:
+      `${plan.graph};\n[${plan.videoLabel}]trim=start=${start}:end=${end},setpts=PTS-STARTPTS[${videoLabel}]`,
+    videoLabel,
+  }
+}
+
+function buildAudioBasePlan(
+  project: Project,
+  sources: SourceInfo[],
+  mainAudio: boolean,
+): ExportPlan {
+  const timeline = getTimeline(project.clips)
+  let previousEnd = 0
+  const hasGaps = timeline.some((segment) => {
+    const gap = segment.start - previousEnd
+    previousEnd = segment.end
+    return gap > 0.0001
+  })
+  return hasGaps
+    ? buildGappedAudioPlan(project, sources, mainAudio)
+    : buildContiguousAudioPlan(project, sources, mainAudio)
+}
+
+function audioPlanDimensions(project: Project, sources: SourceInfo[]): {
+  width: number
+  height: number
+} {
+  const sized = sources.find((source) => source.width > 0 && source.height > 0)
+  const fallback = { ...sources[0], width: 1920, height: 1080 }
+  return getOutputDimensions(
+    project.aspectRatio,
+    project.exportQuality.resolution,
+    sized ?? fallback,
+  )
+}
+
+function registerMainAudioInputs(
+  project: Project,
+  sources: SourceInfo[],
+  mainAudio: boolean,
+  registry: InputRegistry,
+): { clipInputs: number[]; resolve: (clip: Clip) => SourceInfo } {
+  const resolve = createResolver(sources)
+  const clipInputs = project.clips.map((clip) => {
+    if (!mainAudio || clip.type !== 'video' || isClipSourceMissing(sources, clip)) {
+      return -1
+    }
+    const source = resolve(clip)
+    if (source.hasAudio === false) return -1
+    const input = registerInput(registry, source, true)
+    return registry.inputs[input].hasAudio ? input : -1
+  })
+  return { clipInputs, resolve }
+}
+
+function buildContiguousAudioPlan(
+  project: Project,
+  sources: SourceInfo[],
+  mainAudio: boolean,
+): ExportPlan {
+  const { width, height } = audioPlanDimensions(project, sources)
+  const fps = project.exportQuality.fps
+  const totalDuration = getProjectDuration(project.clips)
+  const clipCount = project.clips.length
+  const registry = createRegistry()
+  const { clipInputs } = registerMainAudioInputs(project, sources, mainAudio, registry)
+  const lines: string[] = []
+
+  const audioGroups = new Map<number, number[]>()
+  clipInputs.forEach((input, index) => {
+    if (input < 0) return
+    const list = audioGroups.get(input)
+    if (list) list.push(index)
+    else audioGroups.set(input, [index])
+  })
+  const hasAudio = audioGroups.size > 0
+  let audioLabel: string | null = null
+
+  if (hasAudio) {
+    const audioBranches = splitBranches(lines, audioGroups, 'a', 'asrc')
+    const transitionAt = (index: number): number => {
+      if (index + 1 >= project.clips.length) return 0
+      const next = project.clips[index + 1]
+      const gap = Math.max(0, next.gapBefore ?? 0)
+      return resolveTransitionDuration(project.clips[index], next, gap)
+    }
+    const hasAnyTransition = project.clips.some((_, index) => transitionAt(index) > 0)
+
+    project.clips.forEach((clip, index) => {
+      const sourceLabel = audioBranches.get(index) ?? null
+      const output = clipCount > 1 ? `[a${index}]` : '[outa]'
+      emitAudio(lines, clip, sourceLabel, output)
+    })
+    if (clipCount > 1) {
+      if (!hasAnyTransition) {
+        const inputs = project.clips.map((_, index) => `[a${index}]`).join('')
+        lines.push(`${inputs}concat=n=${clipCount}:v=0:a=1[outa]`)
+      } else {
+        let accumulator = '[a0]'
+        for (let index = 1; index < clipCount; index += 1) {
+          const output = index === clipCount - 1 ? '[outa]' : `[ax${index}]`
+          const overlap = transitionAt(index - 1)
+          if (overlap > 0) {
+            lines.push(
+              `${accumulator}[a${index}]acrossfade=d=${num(overlap)}:c1=tri:c2=tri${output}`,
+            )
+          } else {
+            lines.push(`${accumulator}[a${index}]concat=n=2:v=0:a=1${output}`)
+          }
+          accumulator = output
+        }
+      }
+    }
+    audioLabel = 'outa'
+  }
+
+  return {
+    width,
+    height,
+    fps,
+    totalDuration,
+    hasAudio,
+    graph: lines.join(';\n'),
+    videoLabel: 'outv',
+    audioLabel,
+    crf: qualityCrf(project.exportQuality.resolution),
+    inputs: registry.inputs,
+  }
+}
+
+function buildGappedAudioPlan(
+  project: Project,
+  sources: SourceInfo[],
+  mainAudio: boolean,
+): ExportPlan {
+  const { width, height } = audioPlanDimensions(project, sources)
+  const fps = project.exportQuality.fps
+  const timeline = getTimeline(project.clips)
+  const totalDuration = getProjectDuration(project.clips)
+  const registry = createRegistry()
+  const resolve = createResolver(sources)
+  const lines: string[] = []
+
+  type AudioUnit =
+    | { kind: 'gap'; duration: number }
+    | { kind: 'clip'; clip: Clip; clipIndex: number; duration: number }
+  const units: AudioUnit[] = []
+  let cursor = 0
+  for (const segment of timeline) {
+    const gap = segment.start - cursor
+    if (gap > 0.0001) units.push({ kind: 'gap', duration: gap })
+    units.push({
+      kind: 'clip',
+      clip: segment.clip,
+      clipIndex: segment.index,
+      duration: segment.duration,
+    })
+    cursor = segment.end
+  }
+
+  const unitInputs = new Map<number, number>()
+  units.forEach((unit, unitIndex) => {
+    if (unit.kind !== 'clip') return
+    if (!mainAudio || unit.clip.type !== 'video' || isClipSourceMissing(sources, unit.clip)) {
+      return
+    }
+    const source = resolve(unit.clip)
+    if (source.hasAudio === false) return
+    const input = registerInput(registry, source, true)
+    if (registry.inputs[input].hasAudio) unitInputs.set(unitIndex, input)
+  })
+
+  const audioGroups = new Map<number, number[]>()
+  unitInputs.forEach((input, unitIndex) => {
+    const list = audioGroups.get(input)
+    if (list) list.push(unitIndex)
+    else audioGroups.set(input, [unitIndex])
+  })
+  const hasAudio = audioGroups.size > 0
+  let audioLabel: string | null = null
+  const audioLabelFor = (index: number) => (units.length > 1 ? `[au${index}]` : '[outa]')
+
+  if (hasAudio) {
+    const audioBranches = splitBranches(lines, audioGroups, 'a', 'asrc')
+    units.forEach((unit, index) => {
+      if (unit.kind === 'gap') {
+        lines.push(
+          `anullsrc=r=48000:cl=stereo,atrim=duration=${num(unit.duration)},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${audioLabelFor(index)}`,
+        )
+        return
+      }
+      const sourceLabel = audioBranches.get(index) ?? null
+      emitAudio(lines, unit.clip, sourceLabel, audioLabelFor(index))
+    })
+    if (units.length > 1) {
+      const inputs = units.map((_, index) => `[au${index}]`).join('')
+      lines.push(`${inputs}concat=n=${units.length}:v=0:a=1[outa]`)
+    }
+    audioLabel = 'outa'
+  }
+
+  return {
+    width,
+    height,
+    fps,
+    totalDuration,
+    hasAudio,
+    graph: lines.join(';\n'),
+    videoLabel: 'outv',
+    audioLabel,
+    crf: qualityCrf(project.exportQuality.resolution),
+    inputs: registry.inputs,
+  }
+}
+
+/**
+ * 在最终混音标签之后追加一次单遍 loudnorm。loudnorm 的默认 single-pass
+ * 模式会在内部升采样；随后立刻 aresample=48000 再交给 AAC 编码。
+ *
+ * off / 未设置时原样返回 plan（graph、audioLabel、args 全部不变）。
+ * 无音频时 audioLabel 为 null，同样不追加。
+ */
+function applyLoudnessNormalization(project: Project, plan: ExportPlan): ExportPlan {
+  const loudness = project.exportQuality.loudness ?? 'off'
+  if (loudness === 'off' || !plan.audioLabel) return plan
+  const params =
+    loudness === 'platform' ? 'I=-14:TP=-1:LRA=11' : 'I=-23:TP=-2:LRA=7'
+  const normalizedLabel = `${plan.audioLabel}_norm`
+  return {
+    ...plan,
+    graph: `${plan.graph};\n[${plan.audioLabel}]loudnorm=${params},aresample=48000[${normalizedLabel}]`,
+    audioLabel: normalizedLabel,
+  }
 }
 
 function buildExportPlanWithoutAudio(
   project: Project,
   sources: SourceInfo[],
   sourceHasAudio: boolean,
+  maskInputs?: ReadonlyMap<string, number>,
 ): ExportPlan {
   if (getOverlayTracks(project).some((track) => isOverlayVideoVisible(track) && track.clips.length > 0)) {
-    return buildOverlayExportPlan(project, sources, sourceHasAudio)
+    return buildOverlayExportPlan(project, sources, sourceHasAudio, maskInputs)
   }
-  return buildFlatExportPlan(project, sources, sourceHasAudio)
+  return buildFlatExportPlan(project, sources, sourceHasAudio, maskInputs)
 }
 
 function buildFlatExportPlan(
   project: Project,
   sources: SourceInfo[],
   sourceHasAudio: boolean,
+  maskInputs?: ReadonlyMap<string, number>,
 ): ExportPlan {
   if (project.clips.length === 0) throw new Error('时间轴为空，无法导出。')
   const timeline = getTimeline(project.clips)
@@ -432,14 +890,15 @@ function buildFlatExportPlan(
     previousEnd = segment.end
     return gap > 0.0001
   })
-  if (hasGaps) return buildGappedExportPlan(project, sources, sourceHasAudio)
-  return buildContiguousExportPlan(project, sources, sourceHasAudio)
+  if (hasGaps) return buildGappedExportPlan(project, sources, sourceHasAudio, maskInputs)
+  return buildContiguousExportPlan(project, sources, sourceHasAudio, maskInputs)
 }
 
 function buildContiguousExportPlan(
   project: Project,
   sources: SourceInfo[],
   sourceHasAudio: boolean,
+  maskInputs?: ReadonlyMap<string, number>,
 ): ExportPlan {
   const { width, height } = getOutputDimensions(
     project.aspectRatio,
@@ -482,6 +941,45 @@ function buildContiguousExportPlan(
     const temporal = videoTemporalChain(clip, source.duration, fps)
     const background = clipBackground(clip, project)
     const transform = videoTransformChain(clip, width, height, source, background)
+    // ---- 带蒙版的主轨片段 ----
+    // crop/flip 之后 alphamerge（蒙版 PNG 尺寸 = 裁切尺寸），再垫背景层合成，
+    // 让蒙版外露出画布背景（黑 / 纯色 / 模糊），之后才进入 xfade / concat。
+    const maskInput = maskInputs?.get(clip.id)
+    const maskPieces =
+      maskInput === undefined && !clip.chromaKey
+        ? null
+        : maskedClipPieces(clip, width, height, source, false)
+    if (maskPieces) {
+      const pre = `mp${index}`
+      const maskLabel = `mm${index}`
+      const mid = `md${index}`
+      const fg = `mf${index}`
+      const bg = `mg${index}`
+      if (background.type === 'blur') {
+        lines.push(`${branch}split=2[mb${index}][mf0${index}]`)
+        lines.push(
+          `[mb${index}]${temporal},${blurBackgroundChain(width, height, backgroundBlurPx(background))}[${bg}]`,
+        )
+        lines.push(`[mf0${index}]${temporal},${maskPieces.prefix}[${pre}]`)
+      } else {
+        lines.push(`${branch}${temporal},${maskPieces.prefix}[${pre}]`)
+        lines.push(
+          `color=c=${backgroundFfmpegColor(background)}:s=${width}x${height}:r=${fps}:d=${num(clipDuration)},format=yuv420p[${bg}]`,
+        )
+      }
+      // 有蒙版才需要 alphamerge；纯抠像直接拿 prefix 的输出继续。
+      if (maskInput !== undefined) {
+        lines.push(
+          `[${maskInput}:v]format=rgba,scale=${maskPieces.maskWidth}:${maskPieces.maskHeight}[${maskLabel}]`,
+        )
+        lines.push(`[${pre}][${maskLabel}]alphamerge[${mid}]`)
+        lines.push(`[${mid}]${maskPieces.suffix}[${fg}]`)
+      } else {
+        lines.push(`[${pre}]${maskPieces.suffix}[${fg}]`)
+      }
+      lines.push(`[${bg}][${fg}]overlay=0:0:format=auto,format=yuv420p${output}`)
+      return
+    }
 
     if (transform === null) {
       // Fully off-canvas: consume the source branch, then emit a black frame.
@@ -568,7 +1066,7 @@ function buildContiguousExportPlan(
     project.clips.forEach((clip, index) => {
       const sourceLabel = audioBranches.get(index) ?? null
       const output = clipCount > 1 ? `[a${index}]` : '[outa]'
-      lines.push(`${audioChain(clip, sourceLabel)}${output}`)
+      emitAudio(lines, clip, sourceLabel, output)
     })
     if (clipCount > 1) {
       if (!hasAnyTransition) {
@@ -616,6 +1114,7 @@ function buildGappedExportPlan(
   project: Project,
   sources: SourceInfo[],
   sourceHasAudio: boolean,
+  maskInputs?: ReadonlyMap<string, number>,
 ): ExportPlan {
   const { width, height } = getOutputDimensions(
     project.aspectRatio,
@@ -690,6 +1189,34 @@ function buildGappedExportPlan(
     const source = resolve(unit.clip)
     const temporal = videoTemporalChain(unit.clip, source.duration, fps)
     const transform = videoTransformChain(unit.clip, width, height, source)
+    // 带蒙版片段（含空隙的时间轴）：alphamerge 后垫黑色背景再合成。
+    const unitMaskInput = maskInputs?.get(unit.clip.id)
+    const unitMaskPieces =
+      unitMaskInput === undefined && !unit.clip.chromaKey
+        ? null
+        : maskedClipPieces(unit.clip, width, height, source, false)
+    if (unitMaskPieces) {
+      const pre = `gmp${index}`
+      const maskLabel = `gmm${index}`
+      const mid = `gmd${index}`
+      const fg = `gmf${index}`
+      const bg = `gmg${index}`
+      lines.push(`${branch}${temporal},${unitMaskPieces.prefix}[${pre}]`)
+      lines.push(
+        `color=c=0x000000:s=${width}x${height}:r=${fps}:d=${num(unit.duration)},format=yuv420p[${bg}]`,
+      )
+      if (unitMaskInput !== undefined) {
+        lines.push(
+          `[${unitMaskInput}:v]format=rgba,scale=${unitMaskPieces.maskWidth}:${unitMaskPieces.maskHeight}[${maskLabel}]`,
+        )
+        lines.push(`[${pre}][${maskLabel}]alphamerge[${mid}]`)
+        lines.push(`[${mid}]${unitMaskPieces.suffix}[${fg}]`)
+      } else {
+        lines.push(`[${pre}]${unitMaskPieces.suffix}[${fg}]`)
+      }
+      lines.push(`[${bg}][${fg}]overlay=0:0:format=auto,format=yuv420p${videoLabel(index)}`)
+      return
+    }
     if (transform === null) {
       lines.push(`${branch}${temporal},nullsink`)
       lines.push(
@@ -726,7 +1253,7 @@ function buildGappedExportPlan(
         return
       }
       const sourceLabel = audioBranches.get(index) ?? null
-      lines.push(`${audioChain(unit.clip, sourceLabel)}${audioLabelFor(index)}`)
+      emitAudio(lines, unit.clip, sourceLabel, audioLabelFor(index))
     })
     if (units.length > 1) {
       const inputs = units.map((_, index) => `[au${index}]`).join('')
@@ -759,10 +1286,11 @@ function buildOverlayExportPlan(
   project: Project,
   sources: SourceInfo[],
   sourceHasAudio: boolean,
+  maskInputs?: ReadonlyMap<string, number>,
 ): ExportPlan {
   const baseProject: Project = { ...project, overlayTracks: [] }
   const basePlan =
-    project.clips.length > 0 ? buildFlatExportPlan(baseProject, sources, sourceHasAudio) : null
+    project.clips.length > 0 ? buildFlatExportPlan(baseProject, sources, sourceHasAudio, maskInputs) : null
   const { width, height } = basePlan
     ? { width: basePlan.width, height: basePlan.height }
     : getOutputDimensions(project.aspectRatio, project.exportQuality.resolution, sources[0])
@@ -845,6 +1373,29 @@ function buildOverlayExportPlan(
       const transform = overlayTransformChain(unit.clip, width, height, unit.source)
       const output = `[ov${index}]`
       overlayLabels.push(output)
+      // 带蒙版的叠加轨片段：crop/flip 后 alphamerge，再继续原有的旋转/缩放/透明度链
+      //（叠加轨本来就带 alpha，不需要额外垫背景）。
+      const overlayMaskInput = maskInputs?.get(unit.clip.id)
+      const overlayMaskPieces =
+        overlayMaskInput === undefined && !unit.clip.chromaKey
+          ? null
+          : maskedClipPieces(unit.clip, width, height, unit.source, true)
+      if (overlayMaskPieces) {
+        const pre = `omp${index}`
+        const maskLabel = `omm${index}`
+        const mid = `omd${index}`
+        lines.push(`${branch}${temporal},${overlayMaskPieces.prefix}[${pre}]`)
+        if (overlayMaskInput !== undefined) {
+          lines.push(
+            `[${overlayMaskInput}:v]format=rgba,scale=${overlayMaskPieces.maskWidth}:${overlayMaskPieces.maskHeight}[${maskLabel}]`,
+          )
+          lines.push(`[${pre}][${maskLabel}]alphamerge[${mid}]`)
+          lines.push(`[${mid}]${overlayMaskPieces.suffix}${output}`)
+        } else {
+          lines.push(`[${pre}]${overlayMaskPieces.suffix}${output}`)
+        }
+        return
+      }
       if (transform === null) {
         lines.push(`${branch}${temporal},nullsink`)
         lines.push(
@@ -918,6 +1469,7 @@ function applyAudioTracks(
   project: Project,
   sources: SourceInfo[],
   plan: ExportPlan,
+  audioOnly = false,
 ): ExportPlan {
   const branches: string[] = []
   const inputs = [...plan.inputs]
@@ -957,6 +1509,7 @@ function applyAudioTracks(
       }
       const source = resolveSource(clip.sourceUrl)
       if (!source) continue
+      if (audioOnly && (source.kind === 'image' || source.hasAudio === false)) continue
       const input = ensureAudioInput(source)
       if (input === null) continue
       const start = Math.max(0, clip.sourceStart)
@@ -1015,6 +1568,7 @@ function applyAudioTracks(
       }
       const source = resolveSource(clip.sourceUrl)
       if (!source) continue
+      if (audioOnly && (source.kind === 'image' || source.hasAudio === false)) continue
       const input = ensureAudioInput(source)
       if (input === null) continue
       const start = Math.max(0, clip.sourceStart)
@@ -1058,6 +1612,9 @@ function applyAudioTracks(
 
   const totalDuration = Math.max(plan.totalDuration, audioProjectEnd(project))
   let graph = plan.graph
+  const appendPart = (part: string): void => {
+    graph = graph.length > 0 ? `${graph};\n${part}` : part
+  }
   let mainLabel: string | null = plan.audioLabel ? `[${plan.audioLabel}]` : null
   if (mainLabel === '[outa]') {
     const at = graph.lastIndexOf('[outa]')
@@ -1067,18 +1624,24 @@ function applyAudioTracks(
     }
   }
   if (!mainLabel) {
-    graph += `;\nanullsrc=r=48000:cl=stereo,atrim=duration=${num(totalDuration)},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[maina]`
+    appendPart(
+      `anullsrc=r=48000:cl=stereo,atrim=duration=${num(totalDuration)},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[maina]`,
+    )
     mainLabel = '[maina]'
   }
 
   const branchInputs = branches.map((_, index) => `[ac${index}]`).join('')
-  graph += `;\n${branches.join(';\n')}`
-  graph += `;\n${mainLabel}${branchInputs}amix=inputs=${branches.length + 1}:duration=longest:dropout_transition=0:normalize=0[amix]`
-  graph += `;\n[amix]apad=whole_dur=${num(totalDuration)},atrim=duration=${num(totalDuration)}[outa]`
+  appendPart(branches.join(';\n'))
+  appendPart(
+    `${mainLabel}${branchInputs}amix=inputs=${branches.length + 1}:duration=longest:dropout_transition=0:normalize=0[amix]`,
+  )
+  appendPart(`[amix]apad=whole_dur=${num(totalDuration)},atrim=duration=${num(totalDuration)}[outa]`)
 
   let videoLabel = plan.videoLabel
-  if (totalDuration > plan.totalDuration + 0.001) {
-    graph += `;\n[${videoLabel}]tpad=stop_mode=add:stop_duration=${num(totalDuration - plan.totalDuration)}:color=black[outvpad]`
+  if (!audioOnly && totalDuration > plan.totalDuration + 0.001) {
+    appendPart(
+      `[${videoLabel}]tpad=stop_mode=add:stop_duration=${num(totalDuration - plan.totalDuration)}:color=black[outvpad]`,
+    )
     videoLabel = 'outvpad'
   }
 
@@ -1102,7 +1665,8 @@ export function buildExportArgs(
   for (const input of plan.inputs) {
     if (input.kind === 'image') {
       // 静帧素材：无限循环成帧流，时长交给滤镜图的 trim 控制。
-      args.push('-loop', '1', '-t', num(Math.max(1, plan.totalDuration)))
+      // 区间导出时各片段仍按完整时间轴取帧，所以循环时长要用裁剪前的完整时长。
+      args.push('-loop', '1', '-t', num(Math.max(1, plan.fullDuration ?? plan.totalDuration)))
     }
     args.push('-i', input.file)
   }
@@ -1131,4 +1695,87 @@ export function buildExportArgs(
 
 export function getExportCrf(resolution: Project['exportQuality']['resolution']): number {
   return qualityCrf(resolution)
+}
+
+/**
+ * 仅音频导出的 FFmpeg 参数。不复用 MP4 参数里的视频映射/编码器，
+ * 只 map 音频版 plan 的最终标签。
+ */
+export function buildAudioExportArgs(
+  plan: ExportPlan,
+  graphName: string,
+  outputName: string,
+  format: AudioExportFormat,
+): string[] {
+  if (!plan.audioLabel) throw new Error('工程没有可导出的音频。')
+  const args: string[] = []
+  for (const input of plan.inputs) args.push('-i', input.file)
+  args.push(
+    '-filter_complex_script',
+    graphName,
+    '-map',
+    `[${plan.audioLabel}]`,
+    '-vn',
+    '-t',
+    num(plan.totalDuration),
+  )
+  if (format === 'm4a') {
+    args.push('-c:a', 'aac', '-b:a', '192k')
+  } else {
+    args.push('-c:a', 'libmp3lame', '-b:a', '192k')
+  }
+  args.push('-ar', '48000', '-ac', '2', outputName)
+  return args
+}
+
+/**
+ * 导出时的**输入序号布局**：媒体输入 → 蒙版 PNG → 文字层 PNG → 封面 PNG。
+ *
+ * 这几类额外输入是依次追加的，任何一处用了错误的基数都会让 `[N:v]` 指到别的图上
+ * （典型症状：有蒙版时字幕层读到了蒙版 PNG）。集中在这里算一次，两边共用。
+ */
+export interface ExportInputLayout {
+  /** 媒体输入数量（= plan.inputs.length）。 */
+  mediaInputs: number
+  /** 蒙版 PNG 数量。 */
+  maskInputs: number
+  /** 文字层 PNG 的输入序号（媒体 + 蒙版之后）。 */
+  textInputBase: number
+  /** 封面 PNG 的输入序号（文字层之后）。 */
+  coverInputIndex: number
+}
+
+export function exportInputLayout(
+  mediaInputs: number,
+  maskInputs: number,
+  hasTextLayer: boolean,
+): ExportInputLayout {
+  const media = Math.max(0, Math.round(mediaInputs))
+  const masks = Math.max(0, Math.round(maskInputs))
+  const textInputBase = media + masks
+  return {
+    mediaInputs: media,
+    maskInputs: masks,
+    textInputBase,
+    coverInputIndex: textInputBase + (hasTextLayer ? 1 : 0),
+  }
+}
+
+/**
+ * 把文字层叠进视频分支：文字层是**一路 RGBA 图序列输入**，按项目 fps 重采样后
+ * 在 0:0 只叠加一次（而不是每个片段一个输入 + 一次 overlay）。
+ *
+ * `inputIndex` 必须是文字层 PNG 的真实输入序号（见 {@link exportInputLayout}）。
+ */
+export function applyTextOverlayGraph(plan: ExportPlan, inputIndex: number): void {
+  const original = plan.graph
+  const marker = `[${plan.videoLabel}]`
+  const at = original.lastIndexOf(marker)
+  if (at < 0) return
+  const base = `${plan.videoLabel}_textbase`
+  const graph =
+    `${original.slice(0, at)}[${base}]${original.slice(at + marker.length)}` +
+    `;\n[${inputIndex}:v]format=rgba,fps=${plan.fps},setpts=PTS-STARTPTS[textlayer]` +
+    `;\n[${base}][textlayer]overlay=0:0:eof_action=pass:format=auto[${plan.videoLabel}]`
+  plan.graph = graph
 }

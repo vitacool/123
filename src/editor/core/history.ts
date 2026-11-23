@@ -77,4 +77,18 @@ export class HistoryStack {
     this.#past = []
     this.#future = []
   }
+
+  /**
+   * 撤销 / 重做可能回到的全部工程快照：past 每项的 `before`、present、future 每项的 `after`。
+   *
+   * 用途：素材删除后的「延迟回收」要判断某个素材是否还可能被撤销/重做带回来。
+   * 只返回引用（不复制工程），调用方自己决定扫描方式；历史栈本身不需要懂素材。
+   */
+  snapshots(): Project[] {
+    const states: Project[] = []
+    for (const entry of this.#past) states.push(entry.before)
+    states.push(this.#present)
+    for (const entry of this.#future) states.push(entry.after)
+    return states
+  }
 }
