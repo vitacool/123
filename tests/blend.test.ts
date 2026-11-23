@@ -15,7 +15,7 @@ import {
 import { buildExportPlan } from '../src/editor/core/exportPlan'
 import { createUpdateAnyClipCommand } from '../src/editor/core/commands'
 import { createClip, createInitialProject } from '../src/editor/core/operations'
-import type { Project, SourceInfo } from '../src/editor/core/types'
+import type { Clip, Project, SourceInfo } from '../src/editor/core/types'
 
 const SOURCE: SourceInfo = {
   url: 'blob:v',
@@ -152,5 +152,95 @@ describe('叠加片段的不透明度与混合模式导出', () => {
     const plan = buildExportPlan(projectWithOverlay(), SOURCE, true)
     expect(plan.graph).toContain('overlay=0:0')
     expect(plan.graph).not.toContain('blend=all_mode')
+  })
+})
+function projectWithMainClip(
+  overrides: Partial<Clip> = {},
+  background?: Project['canvasBackground'],
+): Project {
+  const base = createInitialProject({ url: SOURCE.url, duration: 10 }, 'c1')
+  return {
+    ...base,
+    ...(background ? { canvasBackground: background } : {}),
+    clips: [createClip(SOURCE.url, 0, 10, overrides, 'c1')],
+  }
+}
+
+/**
+ * 主轨片段和叠加轨一样，预览里会应用 opacity / blendMode（clipRender 设置
+ * globalAlpha 与 globalCompositeOperation），导出必须跟着做，否则「预览半透明、
+ * 导出不透明」。
+ *
+ * 预览里主轨片段下面铺的是该片段的画布背景（black → 画布底色 #070808、
+ * color → 纯色、blur → 自身画面模糊），所以导出也要先生成这层背景再合成。
+ */
+describe('主轨片段的不透明度与混合模式导出', () => {
+  it('不透明度：画面层带 alpha，并叠在画布背景上', () => {
+    const plan = buildExportPlan(projectWithMainClip({ opacity: 0.4 }), SOURCE, true)
+    expect(plan.graph).toContain('colorchannelmixer=aa=0.4')
+    expect(plan.graph).toContain('overlay=0:0')
+    // 预览黑场用的是画布底色 #070808，导出对齐它（不是纯黑）。
+    expect(plan.graph).toContain('0x070808')
+    expect(plan.graph).not.toContain('blend=all_mode')
+  })
+
+  it('纯色背景：合成到工程背景色上', () => {
+    const plan = buildExportPlan(
+      projectWithMainClip({ opacity: 0.5 }, { type: 'color', color: '#1b3b6f' }),
+      SOURCE,
+      true,
+    )
+    expect(plan.graph).toContain('colorchannelmixer=aa=0.5')
+    expect(plan.graph).toContain('0x1b3b6f')
+  })
+
+  it('混合模式：blend=all_mode，并用画面 alpha 还原透明度', () => {
+    const plan = buildExportPlan(projectWithMainClip({ blendMode: 'multiply' }), SOURCE, true)
+    expect(plan.graph).toContain('blend=all_mode=multiply')
+    // 混合模式不能把背景整体替换掉（透明区域 / 半透明区域都要按 alpha 混合）。
+    expect(plan.graph).toContain('alphaextract')
+    expect(plan.graph).toContain('alphamerge')
+    expect(plan.graph).toContain('overlay=0:0')
+  })
+
+  it('不透明度 + 混合模式同时生效', () => {
+    const plan = buildExportPlan(
+      projectWithMainClip({ opacity: 0.6, blendMode: 'screen' }),
+      SOURCE,
+      true,
+    )
+    expect(plan.graph).toContain('colorchannelmixer=aa=0.6')
+    expect(plan.graph).toContain('blend=all_mode=screen')
+  })
+
+  it('默认（不透明度 1 / 正常模式）不改变原有滤镜图', () => {
+    const plan = buildExportPlan(projectWithMainClip(), SOURCE, true)
+    expect(plan.graph).not.toContain('colorchannelmixer')
+    expect(plan.graph).not.toContain('blend=all_mode')
+    expect(plan.graph).toContain('pad=')
+  })
+})
+
+describe('主轨合成：特殊背景 / 空隙时间轴', () => {
+  it('模糊背景 + 不透明度：背景来自同一画面模糊层，画面按 alpha 叠加', () => {
+    const plan = buildExportPlan(
+      projectWithMainClip({ opacity: 0.5 }, { type: 'blur', blurAmount: 24 }),
+      SOURCE,
+      true,
+    )
+    expect(plan.graph).toContain('gblur=sigma=12')
+    expect(plan.graph).toContain('colorchannelmixer=aa=0.5')
+    expect(plan.graph).toContain('overlay=0:0')
+  })
+
+  it('有空隙的时间轴（gapBefore）：同样先垫背景再合成', () => {
+    const plan = buildExportPlan(
+      projectWithMainClip({ opacity: 0.5, gapBefore: 1 }),
+      SOURCE,
+      true,
+    )
+    expect(plan.graph).toContain('colorchannelmixer=aa=0.5')
+    expect(plan.graph).toContain('color=c=0x070808')
+    expect(plan.graph).toContain('overlay=0:0')
   })
 })

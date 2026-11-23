@@ -1298,6 +1298,9 @@ export function VideoEditor({
     })
     if (Number.isFinite(file.timelineZoom)) store.getState().setTimelineZoom(file.timelineZoom)
     setError(null)
+    // 导入工程 = 接管当前会话：关掉「最近项目」浮层，否则它盖在编辑器上
+    // （用户从项目列表进来时尤其明显）。
+    setLibraryOpen(false)
     if (result.missingCount > 0) {
       store
         .getState()

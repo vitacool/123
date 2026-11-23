@@ -89,6 +89,17 @@ export function backgroundFfmpegColor(background: CanvasBackground): string {
 }
 
 /**
+ * 「画面层合成」用的背景色（不透明度 / 混合模式 / 蒙版）。
+ *
+ * 与预览一致：黑场在画布上铺的是 `BACKGROUND_FALLBACK`（#070808），不是纯黑，
+ * 所以半透明片段「透出」的也是这个底色；纯色背景用配置色。
+ */
+export function compositeBackgroundFfmpegColor(background: CanvasBackground): string {
+  if (background.type === 'black') return `0x${BACKGROUND_FALLBACK.replace('#', '')}`
+  return backgroundFfmpegColor(background)
+}
+
+/**
  * 该片段是否需要独立的背景层（模糊/图片）。
  * 黑场与纯色可以直接用 pad 颜色实现，无需额外滤镜分支。
  */

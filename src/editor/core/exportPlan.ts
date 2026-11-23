@@ -7,9 +7,16 @@ import {
   backgroundBlurPx,
   backgroundFfmpegColor,
   clipBackground,
+  compositeBackgroundFfmpegColor,
   needsBackgroundLayer,
 } from './background'
-import { clipBlendMode, clipOpacity, ffmpegBlendMode, opacityFilters } from './blend'
+import {
+  clipBlendMode,
+  clipOpacity,
+  ffmpegBlendMode,
+  hasBlendSettings,
+  opacityFilters,
+} from './blend'
 import { normalizeTransitionType, resolveTransitionDuration } from './transition'
 import { clipFreezeFrame, clipTimelineDuration } from './clipTime'
 import {
@@ -336,7 +343,9 @@ export function maskedClipPieces(
   if (overlay) {
     suffix.push('format=rgba', 'setsar=1', ...opacityFilters(clipOpacity(clip)))
   } else {
-    suffix.push('format=yuva420p', 'setsar=1')
+    // 主轨蒙版：保留 alpha 交给调用方垫背景层，同时把不透明度乘进 alpha
+    // （预览里蒙版与 opacity 是相乘的）。
+    suffix.push('format=yuva420p', 'setsar=1', ...opacityFilters(clipOpacity(clip)))
   }
   return {
     prefix: prefix.join(','),
@@ -352,6 +361,7 @@ function videoTransformChain(
   height: number,
   source: SourceInfo,
   background: CanvasBackground = { type: 'black' },
+  options: { preserveAlpha?: boolean } = {},
 ): string | null {
   const geometry = computeClipGeometry(clip, source, width, height)
   const { source: crop, rendered, visible } = geometry
@@ -374,13 +384,15 @@ function videoTransformChain(
     'format=rgba',
     `crop=${Math.round(visible.w)}:${Math.round(visible.h)}:${Math.round(visible.x)}:${Math.round(visible.y)}`,
   )
-  if (needsBackgroundLayer(background)) {
-    // 模糊/图片背景：先留透明，由调用方在下面垫背景层再合成。
+  const preserveAlpha = options.preserveAlpha === true
+  if (needsBackgroundLayer(background) || preserveAlpha) {
+    // 模糊/图片背景，或需要按不透明度/混合模式合成：先留透明，由调用方垫背景层再合成。
     parts.push(
       `pad=${width}:${height}:${Math.round(rendered.x + visible.x)}:${Math.round(rendered.y + visible.y)}:color=0x00000000`,
       'format=yuva420p',
       'setsar=1',
     )
+    if (preserveAlpha) parts.push(...opacityFilters(clipOpacity(clip)))
   } else {
     parts.push(
       // 黑场保持历史的 `black` 字面量，避免改变已有工程的滤镜图。
@@ -392,6 +404,53 @@ function videoTransformChain(
     )
   }
   return parts.join(',')
+}
+
+/** 纯色/黑场背景层（与预览背景语义一致：黑场用画布底色 #070808）。 */
+function compositeColorBackgroundLine(
+  background: CanvasBackground,
+  width: number,
+  height: number,
+  fps: number,
+  duration: number,
+): string {
+  return `color=c=${compositeBackgroundFfmpegColor(background)}:s=${width}x${height}:r=${fps}:d=${num(duration)},format=yuv420p`
+}
+
+/**
+ * 主轨片段的「画面层 + 背景层」合成（不透明度 / 混合模式）。
+ *
+ * 预览是 canvas：先铺该片段的画布背景，再用 globalAlpha +
+ * globalCompositeOperation 画片段。导出等价表达：
+ * - normal：`overlay(bg, fg)`；fg 的 alpha 就是不透明度；
+ * - 其它模式：先 `blend(bg, fg)` 得到 B(Cs,Cd)，再用 fg 的 alpha 做 alphamerge
+ *   （blend 会连 alpha 一起混合，screen 等模式会把它变成 1），最后叠回 bg：
+ *   等价于 Cd*(1-α) + α*B(Cs,Cd)。
+ */
+function mainCompositeLines(args: {
+  lines: string[]
+  clip: Clip
+  prefix: string
+  foreground: string
+  background: string
+  output: string
+}): void {
+  const { lines, clip, prefix, foreground, background, output } = args
+  const mode = clipBlendMode(clip)
+  if (mode === 'normal') {
+    lines.push(`${background}${foreground}overlay=0:0:format=auto,format=yuv420p${output}`)
+    return
+  }
+  lines.push(`${background}split=2[${prefix}cbg][${prefix}obg]`)
+  lines.push(`${foreground}split=2[${prefix}cfg][${prefix}oaf]`)
+  lines.push(`[${prefix}cbg]format=rgba[${prefix}cbgc]`)
+  lines.push(`[${prefix}cfg]format=rgba[${prefix}cfgc]`)
+  lines.push(
+    `[${prefix}cbgc][${prefix}cfgc]blend=all_mode=${ffmpegBlendMode(mode)}:all_opacity=1,format=rgba[${prefix}blended]`,
+  )
+  lines.push(`[${prefix}oaf]alphaextract[${prefix}alpha]`)
+  lines.push(`[${prefix}blended][${prefix}alpha]alphamerge[${prefix}masked]`)
+  lines.push(`[${prefix}obg][${prefix}masked]overlay=0:0:format=auto,format=yuv420p${output}`)
 }
 
 /** 模糊背景层：取片段自身画面放大到铺满画布并高斯模糊。 */
@@ -940,7 +999,11 @@ function buildContiguousExportPlan(
     const source = resolve(clip)
     const temporal = videoTemporalChain(clip, source.duration, fps)
     const background = clipBackground(clip, project)
-    const transform = videoTransformChain(clip, width, height, source, background)
+    // 不透明度 / 混合模式：画面层必须保留 alpha，之后叠到画布背景上。
+    const composite = hasBlendSettings(clip)
+    const transform = videoTransformChain(clip, width, height, source, background, {
+      preserveAlpha: composite,
+    })
     // ---- 带蒙版的主轨片段 ----
     // crop/flip 之后 alphamerge（蒙版 PNG 尺寸 = 裁切尺寸），再垫背景层合成，
     // 让蒙版外露出画布背景（黑 / 纯色 / 模糊），之后才进入 xfade / concat。
@@ -977,7 +1040,20 @@ function buildContiguousExportPlan(
       } else {
         lines.push(`[${pre}]${maskPieces.suffix}[${fg}]`)
       }
-      lines.push(`[${bg}][${fg}]overlay=0:0:format=auto,format=yuv420p${output}`)
+      if (composite) {
+        // 蒙版 + 不透明度/混合模式：maskedClipPieces 已把 alpha 缩放到 opacity，
+        // 这里按混合模式重新合成（普通模式与直接 overlay 等价）。
+        mainCompositeLines({
+          lines,
+          clip,
+          prefix: `ob${index}`,
+          foreground: `[${fg}]`,
+          background: `[${bg}]`,
+          output,
+        })
+      } else {
+        lines.push(`[${bg}][${fg}]overlay=0:0:format=auto,format=yuv420p${output}`)
+      }
       return
     }
 
@@ -997,7 +1073,39 @@ function buildContiguousExportPlan(
         `[bg0${index}]${temporal},${blurBackgroundChain(width, height, backgroundBlurPx(background))}[bg${index}]`,
       )
       lines.push(`[fg0${index}]${temporal},${transform}[fg${index}]`)
+      if (composite) {
+        mainCompositeLines({
+          lines,
+          clip,
+          prefix: `ob${index}`,
+          foreground: `[fg${index}]`,
+          background: `[bg${index}]`,
+          output,
+        })
+        return
+      }
       lines.push(`[bg${index}][fg${index}]overlay=0:0,format=yuv420p${output}`)
+      return
+    }
+
+    if (composite) {
+      // 黑场/纯色背景 + 不透明度或混合模式：生成背景层后合成，
+      // 而不是把背景色直接 pad 进画面（那样会丢掉 alpha）。
+      const prefix = `ob${index}`
+      const foreground = `[${prefix}fg]`
+      const backgroundLabel = `[${prefix}bg]`
+      lines.push(`${branch}${temporal},${transform}${foreground}`)
+      lines.push(
+        `${compositeColorBackgroundLine(background, width, height, fps, clipDuration)}${backgroundLabel}`,
+      )
+      mainCompositeLines({
+        lines,
+        clip,
+        prefix,
+        foreground,
+        background: backgroundLabel,
+        output,
+      })
       return
     }
 
@@ -1188,7 +1296,17 @@ function buildGappedExportPlan(
     const branch = videoBranches.get(index)!
     const source = resolve(unit.clip)
     const temporal = videoTemporalChain(unit.clip, source.duration, fps)
-    const transform = videoTransformChain(unit.clip, width, height, source)
+    const background = clipBackground(unit.clip, project)
+    const composite = hasBlendSettings(unit.clip)
+    // 默认路径保持历史行为（背景色直接 pad）；需要合成时才保留 alpha 并垫背景层。
+    const transform = videoTransformChain(
+      unit.clip,
+      width,
+      height,
+      source,
+      composite ? background : { type: 'black' },
+      { preserveAlpha: composite },
+    )
     // 带蒙版片段（含空隙的时间轴）：alphamerge 后垫黑色背景再合成。
     const unitMaskInput = maskInputs?.get(unit.clip.id)
     const unitMaskPieces =
@@ -1214,7 +1332,18 @@ function buildGappedExportPlan(
       } else {
         lines.push(`[${pre}]${unitMaskPieces.suffix}[${fg}]`)
       }
-      lines.push(`[${bg}][${fg}]overlay=0:0:format=auto,format=yuv420p${videoLabel(index)}`)
+      if (composite) {
+        mainCompositeLines({
+          lines,
+          clip: unit.clip,
+          prefix: `gb${index}`,
+          foreground: `[${fg}]`,
+          background: `[${bg}]`,
+          output: videoLabel(index),
+        })
+      } else {
+        lines.push(`[${bg}][${fg}]overlay=0:0:format=auto,format=yuv420p${videoLabel(index)}`)
+      }
       return
     }
     if (transform === null) {
@@ -1222,6 +1351,33 @@ function buildGappedExportPlan(
       lines.push(
         `color=c=black:s=${width}x${height}:r=${fps}:d=${num(unit.duration)},format=yuv420p,setsar=1${videoLabel(index)}`,
       )
+      return
+    }
+    if (composite) {
+      // 不透明度 / 混合模式：画面层叠到画布背景上（模糊背景需要先拆分支）。
+      const prefix = `gb${index}`
+      const foreground = `[${prefix}fg]`
+      const backgroundLabel = `[${prefix}bg]`
+      if (background.type === 'blur') {
+        lines.push(`${branch}split=2[${prefix}bs][${prefix}fs]`)
+        lines.push(
+          `[${prefix}bs]${temporal},${blurBackgroundChain(width, height, backgroundBlurPx(background))}${backgroundLabel}`,
+        )
+        lines.push(`[${prefix}fs]${temporal},${transform}${foreground}`)
+      } else {
+        lines.push(`${branch}${temporal},${transform}${foreground}`)
+        lines.push(
+          `${compositeColorBackgroundLine(background, width, height, fps, unit.duration)}${backgroundLabel}`,
+        )
+      }
+      mainCompositeLines({
+        lines,
+        clip: unit.clip,
+        prefix,
+        foreground,
+        background: backgroundLabel,
+        output: videoLabel(index),
+      })
       return
     }
     lines.push(`${branch}${temporal},${transform}${videoLabel(index)}`)

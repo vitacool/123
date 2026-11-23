@@ -7,6 +7,7 @@ import { audioClipDuration, audioFadeGain } from '../core/audio'
 import { clipFrameSourceAt } from '../core/clipTime'
 import { advancePlaybackClock, createPlaybackClockAnchor, type PlaybackClockAnchor } from '../core/playbackClock'
 import { clipGainAt, clipVolumeAt } from '../core/clipAudio'
+import { previewGain } from '../services/previewGain'
 import {
   BACKGROUND_FALLBACK,
   backgroundBlurPx,
@@ -675,7 +676,8 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
             local < duration
           if (!active) {
             if (!element.paused) element.pause()
-            element.muted = true
+            // 静音也走统一入口：被 Web Audio 接管的元素用 GainNode=0 静音。
+            previewGain.setGain(element, 0)
             continue
           }
           const target = clipFrameSourceAt(clip, Math.max(0, local))
@@ -687,22 +689,19 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
             }
           }
           const gain = active
-            ? Math.min(
-                1,
-                Math.max(
-                  0,
-                  effectiveTrackVolume(state, track) *
-                    clipVolumeAt(
-                      clip,
-                      Math.max(0, local),
-                      effectiveClipVolume(state, clip),
-                    ) *
-                    audioFadeGain(clip, Math.max(0, local)),
-                ),
+            ? Math.max(
+                0,
+                effectiveTrackVolume(state, track) *
+                  clipVolumeAt(
+                    clip,
+                    Math.max(0, local),
+                    effectiveClipVolume(state, clip),
+                  ) *
+                  audioFadeGain(clip, Math.max(0, local)),
               )
             : 0
-          element.volume = gain
-          element.muted = gain <= 0.001
+          // >1 的增益交给 GainNode（element.volume 上限只有 1）。
+          previewGain.setGain(element, gain)
           if (playing) {
             if (element.paused) void element.play().catch(() => undefined)
           } else if (!element.paused) {
@@ -723,7 +722,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
         state.assets.find((asset) => asset.url === clip.sourceUrl) ?? currentSource
       for (const element of baseVideoRefs.current.values()) {
         if (!element.paused) element.pause()
-        element.muted = true
+        previewGain.setGain(element, 0)
       }
       const target = getSourceTarget(state.project, state.playhead, state.cropSession)
       if (target) {
@@ -747,12 +746,16 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
         const segment = findSegmentAt(track.clips, state.playhead)
         // 叠加轨声音按轨道 muted/solo 与片段音量/淡入淡出参与混音。
         const audioActive = isOverlayAudioActive(state.project, track)
-        layerVideo.muted = !audioActive || !segment || segmentedPreviewMuted(segment.clip)
-        if (segment) {
+        if (!audioActive || !segment || segmentedPreviewMuted(segment.clip)) {
+          previewGain.setGain(layerVideo, 0)
+        } else {
           const local = Math.max(0, Math.min(segment.duration, state.playhead - segment.start))
-          layerVideo.volume = Math.max(
-            0,
-            Math.min(1, clipGainAt({ ...segment.clip, ...(previewClipPatch(state, segment.clip.id) ?? {}) }, local)),
+          previewGain.setGain(
+            layerVideo,
+            clipGainAt(
+              { ...segment.clip, ...(previewClipPatch(state, segment.clip.id) ?? {}) },
+              local,
+            ),
           )
         }
         if (isOverlayVideoVisible(track) && segment) {
@@ -795,6 +798,8 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
 
   useEffect(() => {
     if (!isPlaying) return
+    // 用户在按播放（或拖播放头）之后才走到这里：解除 AudioContext 的自动播放挂起。
+    previewGain.resume()
     const currentSource = source
     if (!currentSource && assets.length === 0) return
     const stateAtStart = store.getState()
@@ -837,18 +842,15 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
         const audioActive = isOverlayAudioActive(state.project, track)
         const segment = findSegmentAt(track.clips, time)
         const activeSegment = segment && isOverlayVideoVisible(track) ? segment : null
-        layerVideo.muted =
-          !audioActive || activeSegment === null || segmentedPreviewMuted(activeSegment.clip)
-        if (activeSegment) {
+        if (!audioActive || activeSegment === null || segmentedPreviewMuted(activeSegment.clip)) {
+          previewGain.setGain(layerVideo, 0)
+        } else {
           const local = Math.max(0, Math.min(activeSegment.duration, time - activeSegment.start))
-          layerVideo.volume = Math.max(
-            0,
-            Math.min(
-              1,
-              clipGainAt(
-                { ...activeSegment.clip, ...(previewClipPatch(state, activeSegment.clip.id) ?? {}) },
-                local,
-              ),
+          previewGain.setGain(
+            layerVideo,
+            clipGainAt(
+              { ...activeSegment.clip, ...(previewClipPatch(state, activeSegment.clip.id) ?? {}) },
+              local,
             ),
           )
         }
@@ -927,7 +929,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
       if (element.readyState < 1) return
       const frame = clipFrameSourceAt(next.clip, 0)
       element.pause()
-      element.muted = true
+      previewGain.setGain(element, 0)
       try {
         element.currentTime = safeMediaTime(frame, asset, element)
         preparedClipId = next.clip.id
@@ -989,7 +991,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
         // A trim gap: show black plus any overlay tracks, keep advancing.
         if (activeElement) {
           if (!activeElement.paused) activeElement.pause()
-          activeElement.muted = true
+          previewGain.setGain(activeElement, 0)
         }
         activeClipId = null
         prepareNext(state, time, null)
@@ -1017,19 +1019,19 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
       const switching = activeClipId !== clip.id || activeElement !== video
       if (activeElement && activeElement !== video) {
         if (!activeElement.paused) activeElement.pause()
-        activeElement.muted = true
+        previewGain.setGain(activeElement, 0)
       }
       activeElement = video
-      video.muted =
-        !isMainAudioActive(state.project) || segmentedPreviewMuted(clip)
       {
         // 片段音量/淡入淡出 + 临时预览：拖动音量滑块时能立刻听到变化。
+        // >1 的增益交给 GainNode（element.volume 只能到 1）。
         const local = Math.max(0, Math.min(segment.duration, time - segment.start))
         const gain = clipGainAt(
           { ...clip, ...(previewClipPatch(state, clip.id) ?? {}) },
           local,
         )
-        video.volume = Math.max(0, Math.min(1, gain))
+        const muted = !isMainAudioActive(state.project) || segmentedPreviewMuted(clip)
+        previewGain.setGain(video, muted ? 0 : gain)
       }
       if (switching) {
         preparedClipId = null
@@ -1121,12 +1123,33 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
       document.removeEventListener('visibilitychange', onVisibilityChange)
       for (const element of baseVideoRefs.current.values()) {
         if (!element.paused) element.pause()
-        element.muted = true
+        previewGain.setGain(element, 0)
       }
-      for (const layerVideo of overlayVideoRefs.current.values()) layerVideo.pause()
-      for (const audio of audioRefs.current.values()) audio.pause()
+      for (const layerVideo of overlayVideoRefs.current.values()) {
+        if (!layerVideo.paused) layerVideo.pause()
+        previewGain.setGain(layerVideo, 0)
+      }
+      for (const audio of audioRefs.current.values()) {
+        if (!audio.paused) audio.pause()
+        previewGain.setGain(audio, 0)
+      }
     }
   }, [isPlaying, source, store, setPlaying, assets.length])
+
+  /**
+   * AudioContext 的自动播放限制：只在用户手势里 resume（点播放、拖动、按键）。
+   * 卸载时关闭上下文，避免长期占用音频设备。
+   */
+  useEffect(() => {
+    const resume = () => previewGain.resume()
+    window.addEventListener('pointerdown', resume, true)
+    window.addEventListener('keydown', resume, true)
+    return () => {
+      window.removeEventListener('pointerdown', resume, true)
+      window.removeEventListener('keydown', resume, true)
+      previewGain.dispose()
+    }
+  }, [])
 
   useEffect(() => {
     // 预解码所有图片素材，加载完成后重绘（图片不依赖 video 的 timeupdate）。
