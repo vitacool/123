@@ -581,6 +581,24 @@ Ctrl+Z ×2 → 片段 1 / 素材 0 / 片段文字「素材已移除」/ 预览�
 
 **本轮验证**：全量单测 **1088 passed / 2 skipped**；`tsc` / `eslint` 0 错误；完整 e2e **22 passed**。
 
+### N8｜blob 读不到时整份草稿打不开（比预想更严重）
+
+- 位置：`services/draftStore.ts#restoreDraft`
+- 场景：本地素材的 blob 读不出来（配额不足导致当时没写进去、或被浏览器清理）
+- 根因：`if (!blob) continue` —— 素材既不进 `assets`、也不进 `missingAssets`，随后 `pruneProjectUrls` 用 `available` 把引用它的片段全部剔除
+- **负向对照实测揭示了更严重的后果**：不只是「片段消失」，而是 `assets.length === 0 && getProjectEnd(project) <= 0` 成立 → **整份草稿被判定为不可恢复、直接返回 null**（用户打开项目什么都没有）
+- 修法：这类素材改记为 `missingAssets`（复用 `missingAssetFromDraft`），`keepUrls` 因此包含其 url，片段以「素材已移除」占位保留 —— 与导入工程时跳过素材的处理一致
+- 验证：新增 2 条单测（blob 缺失 → 片段保留 + missingAssets 记录；blob 正常 → 不进 missingAssets）；负向对照下第一条失败（`expected null not to be null`）。相关 e2e 3 条通过
+
+### N9｜磁吸夹紧对所有命令生效 → 撤销/重做基准漂移
+
+- 位置：`store/internal.ts#run`
+- 根因：`run()` 对**每条命令**都套 `clampMainTrackStart`。链条：开磁吸 → 首段有间隙 → 某命令贴齐 → 撤销回到带间隙的底稿（`sync()` 按注释故意不夹）→ 再改个不透明度 → **又被夹回 0**，撤销/重做从此以不同底稿计算
+- 修法：新增 `mainTrackLayoutChanged(before, after)` —— 只有片段顺序或 `gapBefore` 真的变了才夹。属性/颜色/速度类命令不再抹掉空隙；拖动/删除/裁剪/排序仍然贴齐
+- 验证：2 条单测（非布局命令不夹 / 布局命令仍然贴齐）；负向对照下「改旋转」把间隙从 2 夹到 0，用例失败
+
+**本轮验证**：全量单测 **1092 passed / 2 skipped**（+4）；`tsc` / `eslint` 0 错误；完整 e2e **22 passed**。
+
 ---
 
 ## 附录：证据文件
