@@ -77,6 +77,25 @@ export const clampMainTrackStart = (project: Project): Project => {
   }
 }
 
+/**
+ * 这次命令**是否改动了主轨布局**（片段顺序 / 首段时隙）。
+ *
+ * 为什么需要这个判断：磁吸夹紧原来套在 `run()` 上、对**所有**命令生效。
+ * 于是「撤销首段贴齐 → 改个不透明度 → 又被夹回 0」，撤销/重做会以不同底稿计算
+ * （`sync()` 按注释故意不夹，磁吸属于编辑语义，只该在命令链里做）。
+ * 现在只有真的动了布局才夹：属性、颜色、速度这类命令不会再悄悄抹掉空隙。
+ */
+function mainTrackLayoutChanged(before: Project, after: Project): boolean {
+  if (before.clips.length !== after.clips.length) return true
+  for (let index = 0; index < after.clips.length; index += 1) {
+    const previous = before.clips[index]
+    const next = after.clips[index]
+    if (previous.id !== next.id) return true
+    if (Math.abs((previous.gapBefore ?? 0) - (next.gapBefore ?? 0)) > 0.0001) return true
+  }
+  return false
+}
+
 export function createStoreInternals(
   get: StoreGet,
   set: StoreSet,
@@ -263,7 +282,10 @@ export function createStoreInternals(
       execute(project) {
         let next = command.execute(project)
         if (next === project) return project
-        if (get().timelineSettings.mainTrackMagnet) {
+        if (
+          get().timelineSettings.mainTrackMagnet &&
+          mainTrackLayoutChanged(project, next)
+        ) {
           next = clampMainTrackStart(next)
         }
         // 统一的字幕联动 hook：任何改动片段布局的命令都在同一步撤销里

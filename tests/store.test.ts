@@ -510,3 +510,49 @@ describe('导出区间（I/O 打点）', () => {
     expect(store.getState().exportRangeRaw).toBeNull()
   })
 })
+
+/**
+ * 磁吸夹紧只应在**布局真的变了**时发生。
+ *
+ * 修前 `run()` 对所有命令无脑 `clampMainTrackStart`：撤销「首段贴齐」之后
+ * 改个不透明度，空隙又被夹回 0，导致撤销/重做以不同底稿计算。
+ */
+describe('主轨磁吸：只夹布局改动，不夹属性改动', () => {
+  const gapOf = (store: ReturnType<typeof makeStore>) =>
+    store.getState().project.clips[0]?.gapBefore ?? 0
+
+  it('非布局命令（改旋转）不会抹掉撤销回来的空隙', () => {
+    const store = makeStore()
+    const clipId = store.getState().project.clips[0].id
+    // 把首段移到 2s，制造 gapBefore = 2
+    store.getState().moveClipToTrackAtTime(clipId, null, 2)
+    expect(gapOf(store)).toBeCloseTo(2, 3)
+
+    // 开磁吸：会执行一条可撤销的「贴齐首段」命令
+    store.getState().toggleTimelineSetting('mainTrackMagnet')
+    expect(gapOf(store)).toBeCloseTo(0, 3)
+
+    // 撤销贴齐 → 回到有间隙的底稿（sync 故意不夹）
+    store.getState().undo()
+    expect(gapOf(store)).toBeCloseTo(2, 3)
+
+    // 关键：一个**不涉及布局**的编辑不该把空隙又夹回 0
+    store.getState().setRotation(45)
+    expect(gapOf(store), '改旋转不应触发磁吸夹紧').toBeCloseTo(2, 3)
+    expect(store.getState().project.clips[0].rotation).toBe(45)
+
+    // 再撤销：旋转撤掉，间隙仍然在（基准一致）
+    store.getState().undo()
+    expect(store.getState().project.clips[0].rotation).toBe(0)
+    expect(gapOf(store)).toBeCloseTo(2, 3)
+  })
+
+  it('布局命令（拖动片段）在磁吸开着时仍然贴齐', () => {
+    const store = makeStore()
+    const clipId = store.getState().project.clips[0].id
+    store.getState().toggleTimelineSetting('mainTrackMagnet')
+    // 磁吸开着拖到 2s：命令链里应当把它夹回 0
+    store.getState().moveClipToTrackAtTime(clipId, null, 2)
+    expect(gapOf(store)).toBeCloseTo(0, 3)
+  })
+})
