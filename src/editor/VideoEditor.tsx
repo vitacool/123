@@ -21,7 +21,7 @@ import { configureFFmpegAssets } from './services/ffmpegExporter'
 import { parseSubtitleText } from './core/text'
 import type { TranscribeProvider } from './services/asr/types'
 import {
-  countProjectRecords, deleteDraftProject, hasProjectRecord, loadProjectRecords, reportDraftSaveFailure, restoreDraft, saveMediaBlob, toDraftAsset, buildDraftRecord, saveProjectRecordSerialized, saveProjectRecord } from './services/draftStore'
+  countProjectRecords, deleteDraftProject, hasProjectRecord, loadProjectRecords, persistImportedAssets, reportDraftSaveFailure, restoreDraft, saveMediaBlob, toDraftAsset, buildDraftRecord, saveProjectRecordSerialized, saveProjectRecord } from './services/draftStore'
 import {
   PROJECT_LIMIT,
   projectLimitReached,
@@ -1026,13 +1026,8 @@ export function VideoEditor({
       }
     }
     if (imported.length > 0) {
-      for (const asset of imported) {
-        if (asset.file) {
-          void saveMediaBlob(asset.id, asset.file).catch(() =>
-            reportDraftSaveFailure(store.getState().notify),
-          )
-        }
-      }
+      // 与工程文件导入共用同一实现：刷新后素材必须还能从 IndexedDB 取回来。
+      void persistImportedAssets(imported, { notify: store.getState().notify })
       store.getState().addAssets(imported)
       // 从「最近项目」列表里直接导入时，素材到了就回到编辑器。
       setLibraryOpen(false)
@@ -1185,6 +1180,10 @@ export function VideoEditor({
       }
     }
     setLoadingLabel(null)
+
+    // 工程文件里只有素材元信息：重新选好的素材必须立刻写进 IndexedDB，
+    // 否则刷新后 restoreDraft 找不到 Blob，会把素材和引用它的片段一起丢掉。
+    await persistImportedAssets(extraAssets, { notify: store.getState().notify })
 
     const result = applyProjectToStore(store, {
       project: file.project,

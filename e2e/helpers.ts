@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { statSync } from 'node:fs'
-import type { Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import ffmpegPath from 'ffmpeg-static'
 
 /** 测试素材（3 秒彩条 + 440Hz 正弦音），由 scripts/make-test-fixture.mjs 生成。 */
@@ -26,6 +26,77 @@ export async function expectClipCount(page: Page, count: number): Promise<void> 
     count,
     { timeout: 60_000 },
   )
+}
+
+/** 拖播放头到片段中部后分割，得到两段。 */
+export async function splitIntoTwo(page: Page): Promise<void> {
+  const bar = page.locator('.clip-bar[data-clip-id]').first()
+  await bar.click()
+  const box = await bar.boundingBox()
+  const handleBox = await page.locator('.playhead-handle').boundingBox()
+  if (!box || !handleBox) throw new Error('时间轴元素不可见')
+  const startX = handleBox.x + handleBox.width / 2
+  const y = handleBox.y + handleBox.height / 2
+  await page.mouse.move(startX, y)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width * 0.5, y, { steps: 8 })
+  await page.mouse.up()
+  const split = page.locator('button[aria-label*="在播放头处分割片段"]').first()
+  await expect(split).toBeEnabled()
+  await split.click()
+  await expectClipCount(page, 2)
+}
+
+/**
+ * 等待 IndexedDB 里同时有草稿记录与素材 blob（自动保存完成）。
+ *
+ * 注意不能写成 `page.waitForFunction(() => new Promise(...))`：Playwright 不会等待
+ * 这个 Promise，而是把它当 truthy 直接返回（总是立刻成功）。这里用 expect.poll
+ * 在 Node 侧轮询，page.evaluate 会真正 await 浏览器里的 Promise。
+ */
+export async function waitForDraftSaved(page: Page): Promise<void> {
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          () =>
+            new Promise<number>((resolve) => {
+              const request = indexedDB.open('framecut-drafts')
+              request.onerror = () => resolve(-1)
+              request.onsuccess = () => {
+                const db = request.result
+                if (
+                  !db.objectStoreNames.contains('draft') ||
+                  !db.objectStoreNames.contains('media')
+                ) {
+                  db.close()
+                  resolve(-1)
+                  return
+                }
+                const getAll = db.transaction('draft', 'readonly').objectStore('draft').getAll()
+                getAll.onerror = () => {
+                  db.close()
+                  resolve(-1)
+                }
+                getAll.onsuccess = () => {
+                  const drafts = getAll.result.length
+                  const count = db.transaction('media', 'readonly').objectStore('media').count()
+                  count.onerror = () => {
+                    db.close()
+                    resolve(-1)
+                  }
+                  count.onsuccess = () => {
+                    const media = count.result
+                    db.close()
+                    resolve(drafts > 0 && media > 0 ? 1 : 0)
+                  }
+                }
+              }
+            }),
+        ),
+      { timeout: 60_000, intervals: [200, 300, 500] },
+    )
+    .toBe(1)
 }
 
 /**

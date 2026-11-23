@@ -325,6 +325,62 @@ export async function saveMediaBlob(id: string, blob: Blob): Promise<void> {
   await withStore(MEDIA_STORE, 'readwrite', (store) => store.put(blob, id))
 }
 
+/** 素材 Blob 写入失败提示的全局去重时间戳（30s 内只提示一次，批量导入不刷屏）。 */
+let lastMediaSaveErrorAt = 0
+
+/**
+ * 素材 Blob 写入 IndexedDB 失败（配额不足最常见）时的可见提示。
+ *
+ * 必须提示、不能静默：素材此刻还在内存里，界面看上去一切正常，但刷新后
+ * restoreDraft 找不到 Blob，会直接剔除素材和引用它的片段。
+ */
+export function reportMediaSaveFailure(
+  notify?: (message: string, kind?: 'info' | 'success' | 'warning' | 'error') => void,
+): void {
+  if (!notify) return
+  const now = Date.now()
+  if (now - lastMediaSaveErrorAt < 30_000) return
+  lastMediaSaveErrorAt = now
+  notify('素材未能保存，刷新后将丢失', 'error')
+}
+
+/**
+ * 把导入进来的本地素材写进 IndexedDB。
+ *
+ * 为什么必须只有一个实现：工程文件（以及宿主 `loadProject` 传入的工程）只有素材
+ * 元信息，没有任何 Blob —— 重新选择出来的 Blob 只在这一刻存在于内存里。漏写一次，
+ * 刷新后 restoreDraft 在 media store 里查不到 Blob，就会跳过该素材并剔除引用它的
+ * 片段，用户看到的是「素材全部不可用、片段全没了」。拖拽导入、工程文件导入、宿主
+ * API 三条路径都走这里，避免以后新增入口时再漏。
+ *
+ * 单个素材写失败不阻断本次会话（素材仍在内存里可继续编辑），但会汇总提示一次。
+ */
+export async function persistImportedAssets(
+  assets: Iterable<MediaAsset>,
+  options: {
+    notify?: (message: string, kind?: 'info' | 'success' | 'warning' | 'error') => void
+  } = {},
+): Promise<{ saved: number; failed: number }> {
+  const pending = [...assets].filter((asset) => Boolean(asset.file))
+  const results = await Promise.allSettled(
+    pending.map(async (asset) => {
+      await saveMediaBlob(asset.id, asset.file as Blob)
+    }),
+  )
+  let saved = 0
+  let failed = 0
+  results.forEach((result, index) => {
+    if (result.status === 'fulfilled') {
+      saved += 1
+      return
+    }
+    failed += 1
+    console.warn(`[FrameCut] 素材未能保存到本地：${pending[index].name}`, result.reason)
+  })
+  if (failed > 0) reportMediaSaveFailure(options.notify)
+  return { saved, failed }
+}
+
 /** 草稿保存失败提示的全局去重时间戳（30s 内只提示一次，批量导入不刷屏）。 */
 let lastDraftSaveErrorAt = 0
 

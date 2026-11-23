@@ -10,6 +10,7 @@ import type { FrameCutTheme } from './core/theme'
 import { createId } from './core/ids'
 import { projectNameFromSource } from './core/projectLibrary'
 import { remoteName, readAssetFile } from './services/assetReader'
+import { persistImportedAssets } from './services/draftStore'
 import { captureFrameBlob, frameCaptureWarning } from './services/frameCapture'
 import { exportProject, terminateFFmpegRuntime } from './services/ffmpegExporter'
 import type { ExportFormat } from './services/ffmpegExporter'
@@ -221,6 +222,9 @@ export function createFrameCutApi({
         extraAssets.push(asset)
         urlMap.set(pair.url, asset.url)
       }
+      // 重新选择出来的素材 Blob 必须立刻落盘：工程本身只有元信息，
+      // 否则刷新后 restoreDraft 找不到素材，会把这些片段全部剔除。
+      await persistImportedAssets(extraAssets, { notify: store.getState().notify })
       const result = applyProjectToStore(store, {
         project,
         urlMap,
