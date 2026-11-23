@@ -33,6 +33,9 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      # 依赖的构建脚本白名单在 pnpm-workspace.yaml 的 allowBuilds 里
+      # （pnpm 11 不再读 package.json 的 pnpm 字段），所以这里不需要额外的
+      # 「手动跑 ffmpeg-static/install.js」步骤。
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
 
@@ -71,13 +74,19 @@ jobs:
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
 
-      # 测试素材靠 ffmpeg-static 现场生成，需要它的二进制（pnpm 默认会跳过构建脚本）
-      - name: 准备 ffmpeg-static 二进制
-        run: node node_modules/ffmpeg-static/install.js
+      # 浏览器下载一次约 130MB（Firefox）/ 170MB（Chromium），缓存后重跑只需几秒。
+      - name: 缓存 Playwright 浏览器
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ matrix.browser }}-${{ hashFiles('pnpm-lock.yaml') }}
 
       - name: 安装 Playwright 浏览器
         run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
 
+      # public/ffmpeg 与 public/onnxruntime 是生成物（.gitignore），
+      # playwright.config.ts 的 webServer 会在起服务前自动跑 copy 脚本。
       - name: E2E（${{ matrix.browser }}）
         run: pnpm exec playwright test --project=${{ matrix.browser }}
 

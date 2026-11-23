@@ -4,3 +4,9 @@ nodeLinker: hoisted
 verifyDepsBeforeRun: false
 allowBuilds:
   esbuild: true
+  # ffmpeg-static 的 postinstall 会下载 ffmpeg 二进制（E2E 素材生成依赖它）
+  ffmpeg-static: true
+  # 原生/后处理脚本：sharp（图片）、onnxruntime-node（ASR）、protobufjs（transformers 依赖）
+  sharp: true
+  onnxruntime-node: true
+  protobufjs: true
