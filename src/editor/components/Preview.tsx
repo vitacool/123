@@ -227,6 +227,14 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
   const baseVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map())
   const audioRefs = useRef<Map<string, HTMLAudioElement>>(new Map())
   const paintedRef = useRef(false)
+  /**
+   * 解码失败过的源 url（`<video>` 触发 error 后记下，成功加载后移除）。
+   * 用来把「暂时还没就绪」与「永久解不出来」区分开：前者保留上一帧避免黑闪，
+   * 后者必须清屏并提示，否则画面会永远停在上一段。
+   */
+  const mediaErrorRef = useRef<Set<string>>(new Set())
+  /** 已经提示过的源（避免每帧重复 toast）。 */
+  const notifiedErrorRef = useRef<Set<string>>(new Set())
   const overlayVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map())
   /** 已解码的图片素材（url → Image），供 Canvas 直接绘制。 */
   const imageRefs = useRef<Map<string, HTMLImageElement>>(new Map())
@@ -588,6 +596,29 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
 
     const baseVideo = baseVideoRefs.current.get(baseSegment.clip.sourceUrl) ?? null
     const baseIsImage = baseSegment.clip.type === 'image'
+    /**
+     * 解码失败：清屏 + 提示，而不是继续保留上一段画面。
+     *
+     * 下面「保留最后一帧」的逻辑是为了避免切片段时黑闪，但如果源本身已经解不出来
+     * （文件损坏 / blob URL 已被回收 / 编码不支持），保留旧帧会让用户以为
+     * 播放卡住了 —— 画面一直停在上一段，没有任何提示。
+     */
+    if (!baseIsImage && mediaErrorRef.current.has(baseSegment.clip.sourceUrl)) {
+      clearFrame()
+      paintText()
+      paintedRef.current = true
+      if (!notifiedErrorRef.current.has(baseSegment.clip.sourceUrl)) {
+        notifiedErrorRef.current.add(baseSegment.clip.sourceUrl)
+        // 用 draw 里现取的 state 查名字：draw 的依赖是 [store]，不能用外部闭包变量
+        // （assetForClip 会引入新的 exhaustive-deps 违规）。
+        const label =
+          state.assets.find((asset) => asset.url === baseSegment.clip.sourceUrl)?.name ??
+          state.source?.name ??
+          '该片段'
+        store.getState().notify(`「${label}」无法解码，画面显示为背景色`, 'warning')
+      }
+      return
+    }
     if (!baseIsImage && (!baseVideo || baseVideo.readyState < 2 || baseVideo.videoWidth === 0)) {
       // Keep the last rendered frame on screen while the next source loads or
       // seeks, so a clip switch never flashes a black canvas.
@@ -1530,6 +1561,18 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
                   preload="auto"
                   playsInline
                   muted
+                  onError={() => {
+                    // 解码失败：记下来，交给 draw 清屏并提示（不再保留上一帧）。
+                    mediaErrorRef.current.add(url)
+                    drawRef.current()
+                  }}
+                  onLoadedData={() => {
+                    // 重新解码成功（例如重新导入同一素材）：清掉错误状态。
+                    if (mediaErrorRef.current.delete(url)) {
+                      notifiedErrorRef.current.delete(url)
+                      drawRef.current()
+                    }
+                  }}
                 />
               ))}
               {(project.overlayTracks ?? []).map((track) => {
