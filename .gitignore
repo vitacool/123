@@ -24,3 +24,12 @@ Thumbs.db
 
 # 本地端到端验证产物（.verify/cdp-import.mjs 录的测试视频、截图、浏览器 profile）
 .verify/
+# E2E 测试素材（由 scripts/make-test-fixture.mjs 用 ffmpeg-static 生成，不进版本库）
+tests/e2e/fixtures/
+
+# Playwright 产物
+playwright-report/
+test-results/
+
+# lint 报告（lint:report 产出）
+eslint-report.json

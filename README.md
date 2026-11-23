@@ -513,6 +513,59 @@ anullsrc=r=48000:cl=stereo,atrim=duration=3.4,asetpts=PTS-STARTPTS,
 
 ## 4. 测试与验证
 
+### 开发与测试（本地）
+
+```bash
+pnpm install          # 安装依赖（ffmpeg-static 若跳过构建脚本，见下）
+pnpm dev              # 开发服务器 http://127.0.0.1:5173/（带 COOP/COEP，多线程 FFmpeg 可用）
+
+pnpm typecheck        # tsc -b（类型门禁：strict + noUnusedLocals/Parameters）
+pnpm lint             # ESLint flat config（见下：只报告，不自动修复）
+pnpm test             # vitest（当前 78 文件 / 979 通过）
+pnpm build            # tsc -b && vite build（应用产物 dist/）
+pnpm build:lib        # tsc -b && vite build --config vite.config.lib.ts（库产物 dist-lib/ + .d.ts）
+```
+
+**ESLint**：[eslint.config.js](eslint.config.js) 用 flat config，`typescript-eslint` + `eslint-plugin-react-hooks`，
+其中 `react-hooks/exhaustive-deps` 与 `rules-of-hooks` 是 **error**。策略是"先量化、不自动修"：
+
+- 存量 101 个 error 通过 [eslint-suppressions.json](eslint-suppressions.json) 记录为**基线条目**（ESLint 10 的 bulk
+  suppressions）：规则仍是 error，**新增**违规会立刻让 `pnpm lint` 失败，而存量不会被批量改写。
+- 分类（共 97 条抑制 + 14 条 warning）：`exhaustive-deps` 46、`no-useless-assignment` 16、
+  `set-state-in-effect` 14、`no-non-null-assertion` 13、`refs` 6、`prefer-const` 6、
+  `no-control-regex` 5（导出文件名清洗用，刻意保留）、其余为单点问题。集中在
+  `components/Timeline.tsx`(25)、`Preview.tsx`(9)、`ContextMenu.tsx`(7)、`ExportDialog.tsx`(7)。
+- 与 hooks 依赖相关的 46 条**没有**批量加依赖数组：那会改变运行时行为，需要逐条评估后再手工改。
+
+**Playwright E2E**（Chromium + Firefox）：
+
+```bash
+pnpm test:e2e              # 两个浏览器都跑（4 个用例 × 2 = 8）
+pnpm test:e2e:chromium     # 只跑 Chromium
+pnpm test:e2e:firefox      # 只跑 Firefox
+```
+
+覆盖三条主链路（README 上游的 `.verify/` 是更早的手写 CDP 脚本，Playwright 是正式入口）：
+
+| 用例 | 断言 |
+| --- | --- |
+| `e2e/import-export.spec.ts` | 导入 → 拖播放头 → 分割 → 删除一段 → 导出；用 **真实 ffmpeg**（ffmpeg-static）探测产物：约 1.5s、h264 视频、**含 aac 音轨** |
+| `e2e/editing-drag.spec.ts` | 拖动片段（位置变化）、拖动右侧裁剪手柄（变短且左边缘不动）——覆盖 Firefox 的 `pointerId` 场景 |
+| `e2e/draft-restore.spec.ts` | 编辑后自动保存 → 刷新 → 从「最近项目」打开 → 片段与项目名恢复 |
+
+测试素材（3 秒彩条 + 440Hz 正弦音）由 [scripts/make-test-fixture.mjs](scripts/make-test-fixture.mjs) 用
+`ffmpeg-static` 现场生成到 `tests/e2e/fixtures/clip.mp4`（**不进版本库**）；若 pnpm 跳过了
+ffmpeg-static 的构建脚本，先执行 `node node_modules/ffmpeg-static/install.js` 下载二进制。
+
+**CI**：[.github/workflows/ci.yml](.github/workflows/ci.yml) 两个 job ——
+`typecheck / lint / vitest`（外加 `build:lib` 验证声明产物），以及 `playwright (chromium)`、
+`playwright (firefox)` 的矩阵；失败时上传 `playwright-report/` 与 `test-results/`。
+
+**库发布**：`pnpm build:lib` 用 [vite-plugin-dts](vite.config.lib.ts) 产出声明（`dist-lib/index.d.ts`
+重新导出全部公开 API，共 225 个 `.d.ts`）。`package.json` 的 `types` 与 `exports["."].types` 都指向
+`./dist-lib/index.d.ts`；`react` / `react-dom` 是 **peerDependencies**（宿主提供），同时保留在
+`devDependencies` 里供本地开发与测试。
+
 ### 单元测试：979 个通过（2 个跳过），共 78 个文件
 
 ```text

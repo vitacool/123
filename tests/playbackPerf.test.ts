@@ -130,14 +130,18 @@ describe('源码守卫：播放期间不再逐帧触发 React 渲染', () => {
     expect(timeline).toMatch(/element\.style\.left/)
   })
 
-  it('MediaLibrary / Toolbar 不再订阅 playhead', () => {
-    for (const file of [
-      'src/editor/components/MediaLibrary.tsx',
-      'src/editor/components/Toolbar.tsx',
-    ]) {
-      const source = read(file)
-      expect(source).not.toMatch(/useEditorStore\(\(state\) => state\.playhead\)/)
-    }
+  it('MediaLibrary 不订阅 playhead；Toolbar 必须订阅（按钮可用性依赖它）', () => {
+    // MediaLibrary 只在点击时用播放头 → 不订阅，播放期间零重渲染。
+    expect(read('src/editor/components/MediaLibrary.tsx')).not.toMatch(
+      /useEditorStore\(\(state\) => state\.playhead\)/,
+    )
+    // Toolbar 的「能否分割/裁剪」是按播放头位置算的：必须订阅，
+    // 否则拖动播放头后按钮不会解除 disabled（E2E 抓到的真实回归）。
+    // 播放期间的开销由 store 的 10Hz 节流兜住（见 Preview 的 commitTime）。
+    expect(read('src/editor/components/Toolbar.tsx')).toMatch(
+      /useEditorStore\(\(state\) => state\.playhead\)/,
+    )
+    expect(read('src/editor/components/Preview.tsx')).toMatch(/now - lastStoreSync >= 100/)
   })
 
   it('缩略图条与关键帧条已 memo 化', () => {

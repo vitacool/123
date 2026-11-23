@@ -4,7 +4,7 @@ import { findAudioClipLocation, getAudioActionAvailability } from '../core/audio
 import { findTextClipLocation, getTextActionAvailability } from '../core/text'
 import { isAudioLocked, isMainLocked, isOverlayLocked, isTextLocked } from '../core/tracks'
 import { reverseActionState } from '../core/reverse'
-import { useEditorStore, useEditorStoreApi } from '../store/EditorProvider'
+import { useEditorStore } from '../store/EditorProvider'
 import { selectCanRedo, selectCanUndo } from '../store/editorStore'
 import { Icon, type IconName } from './Icon'
 
@@ -48,13 +48,15 @@ export function Toolbar({
   /** 导入 SRT / VTT 字幕文件。 */
   onImportSubtitles?: () => void
 } = {}) {
-  const store = useEditorStoreApi()
   /**
-   * 播放头只在**渲染时读一次快照**，不再订阅 —— 否则播放期间 60Hz 的 playhead
-   * 变化会让整个工具栏每秒重渲染 60 次（实测是最大的一块开销）。
-   * 需要最新值的判断都在事件处理里重新读 store。
+   * 播放头必须**订阅**：工具栏的按钮可用性（能否分割/裁剪…）是按播放头与选中片段
+   * 的位置算的。曾经为了性能改成「渲染时读一次」，结果拖动播放头后按钮不会解除
+   * disabled（提示词 13 引入的回归，提示词 14 的 E2E 抓到）。
+   *
+   * 代价可控：store 里的 playhead 在播放时已经节流到 10Hz（见 Preview 的 commitTime），
+   * 所以这里最多每秒 10 次重渲染，不是 60Hz。
    */
-  const playhead = store.getState().playhead
+  const playhead = useEditorStore((state) => state.playhead)
   const project = useEditorStore((state) => state.project)
   const selectedClipId = useEditorStore((state) => state.selectedClipId)
   const cropSession = useEditorStore((state) => state.cropSession)

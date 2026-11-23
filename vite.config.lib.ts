@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import dts from 'vite-plugin-dts'
 import framecutScope from './tools/postcss-framecut-scope.mjs'
 
 // Embeddable ES module build. React stays external; the host serves the
@@ -11,7 +12,18 @@ export default defineConfig({
       plugins: [framecutScope()],
     },
   },
-  plugins: [react()],
+  plugins: [
+    react(),
+    // 产出 .d.ts（dist-lib/ 下的声明文件即 package.json 的 types 入口）。
+    dts({
+      // 用应用的 tsconfig（含 src 全量），声明产物留在 dist-lib/。
+      tsconfigPath: './tsconfig.app.json',
+      entryRoot: 'src/editor',
+      outDirs: ['dist-lib'],
+      insertTypesEntry: true,
+      exclude: ['src/editor/styles/**'],
+    }),
+  ],
   publicDir: false,
   resolve: {
     conditions: ['onnxruntime-web-use-extern-wasm'],

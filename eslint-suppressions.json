@@ -1,0 +1,216 @@
+{
+  "src/editor/VideoEditor.tsx": {
+    "react-hooks/exhaustive-deps": {
+      "count": 2
+    },
+    "react-hooks/set-state-in-effect": {
+      "count": 1
+    }
+  },
+  "src/editor/components/AnimatedValueHint.tsx": {
+    "react-hooks/exhaustive-deps": {
+      "count": 1
+    }
+  },
+  "src/editor/components/AudioTracks.tsx": {
+    "react-hooks/exhaustive-deps": {
+      "count": 4
+    }
+  },
+  "src/editor/components/AudioWaveform.tsx": {
+    "react-hooks/exhaustive-deps": {
+      "count": 2
+    },
+    "react-hooks/set-state-in-effect": {
+      "count": 1
+    }
+  },
+  "src/editor/components/AutoCaptionDialog.tsx": {
+    "react-hooks/set-state-in-effect": {
+      "count": 1
+    }
+  },
+  "src/editor/components/ClipFilmstrip.tsx": {
+    "react-hooks/exhaustive-deps": {
+      "count": 1
+    },
+    "react-hooks/set-state-in-effect": {
+      "count": 1
+    }
+  },
+  "src/editor/components/ClipSpeedSection.tsx": {
+    "react-hooks/set-state-in-effect": {
+      "count": 1
+    }
+  },
+  "src/editor/components/ContextMenu.tsx": {
+    "react-hooks/exhaustive-deps": {
+      "count": 3
+    },
+    "react-hooks/refs": {
+      "count": 4
+    }
+  },
+  "src/editor/components/CurvePopover.tsx": {
+    "react-hooks/exhaustive-deps": {
+      "count": 1
+    }
+  },
+  "src/editor/components/ExportDialog.tsx": {
+    "no-control-regex": {
+      "count": 1
+    },
+    "react-hooks/exhaustive-deps": {
+      "count": 2
+    },
+    "react-hooks/set-state-in-effect": {
+      "count": 3
+    }
+  },
+  "src/editor/components/MarkerPopover.tsx": {
+    "react-hooks/refs": {
+      "count": 1
+    },
+    "react-hooks/set-state-in-effect": {
+      "count": 1
+    }
+  },
+  "src/editor/components/MediaLibrary.tsx": {
+    "react-hooks/set-state-in-effect": {
+      "count": 1
+    }
+  },
+  "src/editor/components/Preview.tsx": {
+    "react-hooks/exhaustive-deps": {
+      "count": 7
+    },
+    "react-hooks/refs": {
+      "count": 1
+    }
+  },
+  "src/editor/components/ProjectLibrary.tsx": {
+    "react-hooks/exhaustive-deps": {
+      "count": 1
+    }
+  },
+  "src/editor/components/TextPropertiesPanel.tsx": {
+    "react-hooks/exhaustive-deps": {
+      "count": 1
+    },
+    "react-hooks/set-state-in-effect": {
+      "count": 1
+    }
+  },
+  "src/editor/components/TextTracks.tsx": {
+    "react-hooks/exhaustive-deps": {
+      "count": 4
+    }
+  },
+  "src/editor/components/Timeline.tsx": {
+    "no-useless-assignment": {
+      "count": 6
+    },
+    "react-hooks/exhaustive-deps": {
+      "count": 16
+    },
+    "react-hooks/preserve-manual-memoization": {
+      "count": 1
+    },
+    "react-hooks/set-state-in-effect": {
+      "count": 2
+    }
+  },
+  "src/editor/components/Toast.tsx": {
+    "react-hooks/set-state-in-effect": {
+      "count": 1
+    }
+  },
+  "src/editor/components/TransitionThumb.tsx": {
+    "react-hooks/immutability": {
+      "count": 1
+    }
+  },
+  "src/editor/components/floating.ts": {
+    "react-hooks/exhaustive-deps": {
+      "count": 1
+    }
+  },
+  "src/editor/core/frameCompose.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/editor/core/geometry.ts": {
+    "no-useless-assignment": {
+      "count": 5
+    }
+  },
+  "src/editor/core/normalizeProject.ts": {
+    "prefer-const": {
+      "count": 2
+    }
+  },
+  "src/editor/core/operations.ts": {
+    "no-useless-assignment": {
+      "count": 2
+    },
+    "prefer-const": {
+      "count": 1
+    }
+  },
+  "src/editor/core/projectLibrary.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/editor/core/reverse.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/editor/core/text.ts": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "src/editor/projectFile.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/editor/services/animationRenderer.ts": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "src/editor/services/ffmpegExporter.ts": {
+    "prefer-const": {
+      "count": 1
+    }
+  },
+  "src/editor/services/videoTranscoder.ts": {
+    "preserve-caught-error": {
+      "count": 1
+    }
+  },
+  "src/editor/store/slices/editing.ts": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "tests/exportResources.test.ts": {
+    "no-empty-character-class": {
+      "count": 1
+    }
+  },
+  "tests/fixB.test.ts": {
+    "prefer-const": {
+      "count": 1
+    }
+  },
+  "tests/tracks.test.ts": {
+    "prefer-const": {
+      "count": 1
+    }
+  }
+}

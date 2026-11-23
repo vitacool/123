@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+# 同一分支的旧运行自动取消，省额度。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Playwright 在 CI 里不要复用本地服务器
+  CI: 'true'
+
+jobs:
+  # 类型检查 + lint + 单元测试：三者都快，合并成一个 job 减少排队。
+  static-and-unit:
+    name: typecheck / lint / vitest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: typecheck（tsc -b）
+        run: pnpm typecheck
+
+      - name: lint（ESLint flat config）
+        run: pnpm lint
+
+      - name: 单元测试（vitest）
+        run: pnpm test
+
+      # 库构建顺带验证 vite-plugin-dts 的声明产物
+      - name: 构建库产物
+        run: pnpm build:lib
+
+  e2e:
+    name: playwright (${{ matrix.browser }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      # 测试素材靠 ffmpeg-static 现场生成，需要它的二进制（pnpm 默认会跳过构建脚本）
+      - name: 准备 ffmpeg-static 二进制
+        run: node node_modules/ffmpeg-static/install.js
+
+      - name: 安装 Playwright 浏览器
+        run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
+
+      - name: E2E（${{ matrix.browser }}）
+        run: pnpm exec playwright test --project=${{ matrix.browser }}
+
+      - name: 上传失败产物
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-${{ matrix.browser }}-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
