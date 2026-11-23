@@ -93,6 +93,7 @@ import {
 } from '../core/exportRange'
 import { formatClock } from '../core/format'
 import { createStoreInternals, type HistoryState } from './internal'
+import { createPlaybackSlice } from './slices/playback'
 import { createUiSlice } from './slices/ui'
 import {
   clampCrop,
@@ -194,13 +195,6 @@ import {
   toggleSelection,
 } from '../core/selection'
 import { createDeleteManyCommand, createDetachAudioCommand, createMoveManyCommand, createPasteCommand, createSetCanvasBackgroundCommand, createSetClipBackgroundCommand } from '../core/commands'
-import {
-  collectEditPoints,
-  fitZoom,
-  nextEditPoint,
-  stepByFrames,
-  stepBySeconds,
-} from '../core/playhead'
 import { mapWordsToTimeline } from '../core/captionMapping'
 import { mergeRelinkedCaptions } from '../core/captionLink'
 import type { TimelineWord, WordsBySource } from '../core/captionMapping'
@@ -228,7 +222,6 @@ import {
   getActionAvailability,
   getProjectEnd,
   getTimeline,
-  snapToMarker,
 } from '../core/timeline'
 import {
   FREEZE_DEFAULT_DURATION,
@@ -238,7 +231,6 @@ import {
   MAX_OVERLAY_TRACKS,
   SCALE_MAX,
   SCALE_MIN,
-  TIMELINE_DEFAULT_ZOOM,
   TIMELINE_MAX_ZOOM,
   TIMELINE_MIN_ZOOM,
 } from '../core/constants'
@@ -785,6 +777,7 @@ export function createEditorStore() {
 
     return {
       ...createUiSlice({ get, set, internals }),
+      ...createPlaybackSlice({ get, set, internals }),
       project: initial,
       source: null,
       assets: [],
@@ -792,13 +785,9 @@ export function createEditorStore() {
       selectedClipId: null,
       selectedIds: [],
       clipboard: { items: [], count: 0 },
-      playhead: 0,
-      isPlaying: false,
-      timelineZoom: TIMELINE_DEFAULT_ZOOM,
       projectId: null,
       projectName: DEFAULT_PROJECT_NAME,
       projectNameEdited: false,
-      timelineViewportWidth: 960,
       exportRange: null,
       cropSession: null,
       reverseJob: null,
@@ -1767,88 +1756,17 @@ export function createEditorStore() {
         run(createUpdateAnyClipCommand(clipId, { gapBefore: 0 }, '闭合空隙'))
       },
 
-      setPlayhead: (time, snapThreshold = 0) => {
-        const state = get()
-        const total = getProjectEnd(state.project)
-        const snapped = snapThreshold > 0 ? snapToMarker(time, state.project.markers, snapThreshold) : time
-        set({ playhead: clamp(snapped, 0, Math.max(0, total)) })
-      },
-
-      stepPlayheadFrames: (frames) => {
-        const state = get()
-        const total = getProjectEnd(state.project)
-        const fps = state.project.exportQuality.fps
-        set({
-          playhead: stepByFrames(state.playhead, frames, fps, total),
-          isPlaying: false,
-        })
-      },
-
-      nudgePlayhead: (seconds) => {
-        const state = get()
-        const total = getProjectEnd(state.project)
-        set({ playhead: stepBySeconds(state.playhead, seconds, total), isPlaying: false })
-      },
-
-      jumpToEditPoint: (direction) => {
-        const state = get()
-        const points = collectEditPoints(state.project)
-        const target = nextEditPoint(points, state.playhead, direction)
-        if (target === null) return
-        set({ playhead: target, isPlaying: false })
-      },
-
-      zoomToFit: () => {
-        const state = get()
-        const total = getProjectEnd(state.project)
-        set({
-          timelineZoom: fitZoom(
-            total,
-            state.timelineViewportWidth,
-            TIMELINE_MIN_ZOOM,
-            TIMELINE_MAX_ZOOM,
-          ),
-        })
-      },
-
-      setTimelineViewportWidth: (width) => {
-        if (width > 0) set({ timelineViewportWidth: width })
-      },
 
 
-      setPlaying: (playing) => {
-        const state = get()
-        const total = getProjectEnd(state.project)
-        if (total <= 0) {
-          set({ isPlaying: false })
-          return
-        }
-        if (playing && state.playhead >= total - 0.001) {
-          set({ playhead: 0, isPlaying: true })
-          return
-        }
-        set({ isPlaying: playing })
-      },
 
-      togglePlay: () => {
-        const state = get()
-        state.setPlaying(!state.isPlaying)
-      },
 
-      replay: () => {
-        const state = get()
-        if (getProjectEnd(state.project) <= 0) return
-        set({ playhead: 0, isPlaying: true, previewPatch: null })
-      },
 
-      finishPlayback: () => {
-        const total = getProjectEnd(get().project)
-        set({ isPlaying: false, playhead: total })
-      },
 
-      setTimelineZoom: (zoom) => {
-        set({ timelineZoom: clamp(zoom, TIMELINE_MIN_ZOOM, TIMELINE_MAX_ZOOM) })
-      },
+
+
+
+
+
 
 
 
