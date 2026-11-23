@@ -67,8 +67,10 @@ export function TextTracks({
       dragRef.current = next
       setDrag(next)
     }
-    const finish = () => {
+    const finish = (event: PointerEvent) => {
       const current = dragRef.current
+      // 只认发起这次拖拽的指针（多指/笔场景）。
+      if (!matchesPointer(current, event)) return
       // 像素阈值（5px），与视频/音频片段一致；见 AudioTracks 里同名说明。
       if (current && Math.abs(current.start - current.originalStart) * pps >= 5) {
         moveTextClip(current.trackId, current.clipId, current.start)
@@ -104,8 +106,9 @@ export function TextTracks({
       edgeRef.current = next
       setEdge(next)
     }
-    const finish = () => {
+    const finish = (event: PointerEvent) => {
       const current = edgeRef.current
+      if (!matchesPointer(current, event)) return
       if (current && Math.abs(current.delta) > 0.002) {
         resizeTextClipEdge(current.trackId, current.clipId, current.edge, current.delta)
       }

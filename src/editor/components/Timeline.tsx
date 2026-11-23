@@ -588,8 +588,11 @@ export function Timeline({ onPickFile }: TimelineProps) {
       edgeDragRef.current = next
       setEdgeDrag(next)
     }
-    const finish = () => {
+    const finish = (event: PointerEvent) => {
       const current = edgeDragRef.current
+      // 只收**发起这次拖拽的那根指针**的抬起：否则触屏/手写笔的第二根手指抬起
+      // 会把还在进行中的裁剪提前提交掉。
+      if (!matchesPointer(current, event)) return
       if (current && Math.abs(current.delta) >= 0.0005) {
         resizeClipEdge(current.clipId, current.edge, current.delta)
       }
@@ -625,7 +628,16 @@ export function Timeline({ onPickFile }: TimelineProps) {
         0,
         total,
       )
-      const baseLane = document.querySelector<HTMLElement>('.clip-lane')
+      /**
+       * 换轨命中必须在**本实例的时间轴容器内**查询。
+       *
+       * 以前用 `document.querySelector('.clip-lane')` /
+       * `document.querySelectorAll('[data-overlay-track-id]')` —— 全局查询。
+       * 宿主页面里嵌两个 <VideoEditor> 时，拖某个编辑器的片段会命中**另一个实例**的
+       * 泳道，片段被丢进别人的轨道（或莫名跳轨）。同一文件 1202 行的落点识别
+       * 早就特意避开了全局查询，这里补齐。
+       */
+      const baseLane = content.querySelector<HTMLElement>('.clip-lane')
       const baseBounds = baseLane?.getBoundingClientRect()
       let targetTrackId = current.trackId
       if (
@@ -635,7 +647,9 @@ export function Timeline({ onPickFile }: TimelineProps) {
       ) {
         targetTrackId = null
       } else {
-        const tracks = [...document.querySelectorAll<HTMLElement>('[data-overlay-track-id]')]
+        const tracks = [
+          ...content.querySelectorAll<HTMLElement>('[data-overlay-track-id]'),
+        ]
         const hit = tracks.find((element) => {
           const bounds = element.getBoundingClientRect()
           return event.clientY >= bounds.top && event.clientY <= bounds.bottom
@@ -734,8 +748,10 @@ export function Timeline({ onPickFile }: TimelineProps) {
       clipDragRef.current = next
       setClipDrag(next)
     }
-    const finish = () => {
+    const finish = (event: PointerEvent) => {
       const current = clipDragRef.current
+      // 同上：只认发起这次拖拽的指针（多指/笔场景下别被别的指针抬起打断）。
+      if (!matchesPointer(current, event)) return
       if (current?.active) {
         moveClipToTrackAtTime(current.clipId, current.targetTrackId, current.targetTime)
       }

@@ -161,8 +161,10 @@ export function AudioTracks({
       dragRef.current = next
       setDrag(next)
     }
-    const finish = () => {
+    const finish = (event: PointerEvent) => {
       const current = dragRef.current
+      // 只认发起这次拖拽的指针：触屏/手写笔第二根手指抬起不该提交当前拖拽。
+      if (!matchesPointer(current, event)) return
       // 用像素阈值（与视频片段相同的 5px），不是 0.002 秒：低缩放下 0.002s ≈ 0.2px，
       // 单纯单击（手抖 1px）就会被判成拖动，写入一条「移动音频片段」的撤销记录，
       // 连点几次音频就相对画面越偏越多、撤销栈也被无用步骤塞满。
@@ -200,8 +202,9 @@ export function AudioTracks({
       edgeRef.current = next
       setEdge(next)
     }
-    const finish = () => {
+    const finish = (event: PointerEvent) => {
       const current = edgeRef.current
+      if (!matchesPointer(current, event)) return
       if (current && Math.abs(current.delta) > 0.002) {
         resizeAudioClipEdge(current.trackId, current.clipId, current.edge, current.delta)
       }
