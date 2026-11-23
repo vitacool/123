@@ -200,6 +200,15 @@ export async function averageComposeFrameColor(
     const frameCompose = (await import(/* @vite-ignore */ frameComposePath)) as {
       composeFrame: (value: Record<string, unknown>) => void
     }
+    // 抠像：预览使用 webglKeyer；对比工具必须用同一份实现，否则色度抠像永远对不上。
+    let keyFrame: unknown
+    try {
+      const keyerPath = '/src/editor/services/webglKeyer.ts'
+      const keyer = (await import(/* @vite-ignore */ keyerPath)) as { webglKeyer?: unknown }
+      keyFrame = keyer.webglKeyer
+    } catch {
+      keyFrame = undefined
+    }
 
     const bytes = Uint8Array.from(atob(input.sourceBase64), (char) => char.charCodeAt(0))
     const url = URL.createObjectURL(new Blob([bytes], { type: input.sourceMimeType ?? 'video/mp4' }))
@@ -241,6 +250,15 @@ export async function averageComposeFrameColor(
       project: input.project,
       time: input.time,
       frames,
+      keyFrame,
+      // 蒙版需要离屏画布；不传的话 clipRender 会跳过蒙版（对比就失去意义）。
+      createCanvas: (w: number, h: number) => {
+        const offscreen = document.createElement('canvas')
+        offscreen.width = Math.max(1, Math.round(w))
+        offscreen.height = Math.max(1, Math.round(h))
+        const inner = offscreen.getContext('2d')
+        return inner ? { canvas: offscreen, ctx: inner } : null
+      },
     })
 
     const sampleX = input.region

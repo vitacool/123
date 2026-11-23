@@ -131,21 +131,11 @@ export async function openSource(asset: SourceInfo): Promise<FrameSourceHandle> 
     seek: async (time: number) => {
       const target = Math.max(0, time)
       if (video.readyState >= 2 && Math.abs(video.currentTime - target) < 1e-3) return
-      await waitForEvent(video, 'seeked', 8000)
+      // 必须先挂监听、再改 currentTime：反过来会等一个还没开始的 seek，
+      // 在没有并发 seek 的情况下永远等不到 seeked（8s 后抛「等待 seeked 超时」）。
+      const seeked = waitForEvent(video, 'seeked', 8000)
       video.currentTime = target
-      // currentTime 赋值后再等一次 seeked（部分浏览器会同步触发，上面的监听已覆盖）
-      await new Promise<void>((resolve) => {
-        const done = () => {
-          video.removeEventListener('seeked', done)
-          resolve()
-        }
-        if (Math.abs(video.currentTime - target) < 1e-3) {
-          resolve()
-          return
-        }
-        video.addEventListener('seeked', done, { once: true })
-        window.setTimeout(done, 3000)
-      })
+      await seeked
     },
     dispose: () => {
       video.pause()
@@ -335,6 +325,13 @@ export async function renderAnimatedClipToFile(
     }
     // 中间视频不带 alpha：先把「该时刻的画面底」铺上（有下方片段就画它，
     // 否则铺画布背景色），再画本片段。这样合成时覆盖整幅画面也不会丢失内容。
+    //
+    // 为什么不用带 alpha 的中间格式：本项目的 FFmpeg.wasm 核心没有 VP8/VP9 编码器，
+    // 而可用的透明编码体积过大（实测 1080p/2s：qtrle ≈32MB、FFV1 ≈14MB、ProRes 4444
+    // ≈35MB、APNG 编码耗时 22s），不适合既要写进 MEMFS 又要分块拼接。因此保持
+    // H.264/yuv420p，把背景（或下方画面）烘进每一帧——蒙版/抠像外区域显示的是这层
+    // 背景，**不会变黑**。蒙版/抠像本身已经画进帧里，烘焙后必须清掉对应字段（见
+    // bakeAnimatedClip）。
     ctx.save()
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.globalAlpha = 1

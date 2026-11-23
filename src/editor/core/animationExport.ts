@@ -71,9 +71,62 @@ export function animationPerformanceHint(project: Project, fps: number): string 
   return parts.join('；')
 }
 /**
+ * 逐帧烘焙时，Clip 每个字段的归属。
+ *
+ * - `baked`：渲染器已经把它画进中间视频，烘焙后必须重置/清空，
+ *   否则 exportPlan 会在烘焙结果上**再做一遍**（蒙版被二次裁切、抠像二次处理等）。
+ * - `kept`：渲染器不处理（时间轴结构 / 音频 / 转场），保留原值。
+ * - `replaced`：被替换成中间视频（sourceUrl）。
+ * - `partial`：部分烘焙、部分保留（anim 的视觉关键帧烘掉，音量关键帧留给音频链）。
+ *
+ * 用 `satisfies Record<keyof Clip, …>` 穷举：Clip 新增字段却没在这里表态时，
+ * `pnpm typecheck` 会直接报错（防止以后加新效果又漏掉烘焙重置）。
+ */
+export type AnimatedClipFieldHandling = 'baked' | 'kept' | 'replaced' | 'partial'
+
+export const ANIMATED_CLIP_FIELD_HANDLING = {
+  id: 'kept',
+  sourceUrl: 'replaced',
+  sourceStart: 'baked',
+  sourceEnd: 'baked',
+  type: 'baked',
+  rotation: 'baked',
+  flipH: 'baked',
+  flipV: 'baked',
+  crop: 'baked',
+  scale: 'baked',
+  position: 'baked',
+  // 时间轴上的空档：不是画面效果，保留。
+  gapBefore: 'kept',
+  // 定格帧已经画进中间视频；烘焙后是普通视频，不再需要。
+  freezeFrameTime: 'baked',
+  // 声音由中间视频自带的音轨 + exportPlan 音频链接管（音量/淡入淡出是音频链参数）。
+  volume: 'kept',
+  fadeIn: 'kept',
+  fadeOut: 'kept',
+  speed: 'baked',
+  keepPitch: 'baked',
+  opacity: 'baked',
+  blendMode: 'baked',
+  speedSegments: 'baked',
+  speedCurve: 'baked',
+  // 转场发生在片段之间，渲染器不处理，保留。
+  transitionOut: 'kept',
+  background: 'baked',
+  anim: 'partial',
+  // 蒙版与抠像：animationRenderer 在渲染每一帧时已经应用（PNG 含 alpha），必须清掉。
+  mask: 'baked',
+  chromaKey: 'baked',
+  color: 'baked',
+} satisfies Record<keyof Clip, AnimatedClipFieldHandling>
+
+/**
  * 把「带动画的片段」烘焙成指向中间视频的普通片段：
- * 几何/不透明度/调色/动画都已烘进画面，因此这里把相关字段全部重置为默认值，
- * 让 exportPlan 把它当成一段普通素材处理（exportPlan 一行都不用改）。
+ * 几何/不透明度/调色/蒙版/抠像/动画都已烘进画面，因此这里把相关字段全部重置为
+ * 默认值，让 exportPlan 把它当成一段普通素材处理（exportPlan 一行都不用改）。
+ *
+ * 尤其注意 mask / chromaKey：animationRenderer 渲染每一帧时已经画过，
+ * 留着会被 exportPlan 的 alphamerge / chromakey **再应用一次**（画面被二次裁切）。
  */
 export function bakeAnimatedClip(clip: Clip, sourceUrl: string, duration: number): Clip {
   return {
@@ -95,10 +148,14 @@ export function bakeAnimatedClip(clip: Clip, sourceUrl: string, duration: number
     rotation: 0,
     flipH: false,
     flipV: false,
+    freezeFrameTime: undefined,
     opacity: 1,
     blendMode: 'normal',
     background: undefined,
     color: undefined,
+    // 渲染器已把蒙版/抠像画进画面；保留会被再应用一次。
+    mask: undefined,
+    chromaKey: undefined,
     // 视觉动画已烘进画面；音量关键帧仍必须留给 exportPlan 的音频链使用。
     anim: clip.anim?.volume?.length ? { volume: clip.anim.volume } : undefined,
   }

@@ -45,6 +45,9 @@ void main() {
  */
 const FRAGMENT_SHADER = `
 precision mediump float;
+// 顶点着色器输出的插值坐标；GLSL 里 fragment 也必须显式声明才能使用
+// （漏了这行会让着色器编译失败，抠像静默退回原画面）。
+varying vec2 v_uv;
 uniform sampler2D u_texture;
 uniform vec2 u_texel;
 uniform vec2 u_keyUV;
