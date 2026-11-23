@@ -23,6 +23,13 @@ export interface ProjectLibraryProps {
   onImport: () => void
   /** 关闭面板回到编辑器（当前已有一个打开的项目时才显示关闭按钮）。 */
   onDismiss?: () => void
+  /**
+   * 是否已达项目数量上限。
+   *
+   * 到达上限后「新建项目」不会成功（保存会被拒，用户剪的东西刷新就丢），
+   * 所以这里直接把入口拦住并说明原因，而不是等用户点进去剪完才发现。
+   */
+  limitReached?: boolean
 }
 
 /**
@@ -40,6 +47,7 @@ export function ProjectLibrary({
   onCreate,
   onImport,
   onDismiss,
+  limitReached = false,
 }: ProjectLibraryProps) {
   /** 正在重命名的项目 id 与草稿值。 */
   const [editing, setEditing] = useState<{ id: string; value: string } | null>(null)
@@ -83,7 +91,17 @@ export function ProjectLibrary({
         </header>
 
         <div className="project-library-actions">
-          <button type="button" className="button primary" onClick={onCreate}>
+          <button
+            type="button"
+            className="button primary"
+            onClick={onCreate}
+            disabled={limitReached}
+            title={
+              limitReached
+                ? `已有 ${PROJECT_LIMIT} 个项目（上限）：先在下面删掉一个旧项目，再新建`
+                : '新建一个空项目'
+            }
+          >
             <Icon name="plus" size={15} />
             新建项目
           </button>
@@ -92,6 +110,13 @@ export function ProjectLibrary({
             导入视频
           </button>
         </div>
+
+        {limitReached && (
+          <p className="project-library-limit" role="status">
+            已达上限（{PROJECT_LIMIT} 个，当前 {records.length} 个）：新建的项目
+            <strong>不会被保存</strong>，请先删除一个旧项目。
+          </p>
+        )}
 
         {loading && records.length === 0 ? (
           <p className="project-library-empty">正在读取本地草稿…</p>

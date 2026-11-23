@@ -54,6 +54,17 @@ export default defineConfig({
       name: 'edge',
       use: { ...devices['Desktop Edge'], channel: 'msedge' },
     },
+    {
+      /**
+       * 用**系统 Chrome** 跑同一套用例（`channel: 'chrome'` 同样不需要下载）。
+       *
+       * 为什么值得多这一个：Edge 与 Chrome 共用 Chromium 内核但版本/策略可能不同，
+       * 至少能证明用例不是"只在某一台机器的某个浏览器版本上碰巧通过"。
+       * 跑法：`pnpm exec playwright test --project=chrome`
+       */
+      name: 'chrome',
+      use: { ...devices['Desktop Chrome'], channel: 'chrome' },
+    },
   ],
   webServer: process.env.FRAMECUT_E2E_URL
     ? undefined

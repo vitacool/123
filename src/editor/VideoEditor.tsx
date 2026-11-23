@@ -1544,6 +1544,8 @@ export function VideoEditor({
               ? {
                   records: libraryRecords,
                   loading: libraryLoading,
+                  // 已达上限时把「新建」入口拦住并说明原因（否则用户会剪完才发现存不了）。
+                  limitReached: libraryRecords.length >= PROJECT_LIMIT,
                   onOpen: (record) => void openProjectRecord(record),
                   onDelete: (record) => void deleteProjectRecord(record),
                   onRename: (record, name) => void renameProjectRecord(record, name),
