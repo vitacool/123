@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type {
-  ChangeEvent, DragEvent as ReactDragEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, } from 'react'
+  ChangeEvent, DragEvent as ReactDragEvent, PointerEvent as ReactPointerEvent, } from 'react'
 import { MAX_RECOMMENDED_FILE_BYTES } from './core/constants'
 import {
   DEFAULT_FRAMECUT_THEME, readStoredTheme, resolveTheme, writeStoredTheme, type FrameCutTheme, type ResolvedTheme, } from './core/theme'
@@ -29,7 +29,7 @@ import { configureFFmpegAssets } from './services/ffmpegExporter'
 import { parseSubtitleText } from './core/text'
 import type { TranscribeProvider } from './services/asr/types'
 import {
-  countProjectRecords, deleteDraftProject, hasProjectRecord, loadProjectRecords, persistImportedAssets, reportDraftSaveFailure, restoreDraft, saveMediaBlob, toDraftAsset, buildDraftRecord, saveProjectRecordSerialized, saveProjectRecord } from './services/draftStore'
+  countProjectRecords, deleteDraftProject, hasProjectRecord, loadProjectRecords, persistImportedAssets, reportDraftSaveFailure, restoreDraft, saveMediaBlob, toDraftAsset, buildDraftRecord, saveProjectRecordSerialized, saveProjectRecord, writeEmergencyDraft } from './services/draftStore'
 import {
   PROJECT_LIMIT,
   projectLimitReached,
@@ -51,6 +51,7 @@ import { AutoCaptionDialog } from './components/AutoCaptionDialog'
 import { Toast } from './components/Toast'
 import { ReverseJobBanner } from './components/ReverseJobBanner'
 import { Icon } from './components/Icon'
+import { isEditableTarget } from './components/keyboardScope'
 import './styles/editor.css'
 
 export interface VideoEditorProps {
@@ -337,15 +338,39 @@ function EditorShell({
     }
   }
 
-  const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+  /**
+   * 快捷键分发（挂在 `window` 上，不是根节点的 `onKeyDown`）。
+   *
+   * 为什么必须挂 window：快捷键必须由「焦点在哪」决定，而不是「事件从哪个节点冒泡上来」。
+   * 焦点一旦离开根节点（关闭弹窗时内部按钮被卸载 → 焦点回到 body；系统文件选择框返回后
+   * 焦点停在隐藏 file input 上），React 的根节点 `onKeyDown` 根本收不到事件 ——
+   * 表现就是「导入完素材后空格/Delete 全没反应」「关掉导出弹窗后 Ctrl+Z 失效」，
+   * 而且没有任何提示。挂在 window 上再自己判断作用域，才不会漏。
+   */
+  const handleKeyDown = (event: KeyboardEvent) => {
     if (event.defaultPrevented) return
-    const target = event.target as HTMLElement
-    if (
-      target.closest('input, textarea, select, [contenteditable="true"]') ||
-      target.isContentEditable
-    ) {
-      return
-    }
+    const target = event.target instanceof Element ? event.target : null
+    const root = rootRef.current
+    const active = document.activeElement
+    /**
+     * 作用域容器用 `.framecut-host` 而不是 `.framecut-root`：
+     * 导入用的 4 个隐藏 file input 是 EditorShell 的**兄弟节点**（挂在 host 上），
+     * 不在 root 内部。若只看 root，文件选择框返回后焦点停在这些 input 上时，
+     * 事件会被判成"编辑器外"而全部丢弃 —— 正是「导入完素材后空格/Delete 失效」。
+     */
+    const host = root?.closest('.framecut-host') ?? root
+    // 允许的两类焦点：① 在编辑器自己的 DOM 里（含 host/root 本身）；② 谁都没聚焦
+    // （body/null）—— 后者正是弹窗关闭、点宿主空白之后的真实状态。
+    const inside = Boolean(host && (host === active || host.contains(target) || host.contains(active)))
+    const nothingFocused =
+      !active || active === document.body || active === document.documentElement
+    if (!inside && !nothingFocused) return
+    // 文本输入控件里不抢按键。但「导入素材」用的隐藏 file input 不是文本输入：
+    // 选完文件后焦点常留在它上面，必须继续响应快捷键（否则用户以为编辑器死了）。
+    const hiddenFileInput =
+      target instanceof HTMLInputElement && target.classList.contains('hidden-file-input')
+    const inField = Boolean(target?.closest('input, textarea, select, [contenteditable="true"]'))
+    if (!hiddenFileInput && (inField || isEditableTarget(target))) return
     const state = store.getState()
     if (state.exportDialogOpen) return
     if (event.repeat) return
@@ -498,11 +523,34 @@ function EditorShell({
       return
     }
     if (!modifier && key === ' ') {
-      if (target.closest('button, a, [role="button"]')) return
+      if (target?.closest('button, a, [role="button"]')) return
       event.preventDefault()
       state.togglePlay()
     }
   }
+
+  /**
+   * `handleKeyDown` 闭包里用到大量 props/state（captureCurrentFrame、store…），
+   * 直接进 effect 依赖会让监听器频繁重挂。用 ref 保存最新实现，监听器只注册一次。
+   */
+  const keyHandlerRef = useRef(handleKeyDown)
+  // 标准「latest ref」写法：每次渲染后同步一次，不在渲染期写 ref（react-hooks/refs）。
+  useEffect(() => {
+    keyHandlerRef.current = handleKeyDown
+  })
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      keyHandlerRef.current(event)
+      // 按键被编辑器消费（preventDefault）且当时焦点不在编辑器内（body / 隐藏输入框），
+      // 把焦点收回根节点：后续按键回到常规路径，`:focus-visible` 样式也正常。
+      if (event.defaultPrevented && !rootRef.current?.contains(document.activeElement)) {
+        rootRef.current?.focus({ preventScroll: true })
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     const target = event.target as Element
@@ -528,7 +576,6 @@ function EditorShell({
       data-theme={theme}
       ref={rootRef}
       tabIndex={-1}
-      onKeyDown={handleKeyDown}
       onPointerDown={handlePointerDown}
       onDragEnter={(event) => {
         if (!hasFiles(event)) return
@@ -916,6 +963,13 @@ export function VideoEditor({
   useEffect(() => {
     let draftTimer = 0
     let projectTimer = 0
+    /**
+     * 「项目数已满」的提示只弹一次。
+     *
+     * 以前 `beforeSave` 每次被拒都会 notify，而保存是 700ms 防抖 —— 用户继续编辑时
+     * 每 0.7 秒弹一次同样的警告，而**内容其实一直没落盘**，刷新就全丢。
+     */
+    let limitNotified = false
     const unsubscribe = store.subscribe((state, previous) => {
       // 宿主回调：project 变化时防抖 500ms（与草稿保存共用同一个订阅）。
       if (state.project !== previous.project) {
@@ -981,10 +1035,13 @@ export function VideoEditor({
                 if (await hasProjectRecord(id)) return true
                 const total = await countProjectRecords()
                 if (!projectLimitReached(total)) return true
-                current.notify(
-                  `最多保存 ${PROJECT_LIMIT} 个项目，请先在「最近项目」里删除一个再继续编辑`,
-                  'warning',
-                )
+                if (!limitNotified) {
+                  limitNotified = true
+                  current.notify(
+                    `最多保存 ${PROJECT_LIMIT} 个项目：本次编辑不会被保存，请到「最近项目」删掉一个旧项目后再继续`,
+                    'warning',
+                  )
+                }
                 return false
               },
             })
@@ -995,12 +1052,36 @@ export function VideoEditor({
         })()
       }, 700)
     })
-    return () => {
-      unsubscribe()
-      window.clearTimeout(draftTimer)
-      window.clearTimeout(projectTimer)
-    }
-  }, [store])
+    /**
+       * 立即落盘（绕过 700ms 防抖）。页面即将隐藏/卸载时用：
+       * 防抖窗口内刷新或关标签页，最后一次编辑会随定时器一起被丢掉。
+       * `flushProjectSave` 本身走串行队列，重复调用安全。
+       */
+      const flushDraftNow = (): void => {
+        window.clearTimeout(draftTimer)
+        if (restoringRef.current) return
+        const current = store.getState()
+        // 先同步写一份 localStorage 紧急快照：IDB 事务在页面卸载时会被中止，
+        // 只有同步写入才能保证「改完立刻刷新」不丢最后一次编辑（下次启动会回放它）。
+        writeEmergencyDraft(buildDraftRecord(current))
+        store.getState().flushProjectSave()
+      }
+      const onPageHide = (): void => flushDraftNow()
+      const onVisibility = (): void => {
+        if (document.visibilityState === 'hidden') flushDraftNow()
+      }
+      window.addEventListener('pagehide', onPageHide)
+      document.addEventListener('visibilitychange', onVisibility)
+
+      return () => {
+        window.removeEventListener('pagehide', onPageHide)
+        document.removeEventListener('visibilitychange', onVisibility)
+        unsubscribe()
+        // 卸载时同样先落盘：宿主切路由/关闭编辑器不该丢掉最后一次编辑。
+        flushDraftNow()
+        window.clearTimeout(projectTimer)
+      }
+    }, [store])
 
   useEffect(() => {
     setActiveVideo(initialVideo ?? null)
@@ -1071,6 +1152,9 @@ export function VideoEditor({
   const handleFileInput = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? [])
     event.target.value = ''
+    // 系统文件框返回后焦点会留在这个隐藏 input 上（部分浏览器），导致随后的
+    // 空格/Delete 被当成"在输入框里打字"而失效。主动交还焦点。
+    event.target.blur()
     if (files.length > 0) void importFiles(files)
   }
 
@@ -1083,6 +1167,7 @@ export function VideoEditor({
   const handleSubtitleInput = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     event.target.value = ''
+    event.target.blur()
     if (!file) return
     try {
       const cues = parseSubtitleText(await file.text())
@@ -1100,6 +1185,38 @@ export function VideoEditor({
 
   const newProject = () => {
     const state = store.getState()
+    /**
+     * 项目数已满就**不要**开新空会话。
+     *
+     * 否则用户会在一个「存不进草稿库」的项目里剪半天，刷新全丢 —— 而且他在界面上
+     * 看不出任何异常（只有保存时才有一条警告）。这里直接拦下来，并把「最近项目」
+     * 打开，让用户先删掉一个旧项目。
+     */
+    if (libraryEnabled) {
+      void (async () => {
+        try {
+          const total = await countProjectRecords()
+          if (projectLimitReached(total)) {
+            state.notify(
+              `已有 ${total} 个项目（上限 ${PROJECT_LIMIT}）：请先在「最近项目」删除一个，再新建`,
+              'warning',
+            )
+            setLibraryOpen(true)
+            void refreshLibrary()
+            return
+          }
+        } catch {
+          // 读不到记录数（IDB 不可用）时不阻塞：后续保存路径仍会兜底检查。
+        }
+        startEmptyProject(state)
+      })()
+      return
+    }
+    startEmptyProject(state)
+  }
+
+  /** 真正开一个空会话（已通过上限检查，或宿主模式下不需要检查）。 */
+  const startEmptyProject = (state: ReturnType<typeof store.getState>) => {
     // 先把当前项目落盘（不清草稿、不影响其它项目），再开一个空会话。
     state.flushProjectSave()
     state.clearSource()
@@ -1342,6 +1459,7 @@ export function VideoEditor({
   const handleProjectFileInput = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     event.target.value = ''
+    event.target.blur()
     if (!file) return
     try {
       const parsed = parseProjectFile(await file.text())
