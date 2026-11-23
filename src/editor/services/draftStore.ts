@@ -399,11 +399,23 @@ export async function listMediaIds(): Promise<string[]> {
 /**
  * 删除一个项目：同时回收「不再被任何项目引用」的媒体 blob。
  * 返回被回收的 blob id（用于日志/提示）。
+ *
+ * `stillReferenced`：**当前会话内存里**仍存在的素材 id。
+ *
+ * 为什么必须有它：`loadProjectRecords()` 读的是**已落盘**的快照，而当前项目
+ * 刚导入的素材可能还在 700ms 防抖窗口内没写进去。以前这里只按存储记录判定，
+ * 于是「在 A 里刚导入素材 → 去最近项目里删掉 B」会把 A 的新 blob 当孤儿删掉：
+ * 当前会话看起来一切正常，刷新后素材全丢（片段变占位）。
+ * `deleteMediaBlobIfUnreferenced` 一直有这个保护，这里补齐。
  */
-export async function deleteDraftProject(id: string): Promise<string[]> {
+export async function deleteDraftProject(
+  id: string,
+  options: { stillReferenced?: Iterable<string> } = {},
+): Promise<string[]> {
   await withStore(DRAFT_STORE, 'readwrite', (store) => store.delete(id))
   const records = await loadProjectRecords()
   const referenced = collectReferencedMediaIds(records)
+  for (const keep of options.stillReferenced ?? []) referenced.add(keep)
   const stored = await listMediaIds()
   const removable = mediaIdsToDelete(stored, referenced)
   for (const mediaId of removable) {

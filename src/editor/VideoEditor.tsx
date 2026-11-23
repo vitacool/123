@@ -947,7 +947,15 @@ export function VideoEditor({
       return
     }
     try {
-      await deleteDraftProject(record.id)
+      const state = store.getState()
+      // 删的是当前项目：它的素材就该一起回收，不用保护。
+      // 删别的项目：必须把当前会话内存里的素材 id 传进去 —— 刚导入的素材可能还在
+      // 700ms 防抖窗口内、尚未落盘，否则会被当成孤儿 blob 删掉（刷新后素材消失）。
+      const deletingCurrent = state.projectId === record.id
+      await deleteDraftProject(
+        record.id,
+        deletingCurrent ? {} : { stillReferenced: state.assets.map((asset) => asset.id) },
+      )
       if (store.getState().projectId === record.id) {
         store.getState().clearSource()
         setActiveVideo(null)
