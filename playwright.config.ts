@@ -43,6 +43,17 @@ export default defineConfig({
       name: 'firefox',
       use: { ...devices['Desktop Firefox'] },
     },
+    {
+      /**
+       * 用**系统已安装的 Edge**跑（channel 走系统浏览器，不需要 `playwright install`）。
+       *
+       * 用途：在没有下载 Playwright 浏览器的机器（比如 CI 之外的本地验证）也能跑回归。
+       * 跑法：`pnpm exec playwright test --project=edge`
+       * 注：`--project=edge` 只影响跑哪些用例；完整回归仍以 chromium + firefox 为准。
+       */
+      name: 'edge',
+      use: { ...devices['Desktop Edge'], channel: 'msedge' },
+    },
   ],
   webServer: process.env.FRAMECUT_E2E_URL
     ? undefined

@@ -368,3 +368,33 @@ describe('timeline helpers', () => {
     expect(snapToMarker(4.5, project.markers, 0.2)).toBe(4.5)
   })
 })
+
+/**
+ * 「值没变」的编辑不该产生新对象：否则历史栈多一步空操作，还会把 redo 清空
+ * —— 用户按 Ctrl+Z 看到「什么都没发生」，以为撤销坏了。
+ */
+describe('updateClipInProject：空改动不进历史', () => {
+  it('patch 与现值完全相同 → 返回 null（调用方 `?? project` 后引用不变）', () => {
+    const project = makeProject()
+    const id = project.clips[0].id
+    expect(updateClipInProject(project, id, {})).toBeNull()
+    expect(updateClipInProject(project, id, { rotation: 0 })).toBeNull()
+    expect(updateClipInProject(project, id, { scale: 1, flipH: false })).toBeNull()
+    // 对象字段按浅比较判断（crop 的每个分量都相同）
+    expect(updateClipInProject(project, id, { crop: { ...project.clips[0].crop } })).toBeNull()
+  })
+
+  it('值真的变了 → 返回新对象且写入新值', () => {
+    const project = makeProject()
+    const id = project.clips[0].id
+    const next = updateClipInProject(project, id, { rotation: 45 })
+    expect(next).not.toBeNull()
+    expect(next!.clips[0].rotation).toBe(45)
+    const cropped = updateClipInProject(project, id, { crop: { x: 0.1, y: 0.1, w: 0.5, h: 0.5 } })
+    expect(cropped!.clips[0].crop.w).toBe(0.5)
+  })
+
+  it('片段不存在时仍返回 null（与原语义一致）', () => {
+    expect(updateClipInProject(makeProject(), 'nope', { rotation: 10 })).toBeNull()
+  })
+})

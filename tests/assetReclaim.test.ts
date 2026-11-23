@@ -90,6 +90,34 @@ describe('删除素材 → 撤销：不回收、素材回库', () => {
     expect(draftMocks.deleteMediaBlobIfUnreferenced).not.toHaveBeenCalled()
     expect(state.pendingReclaim).toEqual({})
   })
+
+  /**
+   * 真实踩坑路径：先删片段（此刻素材变成「没人引用」）→ 再从素材库删素材
+   * → 撤销片段删除。删除素材时观察到的引数是 0，但用户并没有「让素材离开库」的
+   * 明确意图，撤销把片段带回来之后素材必须一起回来，否则时间轴上是一段黑帧。
+   */
+  it('先删片段、再删素材（删除时已无引用），撤销片段删除后素材也回库', () => {
+    const store = makeStore()
+    const assetId = store.getState().assets[0].id
+    store.getState().deleteSelectedClip()
+    expect(store.getState().project.clips).toHaveLength(0)
+
+    // 素材库此时没有任何引用，UI 会直接移除（removeClips:false，无确认框）
+    store.getState().removeAsset(assetId, { removeClips: false })
+    expect(store.getState().assets).toHaveLength(0)
+    // 片段删除仍在撤销历史里 → 不能立刻回收
+    expect(revoked).toEqual([])
+
+    store.getState().undo()
+    const state = store.getState()
+    expect(state.project.clips).toHaveLength(1)
+    // 关键：素材必须回库，且源仍然有效
+    expect(state.assets).toHaveLength(1)
+    expect(state.assets[0].url).toBe(SOURCE.url)
+    expect(state.project.clips[0].sourceUrl).toBe(SOURCE.url)
+    expect(revoked).toEqual([])
+    expect(state.pendingReclaim).toEqual({})
+  })
 })
 
 describe('历史不再引用 → 真正回收', () => {

@@ -5,8 +5,10 @@ import {
   buildExportPlan,
   getExportCrf,
 } from '../src/editor/core/exportPlan'
+import { addTextClipToProject, addTextTrackToProject } from '../src/editor/core/text'
 import {
   addOverlayTrackFromClip,
+  createClip,
   createInitialProject,
   splitProjectAt,
   trimProjectRight,
@@ -464,5 +466,186 @@ describe('调色滤镜（eq / colorbalance）', () => {
     const plan2 = buildExportPlan(mainColored, [SOURCE], true)
     expect(chainOf(plan2.graph, '[basev]')).toContain('saturation=1.4653')
     expect(chainOf(plan2.graph, '[ov0]')).not.toContain('eq=')
+  })
+})
+
+/**
+ * 无音轨素材 / 叠加图片的导出正确性。
+ *
+ * 这两类素材最容易被「乐观假设有音轨」的代码坑到：`[n:a]` 指向不存在的流时
+ * FFmpeg 直接退 1，而无声重试以前只关掉主轨音频，叠加轨/音频轨的分支原样再来一遍
+ * —— 于是重试也失败，用户看到的是「导出永远失败」。
+ */
+describe('无音轨素材与叠加图片', () => {
+  const IMAGE: SourceInfo = {
+    url: 'blob:logo',
+    name: 'logo.png',
+    size: 1024,
+    duration: 3,
+    width: 800,
+    height: 600,
+    kind: 'image',
+  }
+
+  /** 主轨视频 + 一条音频轨（用来验证「无声重试必须连音频轨一起关掉」）。 */
+  function projectWithAudioTrack(): Project {
+    const base = createInitialProject({ url: SOURCE.url, duration: 10 }, 'main')
+    return {
+      ...base,
+      audioTracks: [
+        {
+          id: 'at',
+          name: '配音',
+          muted: false,
+          hidden: false,
+          enabled: true,
+          locked: false,
+          solo: false,
+          volume: 1,
+          clips: [
+            {
+              id: 'ac',
+              sourceUrl: SOURCE.url,
+              sourceStart: 0,
+              sourceEnd: 4,
+              start: 0,
+              volume: 1,
+              fadeIn: 0,
+              fadeOut: 0,
+            },
+          ],
+        },
+      ],
+    }
+  }
+
+  it('无声导出（hasAudio=false）不生成任何音频分支，包括音频轨', () => {
+    const project = projectWithAudioTrack()
+    const withAudio = buildExportPlan(project, [SOURCE], true)
+    expect(withAudio.hasAudio).toBe(true)
+    expect(withAudio.graph).toContain('[0:a]')
+
+    const silent = buildExportPlan(project, [SOURCE], false)
+    expect(silent.hasAudio).toBe(false)
+    expect(silent.audioLabel).toBeNull()
+    // 关键：音频轨的 filters 也不能出现（否则重试仍会因缺流失败）
+    expect(silent.graph).not.toContain('[0:a]')
+    expect(silent.graph).not.toContain('atrim=start=0')
+    expect(silent.graph).not.toContain('amix')
+  })
+
+  it('叠加轨里的图片素材带 kind=image，args 里才会加 -loop 1', () => {
+    const base = createInitialProject({ url: SOURCE.url, duration: 10 }, 'main')
+    const withOverlay: Project = {
+      ...base,
+      overlayTracks: [
+        {
+          id: 'ov',
+          name: '叠加 1',
+          muted: false,
+          hidden: false,
+          enabled: true,
+          locked: false,
+          solo: false,
+          clips: [createClip(IMAGE.url, 0, 3, { type: 'image' }, 'logo-clip')],
+        },
+      ],
+    }
+    const plan = buildExportPlan(withOverlay, [SOURCE, IMAGE], true)
+    const imageInput = plan.inputs.find((input) => input.url === IMAGE.url)
+    expect(imageInput, '叠加图片必须注册成一路输入').toBeTruthy()
+    expect(imageInput?.kind).toBe('image')
+
+    const args = buildExportArgs(plan, 'graph.txt', 'out.mp4')
+    const imageAt = args.indexOf(imageInput!.file)
+    expect(imageAt).toBeGreaterThan(0)
+    // -loop 1 紧贴在它自己的 -i 之前（逐输入参数，不能靠复用主轨输入继承）
+    expect(args.slice(Math.max(0, imageAt - 6), imageAt)).toContain('-loop')
+  })
+
+  it('叠加轨里的图片不会被当成音频源去生成 [n:a]', () => {
+    const base = createInitialProject({ url: SOURCE.url, duration: 10 }, 'main')
+    const withOverlay: Project = {
+      ...base,
+      overlayTracks: [
+        {
+          id: 'ov',
+          name: '叠加 1',
+          muted: false,
+          hidden: false,
+          enabled: true,
+          locked: false,
+          solo: false,
+          clips: [createClip(IMAGE.url, 0, 3, { type: 'image' }, 'logo-clip')],
+        },
+      ],
+    }
+    const plan = buildExportPlan(withOverlay, [SOURCE, IMAGE], true)
+    const imageIndex = plan.inputs.findIndex((input) => input.url === IMAGE.url)
+    expect(imageIndex).toBeGreaterThanOrEqual(0)
+    // 图片那一路的输入不允许出现在任何 [n:a] 引用里
+    expect(plan.graph).not.toContain(`[${imageIndex}:a]`)
+  })
+})
+
+/**
+ * 尾部超长：字幕/文字可能被拖到视频结束之后。
+ * 预览能播到字幕，成片以前却在视频末尾就停（尾字幕整段丢失）。
+ */
+describe('字幕超出视频末尾时的成片总长', () => {
+  function projectWithTailCaption(): Project {
+    const base = createInitialProject({ url: SOURCE.url, duration: 4 }, 'main')
+    let project = addTextTrackToProject(base, 'cap', 'caption')
+    project = addTextClipToProject(project, 'cap', {
+      id: 'tail',
+      text: '片尾字幕',
+      start: 4,
+      end: 7,
+      x: 0.5,
+      y: 0.86,
+      fontSize: 0.05,
+      color: '#fff',
+      background: 'transparent',
+      align: 'center',
+      bold: false,
+    })!
+    return project
+  }
+
+  it('totalDuration 覆盖字幕末尾，且视频补黑场到该长度', () => {
+    const project = projectWithTailCaption()
+    const plan = buildExportPlan(project, [SOURCE], true)
+    expect(plan.totalDuration).toBeCloseTo(7, 3)
+    // 视频只有 4s，必须补 3s 黑场，否则 -t 7 会把成片截在 4s
+    expect(plan.graph).toContain('tpad=stop_mode=add:stop_duration=3')
+    expect(plan.videoLabel).toBe('outvpad')
+    // -t 用工程总长
+    const args = buildExportArgs(plan, 'graph.txt', 'out.mp4')
+    const t = args.indexOf('-t')
+    expect(t).toBeGreaterThanOrEqual(0)
+    expect(Number(args[t + 1])).toBeCloseTo(7, 3)
+  })
+})
+
+/**
+ * 空隙 + 转场：以前的 gapped 路径无条件 concat，导致「只要有一处空隙，
+ * 所有转场都变硬切」——预览有淡入淡出、成片全是切。
+ */
+describe('空隙与转场共存', () => {
+  it('gapped 路径仍然生成 xfade，而不是全部硬切', () => {
+    const base = createInitialProject({ url: SOURCE.url, duration: 10 }, 'c1')
+    const project: Project = {
+      ...base,
+      clips: [
+        { ...createClip(SOURCE.url, 0, 3, {}, 'c1'), transitionOut: { type: 'fade', duration: 0.6 } },
+        // 第二段前面留 1s 空隙 → 触发 gapped 路径
+        { ...createClip(SOURCE.url, 3, 6, { gapBefore: 1 }, 'c2'), transitionOut: { type: 'fade', duration: 0.5 } },
+        createClip(SOURCE.url, 6, 9, {}, 'c3'),
+      ],
+    }
+    const plan = buildExportPlan(project, [SOURCE], true)
+    expect(plan.graph).toContain('xfade=transition=fade')
+    // 空隙本身仍是硬切（gap 单元与相邻片段之间不叠化）
+    expect(plan.graph).toContain('concat=n=2:v=1:a=0')
   })
 })

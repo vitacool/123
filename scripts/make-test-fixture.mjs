@@ -16,6 +16,8 @@ import ffmpegPath from 'ffmpeg-static'
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const fixturesDir = join(root, 'tests', 'e2e', 'fixtures')
 const target = join(fixturesDir, 'clip.mp4')
+/** 静帧素材：图片片段的回归用例（可拉伸时长、播放不卡死）需要一张真实 PNG。 */
+const stillTarget = join(fixturesDir, 'still.png')
 const force = process.argv.includes('--force')
 
 if (!ffmpegPath) {
@@ -23,12 +25,36 @@ if (!ffmpegPath) {
   process.exit(1)
 }
 
-if (existsSync(target) && !force) {
-  console.log(`测试素材已存在：${target}`)
+if (existsSync(target) && existsSync(stillTarget) && !force) {
+  console.log(`测试素材已存在：${target} / ${stillTarget}`)
   process.exit(0)
 }
 
 mkdirSync(fixturesDir, { recursive: true })
+if (!existsSync(stillTarget) || force) {
+  console.log(`生成测试图片：${stillTarget}`)
+  execFileSync(
+    ffmpegPath,
+    [
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
+      'testsrc2=size=640x360:rate=1:duration=1',
+      '-frames:v',
+      '1',
+      stillTarget,
+    ],
+    { stdio: 'inherit' },
+  )
+}
+if (existsSync(target) && !force) {
+  console.log(`测试素材已存在：${target}`)
+  process.exit(0)
+}
 console.log(`生成测试素材：${target}`)
 execFileSync(
   ffmpegPath,

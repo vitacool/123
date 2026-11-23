@@ -6,6 +6,7 @@ import {
   planBatchMove,
   primaryOf,
   rangeSelection,
+  selectionFallbackId,
   toggleSelection,
 } from '../src/editor/core/selection'
 import { getTimeline as getTimelineFor } from '../src/editor/core/timeline'
@@ -315,5 +316,68 @@ describe('createMoveManyCommand（批量拖动保持相对位置）', () => {
     }
     const moved = createMoveManyCommand(['ac1'], 3).execute(project)
     expect(moved.audioTracks![0].clips[0].start).toBe(4)
+  })
+})
+
+/**
+ * 撤销「分割」后选区会指向已消失的新 id（selectionAfter）。兜底必须回到
+ * 播放头所在片段，否则 Delete / 分割 / 裁剪会因为「没有选中」而全部静默失效。
+ */
+describe('selectionFallbackId（撤销/重做后的选区兜底）', () => {
+  it('优先选中播放头所在的主轨片段', () => {
+    const project = projectWithMain() // c1 0-4, c2 4-8
+    expect(selectionFallbackId(project, 0)).toBe('c1')
+    expect(selectionFallbackId(project, 3.9)).toBe('c1')
+    expect(selectionFallbackId(project, 4.1)).toBe('c2')
+  })
+
+  it('边界时刻归属下一段（与 findSegmentAt 的语义一致）', () => {
+    expect(selectionFallbackId(projectWithMain(), 4)).toBe('c2')
+  })
+
+  it('主轨为空时退到叠加轨，再退到音频/字幕的区间', () => {
+    const overlayOnly: Project = {
+      ...createInitialProject({ url: 'a', duration: 10 }, 'ovc'),
+      clips: [],
+      overlayTracks: [
+        {
+          id: 'ov',
+          name: '叠加轨',
+          muted: false,
+          hidden: false,
+          clips: [createClip('a', 0, 3, {}, 'ovc')],
+        },
+      ],
+    }
+    expect(selectionFallbackId(overlayOnly, 1)).toBe('ovc')
+
+    const audioOnly: Project = {
+      ...createInitialProject({ url: 'a', duration: 10 }, 'ac1'),
+      clips: [],
+      audioTracks: [
+        {
+          id: 'at',
+          name: '配音',
+          muted: false,
+          hidden: false,
+          volume: 1,
+          clips: [
+            { id: 'ac1', sourceUrl: 'a', sourceStart: 0, sourceEnd: 2, start: 3, volume: 1, fadeIn: 0, fadeOut: 0 },
+          ],
+        },
+      ],
+    }
+    expect(selectionFallbackId(audioOnly, 3.5)).toBe('ac1')
+  })
+
+  it('播放头处什么都没有时退到第一个可选项', () => {
+    const project = projectWithMain()
+    // 主轨 0-8，播放头 20：没有片段命中，退到第一个
+    expect(selectionFallbackId(project, 20)).toBe('c1')
+  })
+
+  it('空工程返回 null（不要凭空造一个选中）', () => {
+    const empty: Project = { ...createInitialProject({ url: 'a', duration: 4 }, 'c1'), clips: [] }
+    expect(selectionFallbackId(empty, 0)).toBeNull()
   })
 })

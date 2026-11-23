@@ -7,7 +7,7 @@ import {
   reversedDependents,
   unusedAssets,
 } from '../src/editor/core/assets'
-import { createRemoveAssetClipsCommand } from '../src/editor/core/commands'
+import { createRemoveAssetClipsCommand, createDeleteManyCommand } from '../src/editor/core/commands'
 import { buildExportPlan } from '../src/editor/core/exportPlan'
 import { createInitialProject, removeClipsForAsset } from '../src/editor/core/operations'
 import { createEditorStore } from '../src/editor/store/editorStore'
@@ -207,6 +207,45 @@ describe('删除素材关联片段（operations / commands）', () => {
     expect(untouched).toBe(project)
     expect(createRemoveAssetClipsCommand({ url: 'u9', assetId: 'asset-z' }).execute(project)).toBe(project)
   })
+
+  /**
+   * 批量删除（Ctrl+X / 框选后删除）以前完全不看 locked：锁了轨还能删掉片段，
+   * 用户会觉得「锁定形同虚设」。单选 Delete 走的是另一条路径（那里判了锁）。
+   */
+  it('createDeleteManyCommand 跳过锁定轨道；全部被锁时返回原对象', () => {
+    const base = createInitialProject({ url: 'u1', duration: 10 }, 'a')
+    const project: Project = {
+      ...base,
+      clips: [clip('a', 'u1'), clip('b', 'u1')],
+      audioTracks: [
+        {
+          id: 'at',
+          name: '配音',
+          muted: false,
+          hidden: false,
+          enabled: true,
+          locked: true,
+          solo: false,
+          volume: 1,
+          clips: [
+            { id: 'ac', sourceUrl: 'u1', sourceStart: 0, sourceEnd: 5, start: 0, volume: 1, fadeIn: 0, fadeOut: 0 },
+          ],
+        },
+      ],
+    }
+
+    // 锁定音频轨：它的片段不能被删，但主轨的可以
+    const partial = createDeleteManyCommand(['a', 'ac']).execute(project)
+    expect(partial.clips.map((item) => item.id)).toEqual(['b'])
+    expect(partial.audioTracks?.[0].clips.map((item) => item.id)).toEqual(['ac'])
+
+    // 全部命中的都在锁定轨 → 原对象（不进历史）
+    expect(createDeleteManyCommand(['ac']).execute(project)).toBe(project)
+
+    // 锁定主轨后，主轨片段同样受保护
+    const mainLocked: Project = { ...project, mainTrack: { ...project.mainTrack, locked: true } as Project['mainTrack'] }
+    expect(createDeleteManyCommand(['a']).execute(mainLocked)).toBe(mainLocked)
+  })
 })
 
 describe('导出：素材缺失的片段输出画布背景', () => {
@@ -245,6 +284,20 @@ describe('store：removeAsset / cleanupUnusedAssets', () => {
     store.getState().loadSource(source('u1'))
     return store
   }
+
+  /**
+   * 空会话里只导入音频也必须分配 projectId：否则 buildDraftRecord 返回 null、
+   * 保存被整体跳过 —— 刷新后音频素材与已写入 IndexedDB 的 blob 全丢。
+   */
+  it('纯音频首次导入也会分配 projectId（否则刷新后素材全丢）', () => {
+    const store = createEditorStore()
+    expect(store.getState().projectId).toBeNull()
+    store.getState().addAssets([{ ...asset('bgm', 'u-audio'), kind: 'audio', name: 'bgm.mp3' }])
+    const state = store.getState()
+    expect(state.assets).toHaveLength(1)
+    expect(state.projectId, '纯音频会话必须拿到项目身份，草稿才会落盘').toBeTruthy()
+    expect(state.projectName).toBeTruthy()
+  })
 
   it('未被引用的素材直接删除，assets 收缩、source 保留', () => {
     const store = makeStore()

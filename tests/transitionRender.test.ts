@@ -213,4 +213,27 @@ describe('paintTransitionFrame：几何与降级', () => {
     const above = draw(3, 'fade')
     expect(above.log.right).toEqual([1])
   })
+
+  /**
+   * 像素化必须先在**全尺寸**离屏上画这一帧，再缩到小块。
+   *
+   * drawLeft/drawRight 的几何是按整幅 width/height 算的，直接画进只有 1/block 大小的
+   * 画布会把画面整体推出画布外（或只剩左上角一块）—— 现象就是「选像素化后画面全黑」。
+   */
+  it('像素化先建全尺寸离屏画布，再缩到小块（否则画面被推出画布）', () => {
+    // p=0.2 → block≈29 → 小块约 66×37；不能用 p=0.5（那时 block=1，小块就等于全尺寸）
+    const { ops } = draw(0.2, 'pixelize')
+    // 全尺寸离屏：1920×1080（几何按整幅算，必须先画在它上面）
+    expect(
+      ops.includes('createCanvas:1920x1080'),
+      '缺少全尺寸离屏画布：几何会按整幅算，画进小块画布后被裁到画布外',
+    ).toBe(true)
+    // 同时还有一个小块离屏（缩略后再放大，才有像素块）
+    expect(
+      ops.some((op) => op.startsWith('createCanvas:') && op !== 'createCanvas:1920x1080'),
+      '缺少小块离屏画布：像素化就没有块状效果',
+    ).toBe(true)
+    // 主画布最后一次 drawImage 把小块放大回全屏
+    expect(ops.filter((op) => op === 'drawImage').length).toBeGreaterThanOrEqual(1)
+  })
 })

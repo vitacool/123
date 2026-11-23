@@ -82,7 +82,7 @@
   },
   "src/editor/components/Preview.tsx": {
     "react-hooks/exhaustive-deps": {
-      "count": 7
+      "count": 6
     },
     "react-hooks/refs": {
       "count": 1
@@ -111,7 +111,7 @@
       "count": 6
     },
     "react-hooks/exhaustive-deps": {
-      "count": 16
+      "count": 15
     },
     "react-hooks/preserve-manual-memoization": {
       "count": 1

@@ -50,6 +50,66 @@ describe('editor store integration', () => {
     expect(state.selectedClipId).toBe(state.project.clips[1].id)
   })
 
+  it('撤销「分割」后选区回落到剩下的片段（否则后续 Delete / 分割静默失效）', () => {
+    const store = makeStore()
+    store.getState().setPlayhead(4)
+    store.getState().splitAtPlayhead()
+    expect(store.getState().project.clips).toHaveLength(2)
+    // 分割后选中的是新生成的右半段
+    const rightId = store.getState().project.clips[1].id
+    expect(store.getState().selectedClipId).toBe(rightId)
+
+    store.getState().undo()
+    const state = store.getState()
+    expect(state.project.clips).toHaveLength(1)
+    // 关键：不能让选区停留在已被撤销掉的 rightId 上
+    expect(state.selectedClipId).not.toBe(rightId)
+    expect(state.selectedClipId).toBe(state.project.clips[0].id)
+    expect(state.selectedIds).toEqual([state.project.clips[0].id])
+
+    // 因为选区有效，紧接着的删除必须真的生效
+    state.deleteSelectedClip()
+    expect(store.getState().project.clips).toHaveLength(0)
+    // 撤销删除后片段回来
+    store.getState().undo()
+    expect(store.getState().project.clips).toHaveLength(1)
+  })
+
+  it('撤销「插入定格」后选区不会指向已消失的定格片段', () => {
+    const store = makeStore()
+    store.getState().setPlayhead(5)
+    store.getState().insertFreeze()
+    const freezeId = store.getState().selectedClipId!
+    expect(store.getState().project.clips).toHaveLength(3)
+
+    store.getState().undo()
+    const state = store.getState()
+    expect(state.project.clips).toHaveLength(1)
+    expect(state.selectedClipId).not.toBe(freezeId)
+    expect(state.selectedClipId).toBe(state.project.clips[0].id)
+  })
+
+  it('不存在的选中 id 不会被写回选区（sync 必须校验 id 是否存在）', () => {
+    const store = makeStore()
+    const clipId = store.getState().project.clips[0].id
+    // loadSource 之后默认选中首段
+    expect(store.getState().selectedClipId).toBe(clipId)
+
+    // 幽灵 id：既不替换现有选中，也不写入任何新选中
+    store.getState().selectClip('ghost-id')
+    expect(store.getState().selectedClipId).toBe(clipId)
+    expect(store.getState().selectedIds).toEqual([clipId])
+
+    // 清空仍然有效
+    store.getState().selectClip(null)
+    expect(store.getState().selectedClipId).toBeNull()
+    expect(store.getState().selectedIds).toEqual([])
+
+    // 选回真实片段仍正常
+    store.getState().selectClip(clipId)
+    expect(store.getState().selectedClipId).toBe(clipId)
+  })
+
   it('inserts a freeze and maintains unique IDs', () => {
     const store = makeStore()
     store.getState().setPlayhead(5)
@@ -412,5 +472,41 @@ describe('导出区间（I/O 打点）', () => {
       playhead: 0,
     })
     expect(store.getState().exportRange).toEqual({ start: 9, end: 12 })
+  })
+
+  /**
+   * 导出区间被工程变短夹小之后，撤销把工程恢复 → 区间也要回来。
+   *
+   * 区间是会话态、不进撤销栈，所以以前夹取是**不可逆**的：用户设了 2–10s，
+   * 删掉尾部片段再撤销，区间已经变成别的值甚至清空，他却以为还在导那一段。
+   * 现在由 `exportRangeRaw` 重新推导。
+   */
+  it('工程变短夹取后撤销，导出区间自动恢复（raw 重新推导）', () => {
+    const store = makeStore()
+    store.getState().setExportInPoint(2)
+    store.getState().setExportOutPoint(10)
+    expect(store.getState().exportRange).toEqual({ start: 2, end: 10 })
+    expect(store.getState().exportRangeRaw).toEqual({ start: 2, end: 10 })
+
+    // 删掉唯一片段 → 工程变空（总长 0）→ 区间被夹成 null
+    store.getState().selectClip(store.getState().project.clips[0].id)
+    store.getState().deleteSelectedClip()
+    expect(store.getState().exportRange).toBeNull()
+    // 原始值仍然保留
+    expect(store.getState().exportRangeRaw).toEqual({ start: 2, end: 10 })
+
+    // 撤销删除 → 工程回到 12s，区间自动恢复
+    store.getState().undo()
+    expect(store.getState().project.clips).toHaveLength(1)
+    expect(store.getState().exportRange).toEqual({ start: 2, end: 10 })
+  })
+
+  it('清除导出区间时 raw 一并清空（不会在别处复活）', () => {
+    const store = makeStore()
+    store.getState().setExportInPoint(1)
+    store.getState().setExportOutPoint(5)
+    store.getState().clearExportRange()
+    expect(store.getState().exportRange).toBeNull()
+    expect(store.getState().exportRangeRaw).toBeNull()
   })
 })

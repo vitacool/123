@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { buildExportPlan, maskedClipPieces } from '../src/editor/core/exportPlan'
 import {
+  buildExportInputArgs,
   injectCoverInputArgs,
   injectMaskInputArgs,
   injectTextInputArgs,
@@ -192,6 +193,52 @@ describe('输入编号：蒙版与文字层 / 封面共存', () => {
     expect(injectMaskInputArgs(base, [])).toEqual(base)
   })
 
+  /**
+   * 真实导出走的是 `buildExportInputArgs`（三个注入函数的组合），而不是单个函数。
+   * 曾经这里把嵌套写反（先文字、后蒙版），得到「媒体 → 文字 → 蒙版 → 封面」，
+   * 而 graph 按「媒体 → 蒙版 → 文字」编号 → 蒙版整体错位一格，
+   * 表现为成片里带蒙版的片段几乎消失、整屏被最后一张蒙版 PNG 盖住。
+   * 这个用例直接锁住组合顺序，防止再次写反。
+   */
+  it('buildExportInputArgs：媒体 → 蒙版 → 文字 → 封面（与 exportInputLayout 编号一致）', () => {
+    const plan = buildExportPlan(projectWithMask(MASK()), [SOURCE], true)
+    const args = buildExportInputArgs(plan, 'graph.txt', 'out.mp4', {
+      maskInputOrder: ['m1.png', 'm2.png'],
+      textLayer: { assets: [], listFile: 'text.txt', listContent: '', inputIndex: 0 },
+      coverFile: 'cover.png',
+    })
+    const order = args.join(' ')
+    const mediaFile = plan.inputs[0].file
+    expect(order.indexOf(mediaFile)).toBeGreaterThanOrEqual(0)
+    expect(order.indexOf(mediaFile)).toBeLessThan(order.indexOf('m1.png'))
+    expect(order.indexOf('m1.png')).toBeLessThan(order.indexOf('m2.png'))
+    expect(order.indexOf('m2.png')).toBeLessThan(order.indexOf('text.txt'))
+    expect(order.indexOf('text.txt')).toBeLessThan(order.indexOf('cover.png'))
+    // 输入总数 = 媒体 + 蒙版 2 + 文字 1 + 封面 1
+    expect(args.filter((value) => value === '-i').length).toBe(plan.inputs.length + 2 + 1 + 1)
+  })
+
+  // 反向对照：把嵌套写反（先文字、后蒙版）会得到什么 —— 蒙版排到了文字之后，
+  // 与 exportInputLayout 的编号（媒体 → 蒙版 → 文字）不一致。这条用例把这个
+  // 「曾经的真实写法」钉在测试里，避免以后有人又"顺手"换回旧顺序。
+  it('反向对照：先文字后蒙版的旧写法会与编号公式矛盾', () => {
+    const base = ['-hide_banner', ...mediaArgs, ...graphScript]
+    const textLayer = { assets: [], listFile: 'text.txt', listContent: '', inputIndex: 4 }
+    const wrong = injectMaskInputArgs(injectTextInputArgs(base, textLayer), ['m1.png'])
+    const order = wrong.join(' ')
+    expect(order.indexOf('text.txt')).toBeLessThan(order.indexOf('m1.png'))
+
+    // 而正确组合（buildExportInputArgs 内部）必须是蒙版在前
+    const plan = buildExportPlan(projectWithMask(MASK()), [SOURCE], true)
+    const right = buildExportInputArgs(plan, 'graph.txt', 'out.mp4', {
+      maskInputOrder: ['m1.png'],
+      textLayer,
+      coverFile: null,
+    })
+    const rightOrder = right.join(' ')
+    expect(rightOrder.indexOf('m1.png')).toBeLessThan(rightOrder.indexOf('text.txt'))
+  })
+
   it('maskedClips 只收集主轨与叠加轨里真正有蒙版的片段', () => {
     const base = projectWithMask(undefined)
     const project: Project = {
@@ -214,5 +261,20 @@ describe('输入编号：蒙版与文字层 / 封面共存', () => {
       ],
     }
     expect(maskedClips(project).map((clip) => clip.id)).toEqual(['ov1'])
+  })
+
+  /**
+   * 素材被「仅从素材库移除」时片段仍留在时间轴（占位），但已没有画面可渲染。
+   * 若把它的蒙版收进来，蒙版 PNG 渲不出来 → 后面「文件数 != 片段数」的校验会把
+   * 整次导出硬判成「蒙版渲染失败」，而其它所有路径对缺失素材都是降级为画布背景。
+   */
+  it('maskedClips 排除素材已不在导出源里的片段（否则导出必报蒙版渲染失败）', () => {
+    const project = projectWithMask(MASK())
+    // 不传 availableUrls：仍然收集（纯函数保持原语义，单测/预览也用得到）
+    expect(maskedClips(project)).toHaveLength(1)
+    // 传入可用素材集合：该素材已不在其中 → 不收集
+    expect(maskedClips(project, new Set<string>())).toHaveLength(0)
+    // 传了但包含它 → 正常收集
+    expect(maskedClips(project, new Set([SOURCE.url]))).toHaveLength(1)
   })
 })
