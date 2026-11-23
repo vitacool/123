@@ -1,8 +1,12 @@
+import { assetKindOf } from '../core/assets'
+import { resolveAssetPlacement, type AssetPlacementIntent } from '../core/assetPlacement'
+import type { ChromaKey } from '../core/chromaKey'
 import { createStore } from 'zustand/vanilla'
 import { aspectValue } from '../core/aspect'
 import { CROP_PRESETS, type CropPresetId } from '../core/constants'
 import {
   createAddAudioClipCommand,
+  createAddClipToNewOverlayTrackCommand,
   createAddAudioTrackCommand,
   createAddClipCommand,
   createAddMarkerCommand,
@@ -40,6 +44,7 @@ import {
   createSetColorAllCommand,
   createPasteVisualAttributesCommand,
   createPasteAudioAttributesCommand,
+  createPasteSpeedAttributesCommand,
   createMoveOverlayTrackCommand,
   createRemoveAssetClipsCommand,
   createSetCoverCommand,
@@ -60,6 +65,7 @@ import {
   createUpdateAudioClipCommand,
   createUpdateAudioTrackCommand,
   createUpdateAnyClipCommand,
+  createReverseClipCommand,
   createUpdateMainTrackCommand,
   createUpdateMarkerCommand,
   createUpdateOverlayTrackCommand,
@@ -68,13 +74,27 @@ import {
   createReplaceCaptionTextCommand,
   createMergeCaptionWithPreviousCommand,
   createSplitCaptionCommand,
+  createMoveTrackCommand,
   createRelinkCaptionsCommand,
   createUpdateTextClipCommand,
   createUpdateTextTrackCommand,
 } from '../core/commands'
 import type { EditorCommand } from '../core/commands'
+import type { TrackOrderKind } from '../core/operations'
 import type { DraftSettings } from '../core/draft'
-import { HistoryStack } from '../core/history'
+import {
+  DEFAULT_FRAMECUT_THEME,
+  type FrameCutTheme,
+  type ResolvedTheme,
+} from '../core/theme'
+import {
+  EXPORT_RANGE_MIN_DURATION,
+  clampExportRange,
+  exportRangeDuration,
+  type ExportRange,
+} from '../core/exportRange'
+import { formatClock } from '../core/format'
+import { clampMainTrackStart, createStoreInternals } from './internal'
 import {
   clampCrop,
   createEmptyProject,
@@ -83,6 +103,7 @@ import {
   applyColorToAllClips,
   applyAttributePatch,
   normalizeAngle,
+  displayToArrayIndex,
 } from '../core/operations'
 import { createId } from '../core/ids'
 import {
@@ -101,7 +122,7 @@ import {
 import { buildCaptionsFromWords, splitCaptionText } from '../core/captions'
 import { IMAGE_DEFAULT_DURATION } from '../core/image'
 import { normalizeBackground } from '../core/background'
-import { clampSpeed, canChangeClipSpeed, clipSpeedValue } from '../core/speed'
+import { clampSpeed, canChangeClipSpeed, clipSpeedValue, normalizeSpeedCurve } from '../core/speed'
 import { clipFreezeFrame, clipTimelineDuration } from '../core/clipTime'
 import {
   clampTransitionDuration,
@@ -117,14 +138,43 @@ import { animationContextAt, moveKeyframesInProject } from '../core/keyframes'
 import { animationBaseValue, isPropertyAnimatizable } from '../core/animationTargets'
 import { evalAnimation } from '../core/animation'
 import type { KeyframeRef } from '../core/keyframeEdit'
-import { deleteMediaBlob } from '../services/draftStore'
+import {
+  deleteMediaBlob,
+  reportDraftSaveFailure,
+  saveMediaBlob,
+  saveProjectRecord,
+  toDraftSnapshot,
+} from '../services/draftStore'
+import {
+  DEFAULT_PROJECT_NAME,
+  normalizeProjectName,
+  projectNameFromSource,
+  projectThumbnail,
+} from '../core/projectLibrary'
+import { readAssetFile } from '../services/assetReader'
+import { clearThemeTokenCache } from '../services/themeTokens'
+import {
+  countLinkedCaptions,
+  matchesReverseOrigin,
+  mirrorAnimationTimes,
+  needsReverseConfirm,
+  planReverseRestore,
+  reverseActionState,
+  reverseAssetOrigin,
+  reverseChunks,
+} from '../core/reverse'
+import { isReverseAbort, reverseAssetSpan } from '../services/reverseMedia'
 import {
   captureAudioAttrs,
+  captureSpeedAttrs,
   captureVisualAttrs,
   getAudio as getAudioAttrs,
+  getSpeed as getSpeedAttrs,
   getVisual as getVisualAttrs,
   setAudio as setAudioAttrs,
+  setSpeed as setSpeedAttrs,
   setVisual as setVisualAttrs,
+  speedAttrsPatch,
 } from '../core/attributeClipboard'
 import {
   blendModeLabel,
@@ -154,7 +204,7 @@ import {
   stepBySeconds,
 } from '../core/playhead'
 import { mapWordsToTimeline } from '../core/captionMapping'
-import { mergeRelinkedCaptions, relinkCaptions } from '../core/captionLink'
+import { mergeRelinkedCaptions } from '../core/captionLink'
 import type { TimelineWord, WordsBySource } from '../core/captionMapping'
 import {
   audioTrackState,
@@ -204,6 +254,7 @@ import type {
   TransitionType,
   CaptionStyle,
   Clip,
+  ClipMask,
   CoverMode,
   CropRect,
   ExportQuality,
@@ -263,16 +314,55 @@ export type TimelineSettingKey = keyof TimelineSettings
 
 export type ToastKind = 'info' | 'success' | 'warning' | 'error'
 
+/** 进行中的「倒放」任务（用于进度条 / 取消按钮；不写进工程与撤销历史）。 */
+export interface ReverseJob {
+  clipId: string
+  /** 源素材名（展示用）。 */
+  assetName: string
+  /** 0–100。 */
+  progress: number
+  status: string
+}
+
 export interface ToastMessage {
   id: number
   kind: ToastKind
   message: string
 }
 
+/**
+ * 已删除、但还不能真正回收的素材。
+ *
+ * 删除素材时：片段删除走命令（可撤销），但 `URL.revokeObjectURL` 与 IndexedDB 的
+ * blob 删除是**不可逆**的。如果立刻执行，Ctrl+Z 把片段恢复回来时源已经失效
+ * （时间轴上出现无法播放的坏片段）。所以删除只把素材标记成 pending、
+ * 立刻从 `assets` 移出（素材库随之隐藏），真正回收推迟到「历史栈里已无引用」。
+ */
+export interface PendingReclaimEntry {
+  /** 删除时的素材快照（它已经从 assets 里移走了，这里留一份用于恢复 / 回收）。 */
+  asset: MediaAsset
+  /** 删除前在素材库里的位置：撤销恢复时插回原处，避免列表顺序跳动。 */
+  indexAtDelete: number
+  /** 删除时的 projectId：回收 blob 时沿用「别删其它项目还在用的素材」判定。 */
+  projectId: string | null
+  /**
+   * 删除时是否连带删掉了引用它的片段。
+   * 只有这种删除才需要「撤销把片段带回来 → 素材回素材库」的恢复；
+   * `removeClips:false`（仅从素材库移除、片段保留）不做恢复，它会一直等到没人引用。
+   */
+  removedClips: boolean
+  deletedAt: number
+}
+
 export interface EditorState {
   project: Project
   source: SourceInfo | null
   assets: MediaAsset[]
+  /**
+   * 待回收素材（key = assetId）。删除后不在素材库显示，但在真正回收前仍可被撤销带回。
+   * 会话级状态：不进撤销历史、不写进草稿。
+   */
+  pendingReclaim: Record<string, PendingReclaimEntry>
   selectedClipId: string | null
   /** 多选集合；`selectedClipId` 始终是其中的「主选中」（派生值）。 */
   selectedIds: string[]
@@ -306,12 +396,30 @@ export interface EditorState {
   setClipBlendMode: (clipId: string, mode: BlendMode) => void
   /** 设置片段调色（一个命令）。 */
   setClipColor: (clipId: string, color: ColorAdjustments) => void
+  /** 设置 / 清除片段形状蒙版（一个命令 = 一步撤销）。 */
+  setClipMask: (clipId: string, mask: ClipMask | undefined) => void
+  /** 设置 / 清除色度抠像（一个命令 = 一步撤销）。 */
+  setClipChromaKey: (clipId: string, key: ChromaKey | undefined) => void
+  /** 设置 / 清除分段变速（2–8 段，段内常速；一个命令 = 一步撤销）。 */
+  setClipSpeedSegments: (
+    clipId: string,
+    segments: { at: number; speed: number }[] | undefined,
+  ) => void
+  /**
+   * 设置 / 清除平滑变速曲线（一个命令 = 一步撤销）。
+   * 写入曲线时同时清掉 speedSegments：两者互斥，曲线优先于单一倍率。
+   */
+  setClipSpeedCurve: (
+    clipId: string,
+    curve: { at: number; speed: number }[] | undefined,
+  ) => void
   /** 把一组调色参数应用到所有画面片段（一个命令）。 */
   applyColorToAll: (color: ColorAdjustments) => void
   /** 调色剪贴板：「复制当前设置」后供其他片段「粘贴调色」。 */
   colorClipboard: ColorAdjustments | null
   /** 预览是否临时显示封面（hover / 点击封面块）。 */
   coverPreview: boolean
+  /**
   /** 在当前播放头处切换某个属性的关键帧（有则删、无则按当前值加）。 */
   toggleKeyframe: (prop: AnimatableProperty) => void
   /** 多选整体平移关键帧（1 步撤销）；被唯一性校验拒绝时 Toast 提示并放弃。 */
@@ -346,6 +454,10 @@ export interface EditorState {
   copyAudioAttributes: (clipId: string) => void
   /** 把音频属性粘贴到一组片段（一个命令）。 */
   pasteAudioAttributes: (ids: string[]) => void
+  /** 复制变速属性（倍率 / 分段 / 曲线）到模块级属性剪贴板。 */
+  copySpeedAttributes: (clipId: string) => void
+  /** 把变速属性粘贴到一组可变速片段（一个命令；定格 / 图片被跳过）。 */
+  pasteSpeedAttributes: (ids: string[]) => void
 
   /** 从播放头所在的主轨画面截一帧作为封面（失败时 Toast 警告，不写状态）。 */
   setCoverFromFrame: (time: number) => void
@@ -366,6 +478,39 @@ export interface EditorState {
   playhead: number
   isPlaying: boolean
   timelineZoom: number
+  /** 当前项目在 IndexedDB 里的 id；还没有内容（未分配）时为 null。 */
+  projectId: string | null
+  /** 当前项目名（默认取主素材名，可重命名）。 */
+  projectName: string
+  /** 用户是否手动改过项目名：改过就不再跟随主素材名。 */
+  projectNameEdited: boolean
+  /** 重命名当前项目（随自动保存写入 IndexedDB）。 */
+  renameProject: (name: string) => void
+  /** 切到某个已有项目：先保存当前项目，再接管新的 id / 名字。 */
+  adoptProject: (id: string, name: string) => void
+  /** 立即保存当前项目（切换项目 / 关闭前调用；失败时提示一次）。 */
+  flushProjectSave: () => void
+  /**
+   * 导出区间（入点 / 出点，秒）；null 表示导出整条时间轴。
+   * 会话 / 草稿级设置：直接 set，不进撤销历史，随草稿持久化。
+   */
+  exportRange: ExportRange | null
+  /** 界面主题偏好（'system' 跟随系统）。纯界面状态：不写进工程/草稿/撤销历史。 */
+  theme: FrameCutTheme
+  /** 当前实际生效的主题（system 已解析）。Canvas 界面元素据此重绘。 */
+  resolvedTheme: ResolvedTheme
+  /** 设置主题偏好（由编辑器外壳或 API 调用）。 */
+  setTheme: (theme: FrameCutTheme) => void
+  /** 写入解析后的实际主题（由编辑器外壳跟随系统变化时更新）。 */
+  setResolvedTheme: (theme: ResolvedTheme) => void
+  /** 在播放头设入点；只设了一端时出点取工程终点。 */
+  setExportInPoint: (time?: number) => void
+  /** 在播放头设出点；只设了一端时入点取工程起点。 */
+  setExportOutPoint: (time?: number) => void
+  /** 拖动时间轴上的区间端点；长度保持至少 0.1 秒。 */
+  setExportRangeEdge: (edge: 'start' | 'end', time: number) => void
+  /** 清除导出区间（Alt+X）。 */
+  clearExportRange: () => void
   /** 时间轴可视区宽度（px），由 Timeline 组件测量后回填，用于「适应窗口」。 */
   timelineViewportWidth: number
   /** 全屏预览开关（F 进入，Esc 退出）。 */
@@ -374,6 +519,12 @@ export interface EditorState {
   timelineSettings: TimelineSettings
   cropSession: CropSession | null
   previewPatch: PreviewPatch | null
+  /** 「倒放」生成中的任务；null 表示空闲。 */
+  reverseJob: ReverseJob | null
+  /** 把片段（主轨或叠加轨的 video）改成倒放素材；必要时生成新素材。 */
+  reverseClip: (clipId: string) => void
+  /** 取消进行中的倒放（在分段之间生效）。 */
+  cancelReverse: () => void
   markerEditorId: string | null
   exportDialogOpen: boolean
   canUndo: boolean
@@ -395,16 +546,21 @@ export interface EditorState {
    * 从素材库删除一个素材。
    * - removeClips=true：同时删除所有引用它的片段（1 步撤销）。
    * - removeClips=false：片段保留，但会显示为「素材已移除」。
-   * Blob 会从 IndexedDB 删除（不可撤销），objectURL 仅在不再被引用时回收。
+   *
+   * 删除本身只把素材标记为「待回收」并立刻从素材库隐藏：objectURL 与 IndexedDB 的
+   * blob 是不可逆的，必须等到历史栈（past + present + future）里再没有任何片段引用它
+   * 时才真正回收，否则撤销回来的片段会指向已经失效的源。撤销会自动把素材放回素材库。
    */
   removeAsset: (assetId: string, options: { removeClips: boolean }) => void
-  /** 一次性清理所有未被任何片段引用的素材。 */
+  /** 一次性清理所有未被任何片段引用的素材（同样走延迟回收）。 */
   cleanupUnusedAssets: () => void
-  addAssetToTimeline: (
-    assetId: string,
-    targetTrackId: string | null,
-    targetStart: number,
-  ) => void
+  /**
+   * 立即回收全部待回收素材（关闭 / 切换项目、组件卸载、destroy 时调用）。
+   * 这些时刻历史栈会被丢弃（或编辑器已经不存在），不可能再撤销回来。
+   */
+  disposePendingAssets: () => void
+  /** 把素材库里的素材加到时间轴；落点由 core/assetPlacement 决定。 */
+  addAssetToTimeline: (assetId: string, intent: AssetPlacementIntent) => void
   clearSource: () => void
   updateSourceMeta: (patch: Partial<SourceInfo>) => void
   execute: (command: EditorCommand) => boolean
@@ -430,6 +586,12 @@ export interface EditorState {
   toggleTimelineSetting: (key: TimelineSettingKey) => void
 
   setPreviewPatch: (patch: PreviewPatch | null) => void
+  /**
+   * 预览时把「带分段变速的片段」静音：浏览器预览只能按 playbackRate 播放（会变调），
+   * 而导出用 atempo 保音高。开启后预览与导出的听感一致（预览不出这些片段的声音）。
+   */
+  previewMuteSegmentedSpeed?: boolean
+  togglePreviewMuteSegmentedSpeed: () => void
   splitAtPlayhead: () => void
   trimLeftAtPlayhead: () => void
   trimRightAtPlayhead: () => void
@@ -454,6 +616,10 @@ export interface EditorState {
   addOverlayTrack: () => void
   /** 调整叠加轨层级：'up' = 往上层（数组 index+1），'down' = 往下层。 */
   moveOverlayTrack: (trackId: string, direction: 'up' | 'down') => void
+  /** 把轨道移动到目标界面下标（跨类型不允许，主轨不可移动）。 */
+  moveTrack: (kind: TrackOrderKind, trackId: string, targetDisplayIndex: number) => void
+  /** 按界面上下移动一层（按钮与 Alt+上下箭头共用）。 */
+  moveTrackBy: (kind: TrackOrderKind, trackId: string, direction: 'up' | 'down') => void
   removeOverlayTrack: (trackId: string) => void
   toggleOverlayTrackVisibility: (trackId: string) => void
   toggleTrackFlag: (kind: TrackKind, trackId: string | null, flag: TrackFlag) => void
@@ -574,69 +740,17 @@ const resolvePasteTargets = (state: EditorState, ids: readonly string[]): string
   return state.selectedClipId ? [state.selectedClipId] : []
 }
 
-const clampMainTrackStart = (project: Project): Project => {
-  if (project.clips.length === 0) return project
-  const first = project.clips[0]
-  if ((first.gapBefore ?? 0) <= 0.0001) return project
-  return {
-    ...project,
-    clips: [{ ...first, gapBefore: 0 }, ...project.clips.slice(1)],
-  }
-}
-
 export function createEditorStore() {
   const initial = createEmptyProject()
-  const history = new HistoryStack(initial)
   let toastCounter = 0
 
   return createStore<EditorState>()((set, get) => {
-    /** 判断某 id 是否仍存在于工程中（任意轨道、任意类型）。 */
-  const idExists = (project: Project, id: string): boolean =>
-    Boolean(
-      findClipLocation(project, id) ||
-        findAudioClipLocation(project, id) ||
-        findTextClipLocation(project, id),
-    )
+  /** 共享内核：历史栈、命令执行、状态同步、素材回收（见 store/internal.ts）。 */
+  const internals = createStoreInternals(get, set, initial)
+  const { history, sync, run, reconcilePendingAssets, cancelReverseForProjectSwap } = internals
 
-  const sync = (project: Project, selection?: string | null): void => {
-      const effective = get().timelineSettings.mainTrackMagnet
-        ? clampMainTrackStart(project)
-        : project
-      const total = getProjectEnd(effective)
-      const current = get()
-      // 多选：保留仍然存在的项；命令指定的 selection 覆盖为单选。
-      const previousIds =
-        current.selectedIds.length > 0
-          ? current.selectedIds
-          : current.selectedClipId
-            ? [current.selectedClipId]
-            : []
-      let ids = previousIds.filter((id) => idExists(effective, id))
-      if (selection !== undefined) {
-        if (selection === null) ids = []
-        else if (!ids.includes(selection)) ids = [selection]
-      }
-      const nextSelection = primaryOf(ids, current.selectedClipId)
-      const playhead = clamp(current.playhead, 0, Math.max(0, total))
-      set({
-        project: effective,
-        selectedIds: ids,
-        selectedClipId: nextSelection,
-        playhead,
-        canUndo: history.canUndo,
-        canRedo: history.canRedo,
-        cropSession:
-          current.cropSession && findClipLocation(effective, current.cropSession.clipId)
-            ? current.cropSession
-            : null,
-        previewPatch: null,
-        markerEditorId:
-          current.markerEditorId &&
-          effective.markers.some((marker) => marker.id === current.markerEditorId)
-            ? current.markerEditorId
-            : null,
-      })
-    }
+
+
 
   /** 统一的选中入口：写 selectedIds，并派生 selectedClipId。 */
   const setSelection = (ids: string[], preferred?: string | null): void => {
@@ -665,31 +779,6 @@ export function createEditorStore() {
       })
     }
 
-    const run = (command: EditorCommand): boolean => {
-      const effectiveCommand: EditorCommand = {
-        ...command,
-        execute(project) {
-          let next = command.execute(project)
-          if (next === project) return project
-          if (get().timelineSettings.mainTrackMagnet) {
-            next = clampMainTrackStart(next)
-          }
-          // 统一的字幕联动 hook：任何改动片段布局的命令都在同一步撤销里
-          // 重新对齐带 link 的智能字幕。
-          if (get().captionFollow) {
-            const urlToAssetId = new Map(get().assets.map((asset) => [asset.url, asset.id]))
-            next = relinkCaptions(next, urlToAssetId)
-          }
-          return next
-        },
-      }
-      const result = history.execute(effectiveCommand)
-      if (!result.changed) return false
-      set({ isPlaying: false })
-      sync(result.project, command.selectionAfter)
-      set({ lastAction: command.label })
-      return true
-    }
 
     /** 把封面写入工程历史（1 步撤销），成功后提示。 */
     const applyCover = (cover: ProjectCover): void => {
@@ -701,13 +790,20 @@ export function createEditorStore() {
       project: initial,
       source: null,
       assets: [],
+      pendingReclaim: {},
       selectedClipId: null,
       selectedIds: [],
       clipboard: { items: [], count: 0 },
       playhead: 0,
       isPlaying: false,
       timelineZoom: TIMELINE_DEFAULT_ZOOM,
+      projectId: null,
+      projectName: DEFAULT_PROJECT_NAME,
+      projectNameEdited: false,
       timelineViewportWidth: 960,
+      exportRange: null,
+      theme: DEFAULT_FRAMECUT_THEME,
+      resolvedTheme: 'light',
       previewFullscreen: false,
       timelineSettings: {
         mainTrackMagnet: false,
@@ -717,6 +813,7 @@ export function createEditorStore() {
       },
       cropSession: null,
       previewPatch: null,
+      reverseJob: null,
       markerEditorId: null,
       exportDialogOpen: false,
       colorClipboard: null,
@@ -732,6 +829,7 @@ export function createEditorStore() {
       captionStylePreview: null,
 
       loadSource: (source) => {
+        cancelReverseForProjectSwap()
         const asset: MediaAsset = { ...source, id: createId('asset') }
         const project = createInitialProject(source, createId('clip'))
         history.reset(project)
@@ -739,9 +837,16 @@ export function createEditorStore() {
           source: asset,
           assets: [asset],
           project,
+          // 新会话 = 新项目：分配 id，项目名取主素材名。
+          projectId: createId('project'),
+          projectName: projectNameFromSource(source.name),
+          projectNameEdited: false,
           selectedClipId: project.clips[0]?.id ?? null,
+          // 必须同时重置多选：否则上一个项目的 id 会残留，复制/删除会用到失效 id。
+          selectedIds: project.clips[0]?.id ? [project.clips[0].id] : [],
           playhead: 0,
           isPlaying: false,
+          exportRange: null,
           cropSession: null,
           previewPatch: null,
           markerEditorId: null,
@@ -755,13 +860,17 @@ export function createEditorStore() {
       },
 
       hydrateDraft: (draft) => {
+        cancelReverseForProjectSwap()
         history.reset(draft.project)
         const firstAudio = draft.project.audioTracks?.[0]?.clips[0]?.id ?? null
+        const firstSelection = draft.project.clips[0]?.id ?? firstAudio
         set({
           project: draft.project,
           assets: draft.assets,
           source: draft.source,
-          selectedClipId: draft.project.clips[0]?.id ?? firstAudio,
+          selectedClipId: firstSelection,
+          // 切项目必须重置多选集合（否则复制/删除会读到上一个项目的失效 id）。
+          selectedIds: firstSelection ? [firstSelection] : [],
           playhead: clamp(
             draft.playhead,
             0,
@@ -780,6 +889,11 @@ export function createEditorStore() {
             previewAxis: draft.timelineSettings.previewAxis,
           },
           captionFollow: draft.timelineSettings.captionFollow ?? true,
+          // 旧草稿没有 exportRange：按「导出全部」处理，越界区间夹回有效范围。
+          exportRange: clampExportRange(
+            draft.timelineSettings.exportRange ?? null,
+            Math.max(0, getProjectEnd(draft.project)),
+          ),
           cropSession: null,
           previewPatch: null,
           markerEditorId: null,
@@ -790,6 +904,8 @@ export function createEditorStore() {
           toast: null,
           asrWordsBySource: null,
         })
+        // 换到了另一个项目：旧工程的历史栈刚被 reset，待回收素材已不可能被撤销带回。
+        reconcilePendingAssets({ force: true })
       },
 
       addAssets: (incoming) => {
@@ -817,6 +933,11 @@ export function createEditorStore() {
             source: primary,
             assets: merged,
             project,
+            // 第一次导入素材即成为新项目：分配 id，名字跟随主素材。
+            projectId: current.projectId ?? createId('project'),
+            projectName: current.projectNameEdited
+              ? current.projectName
+              : projectNameFromSource(primary.name),
             selectedClipId: project.clips[0]?.id ?? null,
             playhead: 0,
             isPlaying: false,
@@ -830,7 +951,20 @@ export function createEditorStore() {
           current.notify(`已导入素材「${primary.name}」`, 'success')
           return
         }
-        set({ assets: merged, source: current.source ?? merged.find((asset) => asset.kind !== 'audio') ?? null })
+        const nextSource =
+          current.source ?? merged.find((asset) => asset.kind !== 'audio') ?? null
+        set({
+          assets: merged,
+          source: nextSource,
+          // 空会话里只导入音频时也要有一个项目身份；名字仍跟随主素材（若有）。
+          projectId:
+            current.projectId ??
+            (nextSource || merged.length > 0 ? createId('project') : null),
+          projectName:
+            current.projectNameEdited || !nextSource
+              ? current.projectName
+              : projectNameFromSource(nextSource.name),
+        })
         current.notify(
           incoming.length === 1 ? `已导入素材「${incoming[0].name}」` : `已导入 ${incoming.length} 个素材`,
           'success',
@@ -842,34 +976,42 @@ export function createEditorStore() {
         const asset = state.assets.find((item) => item.id === assetId)
         if (!asset) return
         const referenced = isAssetReferenced(state.project, asset)
+        const removedClips = options.removeClips && referenced
 
-        // 先删片段（1 步撤销），再删素材本身（素材不在撤销历史里）。
-        if (options.removeClips && referenced) {
+        // 先删片段（1 步撤销）。素材本身不在撤销历史里，所以这里**不销毁**它：
+        // 只标记成待回收并从素材库隐藏，revoke / 删 blob 等到历史栈不再引用时再做
+        // （见 reconcilePendingAssets），这样 Ctrl+Z 回来的片段仍然有可用的源。
+        if (removedClips) {
           run(createRemoveAssetClipsCommand({ url: asset.url, assetId: asset.id }))
         }
 
-        // Blob 从 IndexedDB 删除：不可撤销。
-        void deleteMediaBlob(assetId).catch(() => undefined)
-
-        // objectURL 只在「不再被任何片段使用」时回收；
-        // 仍在使用的 URL 交给 VideoEditor 卸载时的统一回收（importedUrlsRef）。
-        const stillUsedByClips = !options.removeClips && referenced
-        if (!stillUsedByClips && asset.url.startsWith('blob:')) {
-          try {
-            URL.revokeObjectURL(asset.url)
-          } catch {
-            // 已经失效的 URL 忽略。
-          }
-        }
-
         const current = get()
+        const indexAtDelete = Math.max(
+          0,
+          current.assets.findIndex((item) => item.id === assetId),
+        )
         const assets = current.assets.filter((item) => item.id !== assetId)
         const nextSource =
           current.source?.url === asset.url
             ? assets.find((item) => item.kind !== 'audio') ?? null
             : current.source
-        set({ assets, source: nextSource })
-        current.notify(`已删除素材「${asset.name}」`, 'info')
+        set({
+          assets,
+          source: nextSource,
+          pendingReclaim: {
+            ...current.pendingReclaim,
+            [assetId]: {
+              asset,
+              indexAtDelete,
+              projectId: state.projectId,
+              removedClips,
+              deletedAt: Date.now(),
+            },
+          },
+        })
+        // 如果它已经没有任何引用（含历史栈），这里立刻回收；否则先挂着等撤销窗口关闭。
+        reconcilePendingAssets()
+        state.notify(`已删除素材「${asset.name}」，撤销可恢复`, 'info')
       },
 
       cleanupUnusedAssets: () => {
@@ -880,73 +1022,82 @@ export function createEditorStore() {
           return
         }
         const unusedIds = new Set(unused.map((asset) => asset.id))
-        for (const asset of unused) {
-          void deleteMediaBlob(asset.id).catch(() => undefined)
-          if (asset.url.startsWith('blob:')) {
-            try {
-              URL.revokeObjectURL(asset.url)
-            } catch {
-              // 已经失效的 URL 忽略。
-            }
-          }
-        }
         const assets = state.assets.filter((asset) => !unusedIds.has(asset.id))
         const source =
           state.source && unused.some((asset) => asset.url === state.source?.url)
             ? assets.find((asset) => asset.kind !== 'audio') ?? null
             : state.source
-        set({ assets, source })
+        // 同样只标记待回收：如果被清理的素材还留在撤销历史里（例如刚删过引用它的片段），
+        // 撤销后片段还能恢复，立刻删 blob 会造出坏片段。
+        const pendingReclaim = { ...state.pendingReclaim }
+        unused.forEach((asset) => {
+          pendingReclaim[asset.id] = {
+            asset,
+            indexAtDelete: Math.max(
+              0,
+              state.assets.findIndex((item) => item.id === asset.id),
+            ),
+            projectId: state.projectId,
+            // 这些素材本来就没有片段引用，不存在「撤销把片段带回来」的恢复。
+            removedClips: false,
+            deletedAt: Date.now(),
+          }
+        })
+        set({ assets, source, pendingReclaim })
+        reconcilePendingAssets()
         state.notify(`已清理 ${unused.length} 个未使用素材`, 'success')
       },
 
-      addAssetToTimeline: (assetId, targetTrackId, targetStart) => {
-        const asset = get().assets.find((item) => item.id === assetId)
+      disposePendingAssets: () => {
+        // 切/关项目、组件卸载：历史栈随后被丢弃，不可能再撤销回来，直接全部回收。
+        reconcilePendingAssets({ force: true })
+      },
+
+      addAssetToTimeline: (assetId, intent) => {
+        const state = get()
+        const asset = state.assets.find((item) => item.id === assetId)
         if (!asset) return
-        if (asset.kind === 'audio') {
-          const project = get().project
-          const trackId = project.audioTracks?.[0]?.id ?? createId('audioTrack')
-          const track = project.audioTracks?.find((item) => item.id === trackId)
-          if (track && isAudioLocked(track)) {
-            get().notify('音频轨已锁定，请先解锁', 'warning')
-            return
-          }
-          const audioClip: AudioClip = {
+        // 防御：旧调用点若还传 (assetId, trackId, start)，第二个参数会是字符串/null。
+        // 这种情况按「自动落点」处理，绝不能把它当 trackId 去查轨道（会误报「已锁定」）。
+        const normalizedIntent: AssetPlacementIntent =
+          intent && typeof intent === 'object' && 'kind' in intent
+            ? intent
+            : { kind: 'auto', time: typeof intent === 'number' ? intent : state.playhead }
+        // 落点规则集中在 core/assetPlacement（纯函数），store 只负责执行命令。
+        const placement = resolveAssetPlacement(state.project, asset, normalizedIntent)
+        if (placement.target === 'blocked') {
+          state.notify(placement.message, 'warning')
+          return
+        }
+        const kind = assetKindOf(asset)
+
+        if (placement.target === 'audio') {
+          const clip: AudioClip = {
             id: createId('audio'),
             sourceUrl: asset.url,
             sourceStart: 0,
-            sourceEnd: Math.max(0.1, asset.duration),
-            start: Math.max(0, targetStart),
+            sourceEnd: Math.max(0.1, asset.duration ?? 0),
+            start: placement.start,
             volume: 1,
             fadeIn: 0,
             fadeOut: 0,
           }
-          if (run(createAddAudioClipCommand(trackId, audioClip))) {
-            get().selectClip(audioClip.id)
-            get().notify(`已添加音频「${asset.name}」`, 'success')
+          const changed = placement.trackId
+            ? run(createAddAudioClipCommand(placement.trackId, clip))
+            : run(createAddAudioClipCommand(createId('audioTrack'), clip, placement.newTrackName))
+          if (changed) {
+            get().selectClip(clip.id)
+            get().notify(placement.message, 'success')
           }
           return
         }
-        const project = get().project
-        if (targetTrackId === null) {
-          if (isMainLocked(project)) {
-            get().notify('主轨已锁定，请先解锁', 'warning')
-            return
-          }
-        } else {
-          const track = (project.overlayTracks ?? []).find(
-            (item) => item.id === targetTrackId,
-          )
-          if (!track || isOverlayLocked(track)) {
-            get().notify('目标叠加轨已锁定，请先解锁', 'warning')
-            return
-          }
-        }
-        const isImage = asset.kind === 'image'
+
+        const isImage = kind === 'image'
         const clip: Clip = {
           id: createId('clip'),
           sourceUrl: asset.url,
           sourceStart: 0,
-          sourceEnd: isImage ? IMAGE_DEFAULT_DURATION : Math.max(0.1, asset.duration),
+          sourceEnd: isImage ? IMAGE_DEFAULT_DURATION : Math.max(0.1, asset.duration ?? 0),
           type: isImage ? 'image' : 'video',
           rotation: 0,
           flipH: false,
@@ -956,9 +1107,22 @@ export function createEditorStore() {
           position: { x: 0, y: 0 },
           volume: isImage ? 0 : 1,
         }
-        if (run(createAddClipCommand(clip, targetTrackId, targetStart))) {
+        const changed =
+          placement.target === 'main'
+            ? run(createAddClipCommand(clip, null, placement.start))
+            : placement.trackId
+              ? run(createAddClipCommand(clip, placement.trackId, placement.start))
+              : run(
+                  createAddClipToNewOverlayTrackCommand(
+                    createId('overlayTrack'),
+                    placement.newTrackName ?? '叠加轨',
+                    clip,
+                    placement.start,
+                  ),
+                )
+        if (changed) {
           get().selectClip(clip.id)
-          get().notify(`已添加「${asset.name}」到时间轴`, 'success')
+          get().notify(placement.message, 'success')
         }
       },
 
@@ -974,15 +1138,22 @@ export function createEditorStore() {
       },
 
       clearSource: () => {
+        cancelReverseForProjectSwap()
         const empty = createEmptyProject()
         history.reset(empty)
         set({
           source: null,
           assets: [],
           project: empty,
+          // 空会话没有项目身份：首次导入素材时再分配。
+          projectId: null,
+          projectName: DEFAULT_PROJECT_NAME,
+          projectNameEdited: false,
           selectedClipId: null,
+          selectedIds: [],
           playhead: 0,
           isPlaying: false,
+          exportRange: null,
           cropSession: null,
           previewPatch: null,
           markerEditorId: null,
@@ -993,6 +1164,8 @@ export function createEditorStore() {
           toast: null,
           asrWordsBySource: null,
         })
+        // 关闭当前项目（清空会话）：历史栈已 reset，待回收素材一律立即回收。
+        reconcilePendingAssets({ force: true })
       },
 
       execute: (command) => run(command),
@@ -1253,6 +1426,58 @@ export function createEditorStore() {
         )
       },
 
+      setClipMask: (clipId, mask) => {
+        run(
+          createUpdateAnyClipCommand(
+            clipId,
+            { mask },
+            mask ? '设置蒙版' : '清除蒙版',
+          ),
+        )
+      },
+
+      setClipSpeedSegments: (clipId, segments) => {
+        run(
+          createUpdateAnyClipCommand(
+            clipId,
+            { speedSegments: segments },
+            segments ? '设置变速分段' : '清除变速分段',
+          ),
+        )
+      },
+
+      setClipSpeedCurve: (clipId, curve) => {
+        const state = get()
+        const location = findClipLocation(state.project, clipId)
+        if (!location) return
+        if (location.track ? isOverlayLocked(location.track) : isMainLocked(state.project)) return
+        if (!canChangeClipSpeed(location.clip)) {
+          state.notify('定格片段不支持变速', 'warning')
+          return
+        }
+        const normalized = curve ? normalizeSpeedCurve(curve) : undefined
+        // 归一化后不成立（不足 2 点等）→ 视为无效输入，不改工程。
+        if (curve && !normalized) return
+        run(
+          createUpdateAnyClipCommand(
+            clipId,
+            // 曲线与分段互斥：写曲线时把分段清掉，避免分段继续覆盖曲线。
+            { speedCurve: normalized, speedSegments: undefined },
+            normalized ? '设置速度曲线' : '清除速度曲线',
+          ),
+        )
+      },
+
+      setClipChromaKey: (clipId, key) => {
+        run(
+          createUpdateAnyClipCommand(
+            clipId,
+            { chromaKey: key },
+            key ? '设置抠像' : '关闭抠像',
+          ),
+        )
+      },
+
       setClipBlendMode: (clipId, mode) => {
         const state = get()
         const location = findClipLocation(state.project, clipId)
@@ -1495,6 +1720,47 @@ export function createEditorStore() {
         }
       },
 
+      copySpeedAttributes: (clipId) => {
+        const state = get()
+        const location = findClipLocation(state.project, clipId)
+        if (!location) {
+          state.notify('没有可复制的片段', 'warning')
+          return
+        }
+        if (!canChangeClipSpeed(location.clip)) {
+          state.notify('定格 / 图片片段没有变速属性', 'warning')
+          return
+        }
+        setSpeedAttrs(captureSpeedAttrs(location.clip))
+        state.notify('已复制变速属性', 'info')
+      },
+
+      pasteSpeedAttributes: (ids) => {
+        const state = get()
+        const attrs = getSpeedAttrs()
+        if (!attrs || Object.keys(attrs).length === 0) {
+          state.notify('变速剪贴板为空', 'warning')
+          return
+        }
+        const targets = resolvePasteTargets(state, ids).filter((id) => {
+          const location = findClipLocation(state.project, id)
+          return Boolean(location && canChangeClipSpeed(location.clip))
+        })
+        if (targets.length === 0) {
+          state.notify('目标片段不支持变速（定格 / 图片是静帧）', 'warning')
+          return
+        }
+        // 先干跑一次拿统计（命令本身是纯函数）。
+        const preview = applyAttributePatch(state.project, targets, speedAttrsPatch(attrs))
+        if (preview.applied === 0) {
+          state.notify('目标片段在锁定轨道上，未粘贴', 'warning')
+          return
+        }
+        if (run(createPasteSpeedAttributesCommand(targets, attrs))) {
+          state.notify(`已粘贴变速属性到 ${preview.applied} 个片段`, 'success')
+        }
+      },
+
       applyTransitionToAll: (type, duration) => {
         const state = get()
         if (isMainLocked(state.project)) {
@@ -1633,6 +1899,128 @@ export function createEditorStore() {
       },
 
       setPreviewPatch: (patch) => set({ previewPatch: patch }),
+
+      togglePreviewMuteSegmentedSpeed: () =>
+        set((current) => ({ previewMuteSegmentedSpeed: !current.previewMuteSegmentedSpeed })),
+
+      setTheme: (theme) => {
+        if (get().theme === theme) return
+        set({ theme })
+      },
+
+      setResolvedTheme: (theme) => {
+        if (get().resolvedTheme === theme) return
+        // Canvas 界面元素按主题缓存颜色 token：切换时清掉，随后重绘取新值。
+        clearThemeTokenCache()
+        set({ resolvedTheme: theme })
+      },
+
+      renameProject: (name) => {
+        const next = normalizeProjectName(name)
+        const state = get()
+        if (state.projectName === next && state.projectNameEdited) return
+        set({ projectName: next, projectNameEdited: true })
+      },
+
+      adoptProject: (id, name) => {
+        // 切项目前先把当前项目落盘，避免「切换发生在自动保存防抖窗口内」丢编辑。
+        get().flushProjectSave()
+        set({
+          projectId: id,
+          projectName: normalizeProjectName(name),
+          projectNameEdited: true,
+        })
+        // 接管新项目：旧工程的历史即将被 hydrateDraft 重置，待回收素材按「关闭」处理。
+        reconcilePendingAssets({ force: true })
+      },
+
+      flushProjectSave: () => {
+        const state = get()
+        const id = state.projectId
+        // 没有项目身份（从未有内容的新会话）不落盘，避免列表里出现空项目。
+        if (!id) return
+        const snapshot = toDraftSnapshot(state)
+        const record = {
+          id,
+          name: state.projectName,
+          updatedAt: Date.now(),
+          thumbnail: projectThumbnail(snapshot),
+          snapshot,
+        }
+        void saveProjectRecord(record).catch(() => reportDraftSaveFailure(state.notify))
+      },
+
+      setExportInPoint: (time) => {
+        const state = get()
+        const total = Math.max(0, getProjectEnd(state.project))
+        const start = clamp(time ?? state.playhead, 0, total)
+        // 还没有区间时另一端取工程终点；已有区间时另一端保持不变。
+        const end = state.exportRange?.end ?? total
+        const next = clampExportRange({ start, end }, total)
+        if (!next) {
+          state.notify('入点必须比出点早至少 0.1 秒', 'warning')
+          return
+        }
+        set({ exportRange: next })
+        state.notify(
+          `导出范围 ${formatClock(next.start)} – ${formatClock(next.end)}（${exportRangeDuration(next).toFixed(1)} 秒）`,
+          'success',
+        )
+      },
+
+      setExportOutPoint: (time) => {
+        const state = get()
+        const total = Math.max(0, getProjectEnd(state.project))
+        const end = clamp(time ?? state.playhead, 0, total)
+        // 还没有区间时另一端取工程起点；已有区间时另一端保持不变。
+        const start = state.exportRange?.start ?? 0
+        const next = clampExportRange({ start, end }, total)
+        if (!next) {
+          state.notify('出点必须比入点晚至少 0.1 秒', 'warning')
+          return
+        }
+        set({ exportRange: next })
+        state.notify(
+          `导出范围 ${formatClock(next.start)} – ${formatClock(next.end)}（${exportRangeDuration(next).toFixed(1)} 秒）`,
+          'success',
+        )
+      },
+
+      setExportRangeEdge: (edge, time) => {
+        const state = get()
+        const range = state.exportRange
+        if (!range) return
+        const total = Math.max(0, getProjectEnd(state.project))
+        const next =
+          edge === 'start'
+            ? {
+                start: clamp(
+                  time,
+                  0,
+                  Math.max(0, range.end - EXPORT_RANGE_MIN_DURATION),
+                ),
+                end: range.end,
+              }
+            : {
+                start: range.start,
+                end: clamp(
+                  time,
+                  Math.min(total, range.start + EXPORT_RANGE_MIN_DURATION),
+                  total,
+                ),
+              }
+        const clamped = clampExportRange(next, total)
+        if (!clamped) return
+        if (clamped.start === range.start && clamped.end === range.end) return
+        set({ exportRange: clamped })
+      },
+
+      clearExportRange: () => {
+        const state = get()
+        if (!state.exportRange) return
+        set({ exportRange: null })
+        state.notify('已清除导出范围，导出整条时间轴', 'info')
+      },
 
       splitAtPlayhead: () => {
         const state = get()
@@ -2301,6 +2689,26 @@ export function createEditorStore() {
       setCoverPreview: (active) => {
         if (get().coverPreview === active) return
         set({ coverPreview: active })
+      },
+
+      moveTrack: (kind, trackId, targetDisplayIndex) => {
+        run(createMoveTrackCommand(kind, trackId, targetDisplayIndex))
+      },
+
+      moveTrackBy: (kind, trackId, direction) => {
+        const state = get()
+        const list =
+          kind === 'overlay'
+            ? state.project.overlayTracks ?? []
+            : kind === 'audio'
+              ? state.project.audioTracks ?? []
+              : state.project.textTracks ?? []
+        const arrayIndex = list.findIndex((track) => track.id === trackId)
+        if (arrayIndex < 0) return
+        // 界面下标：叠加轨倒序，音频/文字轨同序。
+        const displayIndex = displayToArrayIndex(kind, arrayIndex, list.length)
+        const target = direction === 'up' ? displayIndex - 1 : displayIndex + 1
+        run(createMoveTrackCommand(kind, trackId, target))
       },
 
       moveOverlayTrack: (trackId, direction) => {
@@ -2975,6 +3383,235 @@ export function createEditorStore() {
           return
         }
         run(createSetExportQualityCommand(quality))
+      },
+
+      reverseClip: (clipId) => {
+        const state = get()
+        const location = findClipLocation(state.project, clipId)
+        if (!location) return
+        const clip = location.clip
+        const locked = location.track
+          ? isOverlayLocked(location.track)
+          : isMainLocked(state.project)
+        // 工具栏与右键菜单共用同一套可用性判断，这里再兜一层（防止并发状态）。
+        const action = reverseActionState({
+          clip,
+          assets: state.assets,
+          locked,
+          cropping: Boolean(state.cropSession),
+          busy: Boolean(state.reverseJob),
+        })
+        if (!action.enabled) {
+          state.notify(action.reason, 'warning')
+          return
+        }
+
+        // 片段已经处于倒放状态：立即换回原素材与原始区间（不跑 FFmpeg，一步撤销）。
+        if (action.reversed) {
+          const plan = planReverseRestore({ clip, assets: state.assets })
+          if (!plan) {
+            // 纯函数返回 null = 不应该产生任何改动（原素材已不在素材库）。
+            state.notify('原素材已删除，无法恢复正放', 'warning')
+            return
+          }
+          const linked = countLinkedCaptions(state.project, clipId)
+          const changed = run(createReverseClipCommand(plan.input))
+          if (!changed) {
+            state.notify('取消倒放失败：片段不存在', 'warning')
+            return
+          }
+          const base = `已取消倒放，画面恢复为「${plan.originalAsset.name}」`
+          if (linked > 0) {
+            get().notify(`${base}；已断开 ${linked} 条智能字幕链接，请重新对齐`, 'warning')
+          } else {
+            get().notify(`${base}，可 Ctrl+Z 撤销`, 'success')
+          }
+          return
+        }
+
+        const asset = state.assets.find((item) => item.url === clip.sourceUrl)
+        if (!asset) {
+          state.notify('该片段的素材已移除，无法倒放', 'warning')
+          return
+        }
+        // 以「未裁剪的源区间」为准：变速/裁剪不改变要倒放的内容。
+        const sourceStart = Math.max(0, clip.sourceStart)
+        const sourceEnd = Math.max(sourceStart, clip.sourceEnd)
+        const span = sourceEnd - sourceStart
+        if (reverseChunks(sourceStart, sourceEnd).length === 0) {
+          state.notify('片段太短，无法倒放', 'warning')
+          return
+        }
+        if (
+          needsReverseConfirm(span) &&
+          typeof window !== 'undefined' &&
+          !window.confirm(
+            `倒放 ${span.toFixed(1)} 秒需要逐段重编码，可能耗时较长（与素材分辨率、时长有关）。继续吗？`,
+          )
+        ) {
+          return
+        }
+
+        const origin = reverseAssetOrigin(asset, sourceStart, sourceEnd)
+        /** 把片段换成倒放素材（1 个命令 = 1 步撤销），并提示字幕链接的变化。 */
+        const finish = (target: MediaAsset, reused: boolean) => {
+          const current = get()
+          const locationNow = findClipLocation(current.project, clipId)
+          if (!locationNow) {
+            current.notify(
+              `${reused ? '已复用' : '已生成'}倒放素材「${target.name}」，但片段已被删除`,
+              'info',
+            )
+            return
+          }
+          // 倒放期间片段被改动（裁剪 / 换素材）：不覆盖用户的改动，素材仍留在素材库。
+          const clipNow = locationNow.clip
+          if (
+            clipNow.sourceUrl !== asset.url ||
+            Math.abs(clipNow.sourceStart - sourceStart) > 1e-3 ||
+            Math.abs(clipNow.sourceEnd - sourceEnd) > 1e-3
+          ) {
+            current.notify(
+              `片段在倒放期间被改动，未替换画面；倒放素材「${target.name}」已保留在素材库`,
+              'info',
+            )
+            return
+          }
+          const linked = countLinkedCaptions(current.project, clipId)
+          const limit = target.duration > 0 ? Math.min(span, target.duration) : span
+          const changed = run(
+            createReverseClipCommand({
+              clipId,
+              sourceUrl: target.url,
+              sourceStart: 0,
+              sourceEnd: limit,
+              // 用片段**当前**的关键帧镜像（生成期间用户可能改过），而不是任务开始时的快照。
+              // 淡入/淡出由命令内部按执行时的片段对调，同样不会覆盖期间的手改。
+              anim: mirrorAnimationTimes(clipNow.anim),
+              label: '倒放片段',
+            }),
+          )
+          if (!changed) {
+            current.notify('倒放失败：片段不存在', 'warning')
+            return
+          }
+          const base = `${reused ? '已复用' : '已生成'}倒放素材「${target.name}」`
+          if (linked > 0) {
+            // 字幕链接已在同一个命令里断开：必须明确提示，避免字幕静默错位。
+            get().notify(
+              `${base}；已断开 ${linked} 条智能字幕链接，请重新对齐字幕时间`,
+              'warning',
+            )
+          } else {
+            get().notify(`${base}，可 Ctrl+Z 撤销`, 'success')
+          }
+        }
+
+        // 同一片段、同一源区间重复倒放：直接复用已有素材，不重复生成。
+        const existing = state.assets.find((item) => matchesReverseOrigin(item, origin))
+        if (existing) {
+          finish(existing, true)
+          return
+        }
+
+        const controller = new AbortController()
+        internals.setReverseController(controller)
+        /** 任务开始时的工程 id：切换工程后晚到的结果一律丢弃。 */
+        const ownerProjectId = state.projectId
+        const updateJob = (patch: Partial<ReverseJob>): void => {
+          set((current) =>
+            current.reverseJob ? { reverseJob: { ...current.reverseJob, ...patch } } : {},
+          )
+        }
+        set({
+          reverseJob: { clipId, assetName: asset.name, progress: 0, status: '准备中…' },
+          isPlaying: false,
+        })
+        void (async () => {
+          /**
+           * 每个 await 之后都要校验：任务是否已被取消、是否已被新任务替换、
+           * 工程是否已切换。命中就把已经产生的临时结果清理掉，绝不写进工程/素材库/IndexedDB。
+           */
+          const stale = (): boolean =>
+            controller.signal.aborted ||
+            internals.getReverseController() !== controller ||
+            get().projectId !== ownerProjectId
+          let createdUrl: string | null = null
+          let savedAssetId: string | null = null
+          const discard = async (): Promise<void> => {
+            if (createdUrl) {
+              try {
+                URL.revokeObjectURL(createdUrl)
+              } catch {
+                // URL 已失效时忽略。
+              }
+              createdUrl = null
+            }
+            if (savedAssetId) {
+              await deleteMediaBlob(savedAssetId).catch(() => undefined)
+              savedAssetId = null
+            }
+          }
+          try {
+            const file = await reverseAssetSpan({
+              asset,
+              sourceStart,
+              sourceEnd,
+              signal: controller.signal,
+              onProgress: (progress) => updateJob({ progress }),
+              onStatus: (status) => updateJob({ status }),
+              onWarning: (message) => get().notify(message, 'warning'),
+            })
+            if (stale()) {
+              await discard()
+              return
+            }
+            const created = await readAssetFile(file)
+            createdUrl = created.url
+            if (stale()) {
+              await discard()
+              return
+            }
+            const newAsset: MediaAsset = { ...created, reversedFrom: origin }
+            // 持久化到 IndexedDB：刷新草稿后倒放素材还在（与导入本地素材的做法一致）。
+            // 失败不阻断本次会话，但必须提示（否则用户以为刷新后还在）。
+            savedAssetId = newAsset.id
+            await saveMediaBlob(newAsset.id, file).catch(() => {
+              savedAssetId = null
+              get().notify('倒放素材未能保存到本地，刷新页面后可能需要重新倒放', 'warning')
+            })
+            if (stale()) {
+              await discard()
+              return
+            }
+            savedAssetId = null
+            set({ reverseJob: null })
+            get().addAssets([newAsset])
+            finish(newAsset, false)
+          } catch (error) {
+            set({ reverseJob: null })
+            await discard()
+            if (isReverseAbort(error)) {
+              get().notify('已取消倒放，工程未改动', 'info')
+            } else {
+              get().notify(
+                `倒放失败：${error instanceof Error ? error.message : String(error)}`,
+                'warning',
+              )
+            }
+          } finally {
+            if (internals.getReverseController() === controller) internals.setReverseController(null)
+            if (get().reverseJob) set({ reverseJob: null })
+
+
+          }
+        })()
+      },
+
+      cancelReverse: () => {
+        if (!get().reverseJob) return
+        internals.getReverseController()?.abort()
+        get().notify('正在取消倒放（当前分段结束后停止）…', 'info')
       },
 
       openExportDialog: () => {
