@@ -243,6 +243,99 @@ export async function saveProjectRecordSerialized(
 
 export async function saveProjectRecord(record: DraftProjectRecord): Promise<void> {
   await withStore(DRAFT_STORE, 'readwrite', (store) => store.put(record))
+  // 正常落盘成功 → 清掉可能残留的「紧急快照」，避免下次又用旧快照覆盖。
+  clearEmergencyDraft(record.id)
+}
+
+/**
+ * 页面关闭时的「紧急快照」：写 localStorage（**同步**），下次启动回放。
+ *
+ * 为什么不能只靠 IndexedDB：`pagehide` / `visibilitychange(hidden)` 确实会触发，
+ * 但 IDB 写事务是异步的，页面卸载时会被中止 —— 实测「编辑后立刻刷新」仍然丢改动。
+ * localStorage 是同步 API，在卸载期间可靠。
+ *
+ * 只在页面即将消失时写，且大小受限（草稿快照通常 < 1MB，这里上限 2MB，超了放弃），
+ * 避免把项目 JSON 常驻在 localStorage 里挤占宿主的配额。
+ */
+const EMERGENCY_PREFIX = 'framecut:draft-pending:'
+const EMERGENCY_MAX_CHARS = 2_000_000
+
+/**
+ * 安全拿到 localStorage。隐私模式 / 被策略禁用时，**访问这个全局属性本身**就可能抛错
+ * （不是返回 undefined），所以连 `typeof localStorage` 都要放进 try 里。
+ */
+function safeStorage(): Storage | null {
+  try {
+    if (typeof localStorage === 'undefined') return null
+    return localStorage
+  } catch {
+    return null
+  }
+}
+
+export function writeEmergencyDraft(record: DraftProjectRecord | null): boolean {
+  const storage = safeStorage()
+  if (!record || !storage) return false
+  try {
+    const json = JSON.stringify(record)
+    if (json.length > EMERGENCY_MAX_CHARS) return false
+    storage.setItem(EMERGENCY_PREFIX + record.id, json)
+    return true
+  } catch {
+    // 配额不足 / 隐私模式禁用 localStorage：放弃，正常保存路径仍然有效。
+    return false
+  }
+}
+
+function readEmergencyDraft(id: string): DraftProjectRecord | null {
+  const storage = safeStorage()
+  if (!storage) return null
+  try {
+    const raw = storage.getItem(EMERGENCY_PREFIX + id)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as DraftProjectRecord
+    return parsed && typeof parsed.id === 'string' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+/** 清掉某个（或全部）紧急快照。 */
+export function clearEmergencyDraft(id?: string): void {
+  const storage = safeStorage()
+  if (!storage) return
+  try {
+    if (id) {
+      storage.removeItem(EMERGENCY_PREFIX + id)
+      return
+    }
+    const keys: string[] = []
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index)
+      if (key?.startsWith(EMERGENCY_PREFIX)) keys.push(key)
+    }
+    for (const key of keys) storage.removeItem(key)
+  } catch {
+    // best-effort
+  }
+}
+
+/** 列出全部紧急快照（仅 id 与记录本身）。 */
+function listEmergencyDrafts(): DraftProjectRecord[] {
+  const storage = safeStorage()
+  if (!storage) return []
+  const out: DraftProjectRecord[] = []
+  try {
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index)
+      if (!key?.startsWith(EMERGENCY_PREFIX)) continue
+      const record = readEmergencyDraft(key.slice(EMERGENCY_PREFIX.length))
+      if (record) out.push(record)
+    }
+  } catch {
+    // best-effort
+  }
+  return out
 }
 
 /** 列出全部项目记录（最近更新在前）。 */
@@ -252,7 +345,18 @@ export async function loadProjectRecords(): Promise<DraftProjectRecord[]> {
     'readonly',
     (store) => store.getAll(),
   )
-  return sortProjectRecords(records ?? [])
+  /**
+   * 用「紧急快照」覆盖更新的那条：上一次会话在防抖窗口内被关掉/刷新时，
+   * 改动只存在于 localStorage 里（IDB 写事务被卸载中止）。
+   */
+  const byId = new Map((records ?? []).map((record) => [record.id, record]))
+  for (const draft of listEmergencyDrafts()) {
+    const existing = byId.get(draft.id)
+    if (!existing || (draft.updatedAt ?? 0) > (existing.updatedAt ?? 0)) {
+      byId.set(draft.id, draft)
+    }
+  }
+  return sortProjectRecords([...byId.values()])
 }
 
 /** 读取单个项目记录。 */
@@ -262,6 +366,10 @@ export async function loadProjectRecord(id: string): Promise<DraftProjectRecord 
     'readonly',
     (store) => store.get(id),
   )
+  const emergency = readEmergencyDraft(id)
+  if (emergency && (!record || (emergency.updatedAt ?? 0) > (record.updatedAt ?? 0))) {
+    return emergency
+  }
   return record ?? null
 }
 
