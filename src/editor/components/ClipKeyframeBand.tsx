@@ -1,4 +1,5 @@
-import { useRef, useState } from 'react'
+import { matchesPointer } from './pointerDrag'
+import { useRef, useState, memo } from 'react'
 import { keyframeUnion, refsAtTime, clampGroupDrag, type KeyframeRef } from '../core/keyframeEdit'
 import { labelList } from './keyframeLabels'
 import type { AnimationMap } from '../core/types'
@@ -42,7 +43,7 @@ const sameRef = (a: KeyframeRef, b: KeyframeRef): boolean =>
  *
  * 它作为 .clip-bar 的一个绝对定位子层（底部 8px），左右各内缩 10px 避开裁剪手柄。
  */
-export function ClipKeyframeBand({
+function ClipKeyframeBandInner({
   clip,
   clipStart,
   duration,
@@ -101,7 +102,7 @@ export function ClipKeyframeBand({
 
   const moveDrag = (event: React.PointerEvent<HTMLElement>) => {
     const current = dragRef.current
-    if (!current || current.pointerId !== event.pointerId) return
+    if (!matchesPointer(current, event)) return
     event.stopPropagation()
     const rawDelta = pxToT(event.clientX - current.startX)
     const rawTarget = current.anchorT + rawDelta
@@ -183,3 +184,5 @@ export function ClipKeyframeBand({
     </span>
   )
 }
+/** 关键帧条：只在关键帧本身变化时需要重绘，memo 掉父组件的无关重渲染。 */
+export const ClipKeyframeBand = memo(ClipKeyframeBandInner)

@@ -1,4 +1,7 @@
+import { isDragging, matchesPointer } from './pointerDrag'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { setBodyStyles, type BodyStyleOverrides } from './bodyStyles'
+import { subscribePlayheadTime } from './playheadClock'
 import { hasTransitionPair, normalizeTransitionType, transitionLabel } from '../core/transition'
 import { keyframeAt, type KeyframeRef } from '../core/keyframeEdit'
 import { findAnimationTarget } from '../core/animationTargets'
@@ -22,6 +25,8 @@ import {
   TIMELINE_MIN_ZOOM,
 } from '../core/constants'
 import { formatClock, formatRulerTime, getRulerStep } from '../core/format'
+import { exportRangeDuration } from '../core/exportRange'
+import { reverseActionState } from '../core/reverse'
 import { findAudioClipLocation, getAudioActionAvailability } from '../core/audio'
 import { findTextClipLocation, getTextActionAvailability } from '../core/text'
 import {
@@ -179,6 +184,11 @@ export function Timeline({ onPickFile }: TimelineProps) {
   const addAssetToTimeline = useEditorStore((state) => state.addAssetToTimeline)
   const timelineSettings = useEditorStore((state) => state.timelineSettings)
   const toggleTimelineSetting = useEditorStore((state) => state.toggleTimelineSetting)
+  const exportRange = useEditorStore((state) => state.exportRange)
+  const setExportRangeEdge = useEditorStore((state) => state.setExportRangeEdge)
+  const reverseClip = useEditorStore((state) => state.reverseClip)
+  const reverseJob = useEditorStore((state) => state.reverseJob)
+  const cropSession = useEditorStore((state) => state.cropSession)
   // 右键菜单全部复用既有 action（各自是 1 个命令 / 1 条撤销）。
   const selectedClipId = useEditorStore((state) => state.selectedClipId)
   const splitAtPlayhead = useEditorStore((state) => state.splitAtPlayhead)
@@ -197,6 +207,12 @@ export function Timeline({ onPickFile }: TimelineProps) {
   const closeTimer = useRef<number | null>(null)
   const edgeDragRef = useRef<EdgeDrag | null>(null)
   const clipDragRef = useRef<ClipDrag | null>(null)
+  /** 播放头元素：播放时每帧直接改 left，不触发 React 渲染。 */
+  const playheadRef = useRef<HTMLDivElement | null>(null)
+  /** 拖动时间轴高度时对 body 样式的临时改写（保存了宿主原值）。 */
+  const bodyStylesRef = useRef<BodyStyleOverrides | null>(null)
+  /** 当前拖动的收尾函数：卸载时用它摘掉 window 监听器。 */
+  const resizeCleanupRef = useRef<(() => void) | null>(null)
   const [viewportWidth, setViewportWidth] = useState(960)
   const [scrollLeft, setScrollLeft] = useState(0)
   const [scrub, setScrub] = useState<{ pointerId: number } | null>(null)
@@ -215,6 +231,11 @@ export function Timeline({ onPickFile }: TimelineProps) {
   } | null>(null)
   const [hoverTime, setHoverTime] = useState<number | null>(null)
   const [playheadDrag, setPlayheadDrag] = useState<{ pointerId: number } | null>(null)
+  /** 导出区间的端点拖动（只改会话状态，不进撤销栈）。 */
+  const [rangeDrag, setRangeDrag] = useState<{
+    edge: 'start' | 'end'
+    pointerId: number
+  } | null>(null)
   /** 空白处拖拽框选：先在空白 pointerdown 记录起点，移动超过阈值才真正进入框选。 */
   const [boxSelect, setBoxSelect] = useState<{
     pointerId: number
@@ -294,6 +315,28 @@ export function Timeline({ onPickFile }: TimelineProps) {
     return () => {
       if (hoverTimer.current) window.clearTimeout(hoverTimer.current)
       if (closeTimer.current) window.clearTimeout(closeTimer.current)
+    }
+  }, [])
+
+  /**
+   * 播放时每帧更新播放头位置：只改 DOM 的 `left`，不 setState。
+   * 这样播放期间 Timeline（2205 行）不需要跟着 60Hz 的 playhead 变化重渲染。
+   */
+  useEffect(() => {
+    return subscribePlayheadTime((time) => {
+      const element = playheadRef.current
+      if (!element) return
+      element.style.left = `${pad + time * pps}px`
+    })
+  }, [pad, pps])
+
+  // 拖动时间轴高度时若组件被卸载：摘掉 window 监听器，并恢复 body 的原始样式。
+  useEffect(() => {
+    return () => {
+      resizeCleanupRef.current?.()
+      resizeCleanupRef.current = null
+      bodyStylesRef.current?.restore()
+      bodyStylesRef.current = null
     }
   }, [])
 
@@ -388,11 +431,11 @@ export function Timeline({ onPickFile }: TimelineProps) {
   useEffect(() => {
     if (!playheadDrag) return
     const handleMove = (event: PointerEvent) => {
-      if (event.pointerId !== playheadDrag.pointerId) return
+      if (!matchesPointer(playheadDrag, event)) return
       movePlayheadTo(event.clientX)
     }
     const handleUp = (event: PointerEvent) => {
-      if (event.pointerId !== playheadDrag.pointerId) return
+      if (!matchesPointer(playheadDrag, event)) return
       movePlayheadTo(event.clientX)
       setPlayheadDrag(null)
     }
@@ -404,12 +447,60 @@ export function Timeline({ onPickFile }: TimelineProps) {
       window.removeEventListener('pointerup', handleUp)
       window.removeEventListener('pointercancel', handleUp)
     }
-  }, [playheadDrag, movePlayheadTo])
+  }, [isDragging(playheadDrag), movePlayheadTo])
+
+  /**
+   * 导出区间端点拖动：坐标换算与播放头一致，但**不做吸附**——
+   * 入点 / 出点通常要落在转场或字幕中间，吸附反而挡手。
+   */
+  const moveRangeEdgeTo = useCallback(
+    (edge: 'start' | 'end', clientX: number) => {
+      const content = contentRef.current
+      if (!content) return
+      const rect = content.getBoundingClientRect()
+      const time = clamp((clientX - rect.left - pad) / pps, 0, total)
+      setExportRangeEdge(edge, time)
+    },
+    [pad, pps, total, setExportRangeEdge],
+  )
+
+  const handleRangePointerDown =
+    (edge: 'start' | 'end') => (event: ReactPointerEvent<HTMLSpanElement>) => {
+      if (event.button !== 0) return
+      event.preventDefault()
+      event.stopPropagation()
+      event.currentTarget.setPointerCapture(event.pointerId)
+      setPlaying(false)
+      setPopover(null)
+      setRangeDrag({ edge, pointerId: event.pointerId })
+      moveRangeEdgeTo(edge, event.clientX)
+    }
+
+  useEffect(() => {
+    if (!rangeDrag) return
+    const handleMove = (event: PointerEvent) => {
+      if (!matchesPointer(rangeDrag, event)) return
+      moveRangeEdgeTo(rangeDrag.edge, event.clientX)
+    }
+    const handleUp = (event: PointerEvent) => {
+      if (!matchesPointer(rangeDrag, event)) return
+      moveRangeEdgeTo(rangeDrag.edge, event.clientX)
+      setRangeDrag(null)
+    }
+    window.addEventListener('pointermove', handleMove)
+    window.addEventListener('pointerup', handleUp)
+    window.addEventListener('pointercancel', handleUp)
+    return () => {
+      window.removeEventListener('pointermove', handleMove)
+      window.removeEventListener('pointerup', handleUp)
+      window.removeEventListener('pointercancel', handleUp)
+    }
+  }, [isDragging(rangeDrag), moveRangeEdgeTo])
 
   useEffect(() => {
     if (!scrub) return
     const handleMove = (event: PointerEvent) => {
-      if (event.pointerId !== scrub.pointerId) return
+      if (!matchesPointer(scrub, event)) return
       seekFromClientX(event.clientX)
     }
     const handleUp = () => setScrub(null)
@@ -421,16 +512,16 @@ export function Timeline({ onPickFile }: TimelineProps) {
       window.removeEventListener('pointerup', handleUp)
       window.removeEventListener('pointercancel', handleUp)
     }
-  }, [scrub, seekFromClientX])
+  }, [isDragging(scrub), seekFromClientX])
 
   useEffect(() => {
-    if (!edgeDrag?.pointerId) return
+    if (!isDragging(edgeDrag)) return
     const start = edgeDragRef.current
     if (!start) return
 
     const handleMove = (event: PointerEvent) => {
       const current = edgeDragRef.current
-      if (!current || event.pointerId !== current.pointerId) return
+      if (!matchesPointer(current, event)) return
       const delta = clamp(
         (event.clientX - current.startX) / pps,
         current.minDelta,
@@ -506,13 +597,13 @@ export function Timeline({ onPickFile }: TimelineProps) {
       window.removeEventListener('pointerup', finish)
       window.removeEventListener('pointercancel', cancel)
     }
-  }, [edgeDrag?.pointerId, pps, resizeClipEdge])
+  }, [isDragging(edgeDrag), pps, resizeClipEdge])
 
   useEffect(() => {
-    if (!clipDrag?.pointerId) return
+    if (!isDragging(clipDrag)) return
     const handleMove = (event: PointerEvent) => {
       const current = clipDragRef.current
-      if (!current || event.pointerId !== current.pointerId) return
+      if (!matchesPointer(current, event)) return
       const content = contentRef.current
       if (!content) return
       const distance = Math.hypot(event.clientX - current.startX, event.clientY - current.startY)
@@ -652,7 +743,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
       window.removeEventListener('pointerup', finish)
       window.removeEventListener('pointercancel', cancel)
     }
-  }, [clipDrag?.pointerId, pps, segments, total, moveClipToTrackAtTime, store])
+  }, [isDragging(clipDrag), pps, segments, total, moveClipToTrackAtTime, store])
 
   useEffect(() => {
     const element = scrollRef.current
@@ -805,7 +896,12 @@ export function Timeline({ onPickFile }: TimelineProps) {
   const handleContentPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return
     const target = event.target as Element
-    if (target.closest('.clip-trim-handle, .playhead-handle, .marker-flag, button, input, textarea')) return
+    if (
+      target.closest(
+        '.clip-trim-handle, .playhead-handle, .export-range-handle, .marker-flag, button, input, textarea',
+      )
+    )
+      return
     const clipElement = target.closest<HTMLElement>('[data-clip-id]')
     if (clipElement?.dataset.clipId) {
       const clipId = clipElement.dataset.clipId
@@ -896,7 +992,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
     /** 相对内容区的 x（不含 pad）→ 时间轴秒数。startX/x 都是相对坐标。 */
     const localToTime = (localX: number): number => clamp((localX - pad) / pps, 0, total)
     const move = (event: PointerEvent) => {
-      if (event.pointerId !== boxSelect.pointerId) return
+      if (!matchesPointer(boxSelect, event)) return
       const bounds = contentRef.current?.getBoundingClientRect()
       const localX = bounds ? event.clientX - bounds.left : event.clientX
       const localY = bounds ? event.clientY - bounds.top : event.clientY
@@ -905,14 +1001,14 @@ export function Timeline({ onPickFile }: TimelineProps) {
         Math.abs(localX - boxSelect.startX) > 4 ||
         Math.abs(localY - boxSelect.startY) > 4
       setBoxSelect((current) =>
-        current && current.pointerId === event.pointerId
+        matchesPointer(current, event)
           ? { ...current, x: localX, y: localY, active }
           : current,
       )
       if (active) setScrub(null)
     }
     const up = (event: PointerEvent) => {
-      if (event.pointerId !== boxSelect.pointerId) return
+      if (!matchesPointer(boxSelect, event)) return
       const bounds = contentRef.current?.getBoundingClientRect()
       const localX = bounds ? event.clientX - bounds.left : event.clientX
       const moved =
@@ -948,12 +1044,16 @@ export function Timeline({ onPickFile }: TimelineProps) {
       window.removeEventListener('pointerup', up)
       window.removeEventListener('pointercancel', up)
     }
-  }, [boxSelect, pps, total, project.clips, project.overlayTracks, selectedIds, selectIds])
+  }, [isDragging(boxSelect), pps, total, project.clips, project.overlayTracks, selectedIds, selectIds])
 
   /** 双击片段：跳到鼠标所指位置（单击已不再移动播放头）。 */
   const handleContentDoubleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
     const target = event.target as Element
-    if (target.closest('.clip-trim-handle, .playhead-handle, .marker-flag, button, input, textarea')) {
+    if (
+      target.closest(
+        '.clip-trim-handle, .playhead-handle, .export-range-handle, .marker-flag, button, input, textarea',
+      )
+    ) {
       return
     }
     if (!target.closest('[data-clip-id]')) return
@@ -1043,11 +1143,14 @@ export function Timeline({ onPickFile }: TimelineProps) {
       window.removeEventListener('pointermove', handleMove)
       window.removeEventListener('pointerup', finish)
       window.removeEventListener('pointercancel', finish)
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
+      // 精确恢复宿主原来的行内值（不是一律清空，否则会抹掉宿主自己的设置）。
+      bodyStylesRef.current?.restore()
+      bodyStylesRef.current = null
     }
-    document.body.style.cursor = 'ns-resize'
-    document.body.style.userSelect = 'none'
+    // 保存修改前的值：组件在拖动中途卸载时也要恢复，并把监听器摘掉。
+    bodyStylesRef.current?.restore()
+    bodyStylesRef.current = setBodyStyles({ cursor: 'ns-resize', userSelect: 'none' })
+    resizeCleanupRef.current = finish
     window.addEventListener('pointermove', handleMove)
     window.addEventListener('pointerup', finish)
     window.addEventListener('pointercancel', finish)
@@ -1069,19 +1172,20 @@ export function Timeline({ onPickFile }: TimelineProps) {
     if (!content) return
     const rect = content.getBoundingClientRect()
     const time = clamp((event.clientX - rect.left - pad) / pps, 0, getProjectEnd(project))
-    let targetTrackId: string | null = null
-    const baseLane = document.querySelector<HTMLElement>('.clip-lane')
-    const baseBounds = baseLane?.getBoundingClientRect()
-    if (!baseBounds || event.clientY < baseBounds.top || event.clientY > baseBounds.bottom) {
-      const hit = [...document.querySelectorAll<HTMLElement>('[data-overlay-track-id]')].find(
-        (element) => {
-          const bounds = element.getBoundingClientRect()
-          return event.clientY >= bounds.top && event.clientY <= bounds.bottom
-        },
-      )
-      targetTrackId = hit?.dataset.overlayTrackId ?? null
-    }
-    addAssetToTimeline(assetId, targetTrackId, time)
+    // 落点识别用事件目标往上找轨道容器（不用 document.querySelector，
+    // 同一页面可能嵌入多个编辑器实例）。
+    const targetElement = event.target instanceof HTMLElement ? event.target : null
+    const overlayElement = targetElement?.closest<HTMLElement>('[data-overlay-track-id]')
+    const audioElement = targetElement?.closest<HTMLElement>('[data-audio-track-id]')
+    const mainElement = targetElement?.closest<HTMLElement>('.clip-lane')
+    const intent = overlayElement?.dataset.overlayTrackId
+      ? ({ kind: 'track', trackKind: 'overlay', trackId: overlayElement.dataset.overlayTrackId, time } as const)
+      : audioElement?.dataset.audioTrackId
+        ? ({ kind: 'track', trackKind: 'audio', trackId: audioElement.dataset.audioTrackId, time } as const)
+        : mainElement
+          ? ({ kind: 'track', trackKind: 'main', trackId: 'main', time } as const)
+          : ({ kind: 'auto', time } as const)
+    addAssetToTimeline(assetId, intent)
   }
 
   // ---------------------------------------------------------------- 片段右键菜单
@@ -1208,6 +1312,14 @@ export function Timeline({ onPickFile }: TimelineProps) {
         : isMainLocked(project)
       : false
     const isFreeze = clip?.type === 'freeze'
+    // 与工具栏共用同一套「倒放 / 取消倒放」可用性判断（禁用条件完全一致）。
+    const reverseState = reverseActionState({
+      clip,
+      assets,
+      locked,
+      cropping: Boolean(cropSession),
+      busy: Boolean(reverseJob),
+    })
     const availability = getActionAvailability(project, menu.clipId, playhead)
     const reason = playheadReason(locked)
     const freezeReason = locked
@@ -1262,6 +1374,12 @@ export function Timeline({ onPickFile }: TimelineProps) {
         disabled: locked || !availability.canFreeze,
         reason: freezeReason,
         onSelect: insertFreeze,
+      },
+      {
+        label: reverseState.label,
+        disabled: !reverseState.enabled,
+        reason: reverseState.reason,
+        onSelect: () => reverseClip(menu.clipId),
       },
       {
         label: '删除',
@@ -1481,6 +1599,41 @@ export function Timeline({ onPickFile }: TimelineProps) {
                 <span className="ruler-label">{formatRulerTime(tick.time, majorStep)}</span>
               </span>
             ))}
+            {exportRange && (
+              <div
+                className="export-range-band"
+                style={{
+                  left: pad + exportRange.start * pps,
+                  width: Math.max(0, (exportRange.end - exportRange.start) * pps),
+                }}
+              >
+                <span className="export-range-label">
+                  导出 {exportRangeDuration(exportRange).toFixed(1)}s
+                </span>
+                <span
+                  className={`export-range-handle is-start${rangeDrag?.edge === 'start' ? ' is-dragging' : ''}`}
+                  role="slider"
+                  aria-label="导出入点"
+                  aria-valuemin={0}
+                  aria-valuemax={Math.round(total * 10) / 10}
+                  aria-valuenow={Math.round(exportRange.start * 10) / 10}
+                  aria-valuetext={`${exportRange.start.toFixed(1)} 秒`}
+                  title="拖动调整导出入点"
+                  onPointerDown={handleRangePointerDown('start')}
+                />
+                <span
+                  className={`export-range-handle is-end${rangeDrag?.edge === 'end' ? ' is-dragging' : ''}`}
+                  role="slider"
+                  aria-label="导出出点"
+                  aria-valuemin={0}
+                  aria-valuemax={Math.round(total * 10) / 10}
+                  aria-valuenow={Math.round(exportRange.end * 10) / 10}
+                  aria-valuetext={`${exportRange.end.toFixed(1)} 秒`}
+                  title="拖动调整导出出点"
+                  onPointerDown={handleRangePointerDown('end')}
+                />
+              </div>
+            )}
           </div>
 
           <div className="marker-lane">
@@ -1588,10 +1741,10 @@ export function Timeline({ onPickFile }: TimelineProps) {
                               <span className="clip-missing-label">素材已移除</span>
                             </span>
                           )}
-                          {!isFreeze && asset && (
+                          {asset && (
                             <ClipFilmstrip clip={clip} asset={asset} width={width} />
                           )}
-                          {!isFreeze && !asset && thumbnail && (
+                          {!asset && thumbnail && (
                             <span
                               className="clip-thumb"
                               style={{ backgroundImage: `url("${thumbnail}")` }}
@@ -1786,10 +1939,10 @@ export function Timeline({ onPickFile }: TimelineProps) {
                       <span className="clip-missing-label">素材已移除</span>
                     </span>
                   )}
-                  {!isFreeze && asset && (
+                  {asset && (
                     <ClipFilmstrip clip={clip} asset={asset} width={width} />
                   )}
-                  {!isFreeze && !asset && thumbnail && (
+                  {!asset && thumbnail && (
                     <span
                       className="clip-thumb"
                       style={{ backgroundImage: `url("${thumbnail}")` }}
@@ -1956,6 +2109,24 @@ export function Timeline({ onPickFile }: TimelineProps) {
             onClipContextMenu={(event, clipId) => openClipMenu(event, 'text', clipId)}
           />
 
+          {/* 区间外压暗：覆盖整条时间轴（含标尺），不拦截任何点击。 */}
+          {exportRange && exportRange.start > 0.0001 && (
+            <div
+              className="export-range-dim is-before"
+              style={{ left: pad, width: Math.max(0, exportRange.start * pps) }}
+              aria-hidden="true"
+            />
+          )}
+          {exportRange && exportRange.end < total - 0.0001 && (
+            <div
+              className="export-range-dim is-after"
+              style={{
+                left: pad + exportRange.end * pps,
+                width: Math.max(0, (total - exportRange.end) * pps),
+              }}
+              aria-hidden="true"
+            />
+          )}
           {edgeDrag?.snapTime !== null && edgeDrag?.snapTime !== undefined && (
             <span
               className="clip-drop-line is-global is-snap-auto"
@@ -1963,7 +2134,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
               aria-hidden="true"
             />
           )}
-          <div className="playhead" style={{ left: pad + playhead * pps }}>
+          <div className="playhead" ref={playheadRef} style={{ left: pad + playhead * pps }}>
             <span
               className={`playhead-handle${playheadDrag ? ' is-dragging' : ''}`}
               role="slider"

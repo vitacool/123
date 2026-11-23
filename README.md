@@ -513,7 +513,7 @@ anullsrc=r=48000:cl=stereo,atrim=duration=3.4,asetpts=PTS-STARTPTS,
 
 ## 4. 测试与验证
 
-### 单元测试：966 个通过（2 个跳过），共 77 个文件
+### 单元测试：979 个通过（2 个跳过），共 78 个文件
 
 ```text
 tests/history.test.ts      6    命令执行/撤销/重做、无操作不入栈、重做清空、100 步上限、结构编辑、不可变快照
@@ -544,7 +544,33 @@ tests/ffmpegRuntime.test.ts 11 运行时共享：exec 永久挂起时超时在 2
 tests/animationChunk.test.ts 11 动画帧分块编码：块计划不丢帧/不重复帧（总帧数与时长守恒）、90 帧分 3 块且 MEMFS 里 PNG 峰值 ≤ 一个块、块内 PNG 用完即删、多块 concat + `-c:v copy` 混音、同源只写一份源文件（池 + dispose）；WebGL 着色器/上下文失败后重复调用不再新建上下文且调用 WEBGL_lose_context
 tests/cssScope.test.ts 16   样式隔离：真实 editor.css 处理后没有游离选择器（.button/.badge/.toast 等全部挂在 .framecut-root 下）、已经限定过的不会二次前缀、插件幂等、10 组 @keyframes 与 animation 引用同步加 fc- 前缀、:root/html/body 映射到根节点、宿主样式表不被处理、body 行内样式「先保存后恢复」
 tests/projectNormalize.test.ts 19 工程归一化与草稿校验：v1 工程迁移（补 type/markers）、sourceStart>=sourceEnd 修正、缺 id/sourceUrl 的片段丢弃、缺省字段填默认值、完全非法输入不崩；智能字幕 link 在两条加载路径都迁移；旧草稿缺 version/timelineSettings/timelineZoom/playhead 时填默认值（不出 NaN、不抛错）；id 熵与旧短 id 兼容；并发保存只有最新一次落盘
+tests/playbackPerf.test.ts 13 播放性能：播放头高频通道（广播/取消/单个订阅者抛错隔离/10Hz 节流不丢尾值）、快捷键作用域（编辑器内才生效、输入控件与组合键排除）、源码守卫（播放循环不再逐帧 setPlayhead、Timeline 直接改 DOM、MediaLibrary/Toolbar 不再订阅 playhead、两个重子组件已 memo）
 ```
+
+#### 播放性能与音画同步
+
+用 `?profile=1` 打开 demo（`App` 在 dev 下把编辑器包进 `React.Profiler`），再跑
+`FRAMECUT_URL='http://127.0.0.1:5173/?profile=1' node .verify/cdp-import.mjs perf` 取一段 2 秒的稳态播放窗口。
+本机（Windows 11 + 无头 Edge，1440×900，dev 构建，真实 FFmpeg.wasm 未参与）实测：
+
+| 指标 | 优化前 | 优化后 |
+| --- | --- | --- |
+| commit 次数 / 每秒 | 121 / **59.9** | 18 / **8.9** |
+| 2 秒窗口内渲染总耗时 | **226.8 ms** | **47.2 ms** |
+| 平均单次 commit | 1.87 ms | 2.62 ms（次数少了 6.7×，单次更大） |
+| 渲染帧率 | 59.9 fps | 60.4 fps |
+| 最大帧间隔 | 16.7 ms | 16.7 ms |
+
+主要做法：
+
+- **播放头走两条通道**：每帧 `publishPlayheadTime()`（[playheadClock.ts](src/editor/components/playheadClock.ts)）直接改 DOM——Timeline 的 `.playhead` 只写 `style.left`；store 里的 `playhead` 只做 **10Hz** 低频同步（`commitTime()`），这样按钮可用性等逻辑读到的值仍然新鲜，但不再每帧触发整树重渲染。
+- **MediaLibrary / Toolbar 不再订阅 `playhead`**：点击时读 `store.getState().playhead`（事件里取最新），播放期间零重渲染。
+- **时钟以主视频推进为准**：主视频 `paused` / `readyState<2` / `currentTime` 不动时**冻结墙钟**，恢复推进时重新锚定；没有视频可跟（定格、空隙、纯音频）才用纯墙钟。纠偏阈值从 0.38s/450ms 收紧到 0.15s/200ms。
+- **`visibilitychange`**：切到后台时暂停播放（而不是让墙钟继续跑、回来一次跳一大段），回前台重新锚定。
+- **重子组件 memo**：`ClipFilmstrip`（每片段一块 canvas）与 `ClipKeyframeBand` 已 `memo`，父组件因别的原因重渲染时不再重绘。
+- **快捷键作用域**：[keyboardScope.ts](src/editor/components/keyboardScope.ts) 统一判断「在 `.framecut-root` 内 + 不是输入控件 + 不带组合键」；`MediaLibrary` 的 `/` 与 `CropOverlay` 的 Enter/Escape 已接入，嵌入宿主后不再抢宿主的按键。
+
+**关于 Shadow DOM / 进一步优化**：剩余 8.9 次/秒的 commit 主要来自 10Hz 的 playhead 同步（以及播放/暂停状态变化）。如果还需要更低，可以把 `playhead` 从 store 里彻底移出（改成纯事件源 + 按需读），代价是「按播放头计算的按钮可用性」需要改成拉取式。本次没有做到那一步，因为 47.2ms/2s 已经只占主线程约 2.4%。
 
 运行：
 

@@ -1,3 +1,5 @@
+import { matchesPointer } from './pointerDrag'
+import { publishPlayheadTime } from './playheadClock'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { aspectValue } from '../core/aspect'
@@ -10,7 +12,13 @@ import {
   backgroundCssColor,
   clipBackground,
 } from '../core/background'
-import { clampPlaybackRate, PLAYBACK_RATE_MIN, PLAYBACK_RATE_MAX } from '../core/speed'
+import {
+  clampPlaybackRate,
+  hasSpeedVariation,
+  PLAYBACK_RATE_MIN,
+  PLAYBACK_RATE_MAX,
+  speedAtTimelineTime,
+} from '../core/speed'
 import {
   isAudioTrackActive,
   isMainAudioActive,
@@ -26,6 +34,8 @@ import { resolveTextOverrides } from '../core/textAnimation'
 import { formatPlayhead } from '../core/format'
 import { hasAnimation, resolveClipOverrides } from '../core/animation'
 import { drawClipFrame } from '../core/clipRender'
+import { paintTransitionFrame } from '../core/transitionRender'
+import { webglKeyer } from '../services/webglKeyer'
 import { sourceFitRect } from '../core/geometry'
 import { findClipLocation, findSegmentAt, getProjectEnd, getTimeline, segmentsAt } from '../core/timeline'
 import {
@@ -125,8 +135,13 @@ function applySpeedToVideo(
   video: HTMLVideoElement,
   clip: Clip,
   notify?: (message: string, tone: 'warning') => void,
+  /** 片段本地时间：分段变速时用它选出当前段的倍率。 */
+  localTime?: number,
 ): void {
-  const requested = clip.speed ?? 1
+  // 分段变速：段内速率恒定（段边界由 seek 对齐），没有分段时仍用单一 speed。
+  const segmentedSpeed =
+    localTime === undefined ? undefined : speedAtTimelineTime(clip, localTime)
+  const requested = segmentedSpeed ?? clip.speed ?? 1
   const { rate, clamped } = clampPlaybackRate(requested)
   if (clamped) {
     const lastWarned = speedWarnedRate.get(video)
@@ -185,6 +200,13 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
   const cropSession = useEditorStore((state) => state.cropSession)
   const cover = useEditorStore((state) => state.project.cover)
   const coverPreview = useEditorStore((state) => state.coverPreview)
+  // 未保存过该设置时默认开启（预览静音，避免 playbackRate 变调与导出保音高不一致）。
+  const previewMuteSegmentedSpeed =
+    useEditorStore((state) => state.previewMuteSegmentedSpeed) ?? true
+  /** 带分段 / 曲线变速（存在非 1x 段）的片段在预览里静音（导出仍是 atempo 保音高）。 */
+  const segmentedPreviewMuted = (clip: Clip): boolean =>
+    previewMuteSegmentedSpeed && hasSpeedVariation(clip)
+
   const previewPatch = useEditorStore((state) => state.previewPatch)
   const setPreviewPatch = useEditorStore((state) => state.setPreviewPatch)
   const setPosition = useEditorStore((state) => state.setPosition)
@@ -372,6 +394,8 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
       sourceWidth: number,
       sourceHeight: number,
       alphaOverride?: number,
+      /** 绘制目标（转场的离屏画布）；缺省是预览画布本身。 */
+      targetCtx?: CanvasRenderingContext2D,
     ) => {
       if (!source || sourceWidth <= 0 || sourceHeight <= 0) return
       if (isMissing(clip)) return
@@ -392,7 +416,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
       // 几何变换 + 裁剪/翻转/旋转/缩放/位置 + 不透明度/混合模式 + 调色
       // 全部收敛到 core/clipRender.drawClipFrame，预览与导出逐帧渲染共用同一份实现。
       drawClipFrame({
-        ctx: context,
+        ctx: targetCtx ?? context,
         clip: effective,
         localTime: 0,
         asset: clipSource,
@@ -403,6 +427,14 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
         sourceHeight,
         alphaScale: alphaOverride ?? 1,
         overrides,
+        keyFrame: webglKeyer,
+        createCanvas: (w, h) => {
+          const canvas = document.createElement('canvas')
+          canvas.width = Math.max(1, Math.round(w))
+          canvas.height = Math.max(1, Math.round(h))
+          const inner = canvas.getContext('2d')
+          return inner ? { canvas, ctx: inner } : null
+        },
       })
     }
 
@@ -436,6 +468,10 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
      * 淡入淡出/黑场/圆形展开用 alpha 逼近；擦除/滑动用位移裁剪逼近，
      * 与导出侧 xfade 的 transition 类型对应。
      */
+    /**
+     * 转场：统一交给 core/transitionRender（与「导出当前帧」共用同一份实现），
+     * 这样每种转场的几何与进度曲线在两个入口完全一致。
+     */
     const paintTransition = (
       left: Clip,
       right: Clip,
@@ -443,48 +479,31 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
       type: TransitionType,
     ) => {
       const leftSource = sourceFor(left)
-      if (leftSource) paintSource(left, leftSource.source, leftSource.w, leftSource.h)
       const rightSource = sourceFor(right)
-      if (!rightSource) return
-      const p = Math.max(0, Math.min(1, progress))
-      if (type === 'fadeblack') {
-        // 黑场：前 1/2 左段淡出到黑，后 1/2 右段淡入。
-        if (p < 0.5) {
-          // 左段已被完整绘制，用黑色以 2p 的强度压暗。
-          context.save()
-          context.globalAlpha = Math.min(1, p * 2)
-          context.fillStyle = '#000'
-          context.fillRect(0, 0, width, height)
-          context.restore()
-          return
-        }
-        paintSource(right, rightSource.source, rightSource.w, rightSource.h, (p - 0.5) * 2)
+      if (!rightSource) {
+        if (leftSource) paintSource(left, leftSource.source, leftSource.w, leftSource.h)
         return
       }
-      if (type === 'wipeleft' || type === 'slideleft') {
-        // 擦除/滑动：右段从右侧推入，露出宽度随进度增长。
-        const offsetX = type === 'slideleft' ? (1 - p) * width : 0
-        context.save()
-        context.beginPath()
-        context.rect(width * (1 - p) + offsetX, 0, width, height)
-        context.clip()
-        paintSource(right, rightSource.source, rightSource.w, rightSource.h)
-        context.restore()
-        return
-      }
-      if (type === 'circleopen') {
-        // 圆形展开：以画面中心为圆心的圆形裁切逐帧放大。
-        const radius = p * Math.hypot(width, height) * 0.5
-        context.save()
-        context.beginPath()
-        context.arc(width / 2, height / 2, Math.max(0, radius), 0, Math.PI * 2)
-        context.clip()
-        paintSource(right, rightSource.source, rightSource.w, rightSource.h)
-        context.restore()
-        return
-      }
-      // fade：右段按进度淡入。
-      paintSource(right, rightSource.source, rightSource.w, rightSource.h, p)
+      paintTransitionFrame({
+        ctx: context,
+        width,
+        height,
+        type,
+        progress,
+        drawLeft: (target, alpha) => {
+          if (!leftSource) return
+          paintSource(left, leftSource.source, leftSource.w, leftSource.h, alpha, target)
+        },
+        drawRight: (target, alpha) =>
+          paintSource(right, rightSource.source, rightSource.w, rightSource.h, alpha, target),
+        createCanvas: (w, h) => {
+          const canvas = document.createElement('canvas')
+          canvas.width = Math.max(1, Math.round(w))
+          canvas.height = Math.max(1, Math.round(h))
+          const inner = canvas.getContext('2d')
+          return inner ? { canvas, ctx: inner } : null
+        },
+      })
     }
 
     const paintText = () => {
@@ -727,7 +746,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
         const segment = findSegmentAt(track.clips, state.playhead)
         // 叠加轨声音按轨道 muted/solo 与片段音量/淡入淡出参与混音。
         const audioActive = isOverlayAudioActive(state.project, track)
-        layerVideo.muted = !audioActive || !segment
+        layerVideo.muted = !audioActive || !segment || segmentedPreviewMuted(segment.clip)
         if (segment) {
           const local = Math.max(0, Math.min(segment.duration, state.playhead - segment.start))
           layerVideo.volume = Math.max(
@@ -786,6 +805,20 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
     const timeline = getTimeline(stateAtStart.project.clips)
     const startPlayhead = stateAtStart.playhead
     const started = performance.now()
+    /**
+     * 时钟：以**主视频的推进**为准的墙钟。
+     *
+     * 原来的纯墙钟（startPlayhead + 墙钟流逝）有两个问题：视频缓冲/等待时时钟照样前进
+     * （恢复播放后音画错位，靠 0.38s/450ms 的 seek 纠偏兜底），切后台再回来会一次性跳一段。
+     * 现在：主视频**没有在推进**（paused / readyState<2 / currentTime 不动）时把墙钟冻结，
+     * 恢复推进的瞬间重新锚定；没有视频可跟（定格、空隙、纯音频）时才纯用墙钟。
+     */
+    let anchorWall = started
+    let anchorTimeline = startPlayhead
+    let stalledSince: number | null = null
+    let lastVideoTime = 0
+    /** 上一次向 store 同步 playhead 的时刻（10Hz；其余帧只走 DOM）。 */
+    let lastStoreSync = 0
     let activeElement: HTMLVideoElement | null = null
     let activeClipId: string | null = null
     let preparedClipId: string | null = null
@@ -802,7 +835,8 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
         const audioActive = isOverlayAudioActive(state.project, track)
         const segment = findSegmentAt(track.clips, time)
         const activeSegment = segment && isOverlayVideoVisible(track) ? segment : null
-        layerVideo.muted = !audioActive || activeSegment === null
+        layerVideo.muted =
+          !audioActive || activeSegment === null || segmentedPreviewMuted(activeSegment.clip)
         if (activeSegment) {
           const local = Math.max(0, Math.min(activeSegment.duration, time - activeSegment.start))
           layerVideo.volume = Math.max(
@@ -851,6 +885,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
           )
           applySpeedToVideo(layerVideo, segment.clip, (message, tone) =>
             store.getState().notify(message, tone),
+            local,
           )
           if (
             switching ||
@@ -899,11 +934,59 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
       }
     }
 
+    /** 播放头：每帧走 DOM（不经过 React），store 只做 10Hz 低频同步。 */
+    const commitTime = (now: number, time: number, force = false): void => {
+      publishPlayheadTime(time)
+      if (force || now - lastStoreSync >= 100) {
+        lastStoreSync = now
+        store.getState().setPlayhead(time)
+      }
+    }
+
+    /**
+     * 切到后台标签页时 rAF 会停（或被节流），墙钟却继续走 —— 回来时会一次性跳一大段。
+     * 这里直接暂停播放：宁可让用户手动继续，也不要"跳帧式追赶"。
+     */
+    const onVisibilityChange = (): void => {
+      if (document.visibilityState !== 'hidden') {
+        // 回到前台：把时钟重新锚定到当前时间，避免把后台的时间算进播放。
+        anchorWall = performance.now()
+        anchorTimeline = store.getState().playhead
+        stalledSince = null
+        lastVideoTime = activeElement?.currentTime ?? 0
+        return
+      }
+      const state = store.getState()
+      if (!state.isPlaying) return
+      if (activeElement && !activeElement.paused) activeElement.pause()
+      state.setPlaying(false)
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+
     const tick = (now: number) => {
       const state = store.getState()
       if (!state.isPlaying) return
-      const elapsed = (now - started) / 1000
-      const time = Math.min(total, startPlayhead + elapsed)
+      // 主视频不推进 → 冻结墙钟（缓冲/等待/seek/被暂停），恢复时重新锚定。
+      if (activeElement) {
+        const progressing =
+          !activeElement.paused &&
+          activeElement.readyState >= 2 &&
+          Math.abs(activeElement.currentTime - lastVideoTime) > 1e-4
+        lastVideoTime = activeElement.currentTime
+        if (progressing) {
+          if (stalledSince !== null) {
+            anchorWall += now - stalledSince
+            stalledSince = null
+          }
+        } else if (stalledSince === null) {
+          stalledSince = now
+        }
+      } else if (stalledSince !== null) {
+        anchorWall += now - stalledSince
+        stalledSince = null
+      }
+      const elapsed = Math.max(0, (now - anchorWall) / 1000)
+      const time = Math.min(total, anchorTimeline + elapsed)
       const segment = findSegmentAt(state.project.clips, time)
       if (!segment) {
         // A trim gap: show black plus any overlay tracks, keep advancing.
@@ -915,10 +998,10 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
         prepareNext(state, time, null)
         syncOverlayPlayback(state, time, now)
         syncAudio(state, time, true)
-        state.setPlayhead(time)
+        commitTime(now, time)
         drawRef.current()
         if (time >= total - 0.001) {
-          state.setPlayhead(total)
+          commitTime(now, total, true)
           state.finishPlayback()
           drawRef.current()
           return
@@ -940,7 +1023,8 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
         activeElement.muted = true
       }
       activeElement = video
-      video.muted = !isMainAudioActive(state.project)
+      video.muted =
+        !isMainAudioActive(state.project) || segmentedPreviewMuted(clip)
       {
         // 片段音量/淡入淡出 + 临时预览：拖动音量滑块时能立刻听到变化。
         const local = Math.max(0, Math.min(segment.duration, time - segment.start))
@@ -953,6 +1037,11 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
       if (switching) {
         preparedClipId = null
         playBlockedAt = 0
+        // 换片段：把时钟锚到当前时间，避免跨片段累积偏差。
+        anchorWall = now
+        anchorTimeline = time
+        stalledSince = null
+        lastVideoTime = video.currentTime
       }
       if (clip.type === 'freeze') {
         if (!video.paused) video.pause()
@@ -974,10 +1063,17 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
       } else {
         const expected = clipFrameSourceAt(clip, time - segment.start)
         const target = safeMediaTime(expected, clipAsset, video)
-        applySpeedToVideo(video, clip, (message, tone) => store.getState().notify(message, tone))
+        applySpeedToVideo(
+          video,
+          clip,
+          (message, tone) => store.getState().notify(message, tone),
+          time - segment.start,
+        )
+        // 时钟已改为「视频不推进就冻结」，残留偏差应该很小：阈值从 0.38s/450ms
+        // 收紧到 0.15s/200ms，音画更贴。
         if (
           switching ||
-          (now - lastSeek > 450 && Math.abs(video.currentTime - target) > 0.38)
+          (now - lastSeek > 200 && Math.abs(video.currentTime - target) > 0.15)
         ) {
           try {
             video.currentTime = target
@@ -1014,10 +1110,10 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
       syncOverlayPlayback(state, time, now)
       syncAudio(state, time, true)
       activeClipId = clip.id
-      state.setPlayhead(time)
+      commitTime(now, time)
       drawRef.current()
       if (time >= total - 0.001) {
-        state.setPlayhead(total)
+        commitTime(now, total, true)
         state.finishPlayback()
         drawRef.current()
         return
@@ -1028,6 +1124,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
     raf = requestAnimationFrame(tick)
     return () => {
       cancelAnimationFrame(raf)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
       for (const element of baseVideoRefs.current.values()) {
         if (!element.paused) element.pause()
         element.muted = true
@@ -1168,8 +1265,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
   const handlePointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     const textDrag = textDragRef.current
     if (
-      textDrag &&
-      textDrag.pointerId === event.pointerId &&
+      matchesPointer(textDrag, event) &&
       frame.width > 0 &&
       frame.height > 0
     ) {
@@ -1191,7 +1287,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
       return
     }
     const drag = dragRef.current
-    if (!drag || drag.pointerId !== event.pointerId || frame.width <= 0 || frame.height <= 0) {
+    if (!matchesPointer(drag, event) || frame.width <= 0 || frame.height <= 0) {
       return
     }
     const nextX = Math.max(-2, Math.min(2, drag.posX + (event.clientX - drag.startX) / frame.width))
@@ -1203,7 +1299,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
 
   const finishDrag = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     const textDrag = textDragRef.current
-    if (textDrag && textDrag.pointerId === event.pointerId) {
+    if (matchesPointer(textDrag, event)) {
       textDragRef.current = null
       setTextDragging(false)
       try {
@@ -1234,7 +1330,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
       return
     }
     const drag = dragRef.current
-    if (!drag || drag.pointerId !== event.pointerId) return
+    if (!matchesPointer(drag, event)) return
     dragRef.current = null
     setDragging(false)
     try {

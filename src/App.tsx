@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { VideoEditor } from './editor'
+import { withPlaybackProfiler } from './editor/devProfiler'
 import './styles/demo.css'
 
 function triggerDownload(blob: Blob, filename: string) {
@@ -14,8 +15,28 @@ function triggerDownload(blob: Blob, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1500)
 }
 
+/**
+ * 宿主平台自己的界面（只在 ?hostDemo=1 时显示）。
+ *
+ * 用来验证 CSS 隔离：这里的 .button / .badge / @keyframes spin 和编辑器重名，
+ * 但编辑器样式已限定在 .framecut-root 下、动画改成 fc- 前缀，双方互不影响。
+ */
+function HostChrome() {
+  return (
+    <div className="host-chrome" data-testid="host-chrome">
+      <span className="badge">HOST</span>
+      <button type="button" className="button" data-testid="host-button">
+        宿主按钮
+      </button>
+      <span className="host-spinner" aria-hidden="true" />
+    </div>
+  )
+}
+
 export default function App() {
   const [open, setOpen] = useState(true)
+  const hostDemo =
+    typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('hostDemo')
 
   if (!open) {
     return (
@@ -40,10 +61,13 @@ export default function App() {
 
   return (
     <main className="demo-app">
-      <VideoEditor
-        onExport={(blob) => triggerDownload(blob, 'framecut-export.mp4')}
-        onCancel={() => setOpen(false)}
-      />
+      {hostDemo ? <HostChrome /> : null}
+      {withPlaybackProfiler(
+        <VideoEditor
+          onExport={(blob) => triggerDownload(blob, 'framecut-export.mp4')}
+          onCancel={() => setOpen(false)}
+        />,
+      )}
     </main>
   )
 }

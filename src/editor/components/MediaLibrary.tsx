@@ -5,21 +5,19 @@ import {
   countAssetKinds,
   countAssetReferences,
   matchesAssetName,
+  reversedDependents,
   unusedAssets,
   type AssetKind,
 } from '../core/assets'
 import { formatPlayhead } from '../core/format'
 import type { MediaAsset } from '../core/types'
-import { useEditorStore } from '../store/EditorProvider'
+import { useEditorStore, useEditorStoreApi } from '../store/EditorProvider'
 import { ContextMenu } from './ContextMenu'
 import { Icon } from './Icon'
+import { isEditorShortcut } from './keyboardScope'
 
 interface MediaLibraryProps {
   onImport: () => void
-  onNewProject: () => void
-  onImportSubtitles: () => void
-  onAutoCaption: () => void
-  onCanvasBackground: () => void
 }
 
 export const MEDIA_DRAG_TYPE = 'application/x-framecut-asset'
@@ -27,6 +25,8 @@ export const MEDIA_DRAG_TYPE = 'application/x-framecut-asset'
 interface PendingDelete {
   asset: MediaAsset
   count: number
+  /** 由该素材倒放出来、仍依赖它的倒放素材数量（删除后无法恢复正放）。 */
+  reversedDependents: number
 }
 
 const KIND_TABS: readonly AssetKind[] = ['video', 'image', 'audio']
@@ -48,16 +48,10 @@ function highlightName(name: string, query: string) {
   )
 }
 
-export function MediaLibrary({
-  onImport,
-  onNewProject,
-  onImportSubtitles,
-  onAutoCaption,
-  onCanvasBackground,
-}: MediaLibraryProps) {
+export function MediaLibrary({ onImport }: MediaLibraryProps) {
   const assets = useEditorStore((state) => state.assets)
   const project = useEditorStore((state) => state.project)
-  const playhead = useEditorStore((state) => state.playhead)
+  const store = useEditorStoreApi()
   const addAssetToTimeline = useEditorStore((state) => state.addAssetToTimeline)
   const removeAsset = useEditorStore((state) => state.removeAsset)
   const cleanupUnusedAssets = useEditorStore((state) => state.cleanupUnusedAssets)
@@ -67,7 +61,6 @@ export function MediaLibrary({
   const [query, setQuery] = useState('')
   const [pending, setPending] = useState<PendingDelete | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; asset: MediaAsset } | null>(null)
-  const [moreMenu, setMoreMenu] = useState<{ x: number; y: number } | null>(null)
   const cancelRef = useRef<HTMLButtonElement | null>(null)
   const searchRef = useRef<HTMLInputElement | null>(null)
 
@@ -102,10 +95,10 @@ export function MediaLibrary({
   // 全局 `/` 聚焦搜索框（不在输入框内时）。项目原本没有占用该键。
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) return
-      const target = event.target as HTMLElement | null
-      const tag = target?.tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return
+      if (event.key !== '/') return
+      // 统一守卫：必须在编辑器根节点内、且不是输入控件、且不带组合键。
+      // 原来只判断了输入控件，嵌入宿主后会在宿主的任意位置抢走 "/"。
+      if (!isEditorShortcut(event)) return
       event.preventDefault()
       searchRef.current?.focus()
     }
@@ -121,11 +114,13 @@ export function MediaLibrary({
 
   const requestDelete = (asset: MediaAsset) => {
     const count = countAssetReferences(project, asset)
-    if (count === 0) {
+    const dependents = reversedDependents(assets, asset).filter((item) => item.id !== asset.id)
+    // 没有任何片段引用、也没有倒放素材依赖它 → 直接移除，不打扰。
+    if (count === 0 && dependents.length === 0) {
       removeAsset(asset.id, { removeClips: false })
       return
     }
-    setPending({ asset, count })
+    setPending({ asset, count, reversedDependents: dependents.length })
   }
 
   const clearSearch = () => {
@@ -155,10 +150,16 @@ export function MediaLibrary({
           data-asset-kind={kind}
           title={
             audio
-              ? `点击添加到音频轨；拖到音频轨\n${asset.name}`
-              : `点击添加到播放头；拖到主轨或叠加轨\n${asset.name}`
+              ? `点击添加到音频轨（没有时自动新建）；也可拖到某条音频轨\n${asset.name}`
+              : `同一素材接在主轨末尾，其他素材自动新建叠加轨；也可拖到指定轨道\n${asset.name}`
           }
-          onClick={() => addAssetToTimeline(asset.id, null, playhead)}
+          onClick={() =>
+            addAssetToTimeline(asset.id, {
+              kind: 'auto',
+              // 事件里读最新播放头：本组件不再订阅 playhead（播放时零重渲染）。
+              time: store.getState().playhead,
+            })
+          }
           onDragStart={(event) => {
             event.dataTransfer.effectAllowed = 'copy'
             event.dataTransfer.setData(MEDIA_DRAG_TYPE, asset.id)
@@ -233,20 +234,6 @@ export function MediaLibrary({
       <button type="button" className="button media-import" onClick={onImport} title="导入本地视频、图片或音频">
         <Icon name="upload" size={13} />
         导入素材
-      </button>
-
-      <button
-        type="button"
-        className="button mini media-more"
-        onClick={(event) => {
-          const rect = event.currentTarget.getBoundingClientRect()
-          setMoreMenu({ x: rect.left, y: rect.bottom + 4 })
-        }}
-        aria-haspopup="menu"
-        title="智能字幕 / 导入字幕 / 背景 / 新建项目"
-      >
-        <Icon name="plus" size={12} />
-        更多
       </button>
 
       <div
@@ -338,21 +325,6 @@ export function MediaLibrary({
 
       <p className="media-library-foot">点击添加到播放头 · 拖到任意轨道</p>
 
-      {moreMenu && (
-        <ContextMenu
-          x={moreMenu.x}
-          y={moreMenu.y}
-          ariaLabel="更多操作"
-          onClose={() => setMoreMenu(null)}
-          items={[
-            { label: '智能字幕', onSelect: onAutoCaption },
-            { label: '导入字幕', onSelect: onImportSubtitles },
-            { label: '背景', onSelect: onCanvasBackground },
-            { label: '新建项目', danger: true, onSelect: onNewProject },
-          ]}
-        />
-      )}
-
       {menu && (
         <ContextMenu
           x={menu.x}
@@ -379,7 +351,14 @@ export function MediaLibrary({
             aria-describedby="media-confirm-desc"
           >
             <h3>删除素材「{pending.asset.name}」</h3>
-            <p id="media-confirm-desc">该素材被 {pending.count} 个片段引用</p>
+            <p id="media-confirm-desc">
+              {pending.count > 0 ? `该素材被 ${pending.count} 个片段引用` : '该素材没有被片段引用'}
+            </p>
+            {pending.reversedDependents > 0 && (
+              <p className="media-confirm-hint media-confirm-warning">
+                有 {pending.reversedDependents} 个倒放素材来自该素材：删除后将无法把那些片段恢复正放。
+              </p>
+            )}
             <p className="media-confirm-hint">
               「仅从素材库移除」会保留时间轴片段，但显示为「素材已移除」；缓存中的素材文件会被删除，
               撤销只恢复时间轴状态，需要重新导入文件。

@@ -4,7 +4,7 @@ import { findAudioClipLocation, getAudioActionAvailability } from '../core/audio
 import { findTextClipLocation, getTextActionAvailability } from '../core/text'
 import { isAudioLocked, isMainLocked, isOverlayLocked, isTextLocked } from '../core/tracks'
 import { reverseActionState } from '../core/reverse'
-import { useEditorStore } from '../store/EditorProvider'
+import { useEditorStore, useEditorStoreApi } from '../store/EditorProvider'
 import { selectCanRedo, selectCanUndo } from '../store/editorStore'
 import { Icon, type IconName } from './Icon'
 
@@ -48,9 +48,15 @@ export function Toolbar({
   /** 导入 SRT / VTT 字幕文件。 */
   onImportSubtitles?: () => void
 } = {}) {
+  const store = useEditorStoreApi()
+  /**
+   * 播放头只在**渲染时读一次快照**，不再订阅 —— 否则播放期间 60Hz 的 playhead
+   * 变化会让整个工具栏每秒重渲染 60 次（实测是最大的一块开销）。
+   * 需要最新值的判断都在事件处理里重新读 store。
+   */
+  const playhead = store.getState().playhead
   const project = useEditorStore((state) => state.project)
   const selectedClipId = useEditorStore((state) => state.selectedClipId)
-  const playhead = useEditorStore((state) => state.playhead)
   const cropSession = useEditorStore((state) => state.cropSession)
   const splitAtPlayhead = useEditorStore((state) => state.splitAtPlayhead)
   const trimLeftAtPlayhead = useEditorStore((state) => state.trimLeftAtPlayhead)

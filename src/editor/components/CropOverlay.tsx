@@ -1,3 +1,5 @@
+import { matchesPointer } from './pointerDrag'
+import { isEditorShortcut } from './keyboardScope'
 import { useEffect, useMemo, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { CROP_PRESETS, type CropPresetId } from '../core/constants'
@@ -62,6 +64,8 @@ export function CropOverlay({ frameWidth, frameHeight, source }: CropOverlayProp
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      // 只处理编辑器内的按键：嵌入宿主后不能抢宿主的 Enter / Escape。
+      if (!isEditorShortcut(event)) return
       if (event.key === 'Enter') {
         event.preventDefault()
         commitCrop()
@@ -77,7 +81,7 @@ export function CropOverlay({ frameWidth, frameHeight, source }: CropOverlayProp
   useEffect(() => {
     if (!drag) return
     const handleMove = (event: PointerEvent) => {
-      if (event.pointerId !== drag.pointerId) return
+      if (!matchesPointer(drag, event)) return
       const dx = (event.clientX - drag.startX) / fit.w
       const dy = (event.clientY - drag.startY) / fit.h
       if (drag.mode === 'move') {
