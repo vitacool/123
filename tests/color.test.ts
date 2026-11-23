@@ -4,12 +4,15 @@ import {
   COLOR_MIN,
   clampColorValue,
   clipColor,
+  colorAlphaOf,
+  colorToHex,
   cssColorFilter,
   ffmpegColorFilters,
   isNeutralColor,
   isSameColor,
   NEUTRAL_COLOR,
   normalizeColor,
+  recolorKeepingAlpha,
   temperatureTint,
 } from '../src/editor/core/color'
 import { normalizeProjectColors } from '../src/editor/core/draft'
@@ -135,5 +138,42 @@ describe('旧草稿的调色归一化（读取入口统一处理一次）', () =
       saturation: 100,
       temperature: 0,
     })
+  })
+})
+describe('阴影配色：选色保留不透明度（C13a）', () => {
+  it('解析 CSS 颜色的 alpha', () => {
+    expect(colorAlphaOf('rgba(0, 0, 0, 0.55)')).toBeCloseTo(0.55, 6)
+    expect(colorAlphaOf('rgba(10,20,30,1)')).toBe(1)
+    expect(colorAlphaOf('rgba(10,20,30,0)')).toBe(0)
+    expect(colorAlphaOf('#000000')).toBe(1)
+    expect(colorAlphaOf('#00000088')).toBeCloseTo(136 / 255, 6)
+    expect(colorAlphaOf('transparent')).toBe(0)
+    expect(colorAlphaOf('')).toBeNull()
+    expect(colorAlphaOf(undefined)).toBeNull()
+  })
+
+  it('颜色选择器取值：rgba 也能回填成 #rrggbb', () => {
+    expect(colorToHex('rgba(17, 34, 51, 0.55)')).toBe('#112233')
+    expect(colorToHex('#abc')).toBe('#aabbcc')
+    expect(colorToHex('transparent', '#123456')).toBe('#123456')
+    expect(colorToHex(undefined, '#123456')).toBe('#123456')
+  })
+
+  it('选新颜色时保留旧不透明度，写成 rgba', () => {
+    // 默认阴影 rgba(0,0,0,0.55) → 选蓝色后仍然是 0.55 的透明度（而不是不透明）。
+    expect(recolorKeepingAlpha('#0000ff', 'rgba(0, 0, 0, 0.55)')).toBe('rgba(0, 0, 255, 0.55)')
+    // 已经是 8 位十六进制也能读到 alpha。
+    expect(recolorKeepingAlpha('#00ff00', '#11223388')).toBe('rgba(0, 255, 0, 0.533)')
+    // 不透明颜色保持不透明。
+    expect(recolorKeepingAlpha('#ff0000', '#000000')).toBe('rgb(255, 0, 0)')
+    // 读不到 alpha 时用回退值。
+    expect(recolorKeepingAlpha('#ffffff', undefined, 0.4)).toBe('rgba(255, 255, 255, 0.4)')
+  })
+
+  it('两次选色不会把透明度丢掉（幂等）', () => {
+    const first = recolorKeepingAlpha('#336699', 'rgba(0, 0, 0, 0.55)')
+    const second = recolorKeepingAlpha('#993366', first)
+    expect(colorAlphaOf(second)).toBeCloseTo(0.55, 6)
+    expect(colorToHex(second)).toBe('#993366')
   })
 })
