@@ -100,6 +100,7 @@ import { remapProjectUrls } from './draft'
 import { normalizeBackground, withClipBackground } from './background'
 import type { CanvasBackground } from './types'
 import { clipFadeIn, clipFadeOut, clipVolume } from './clipAudio'
+import { findAudioClipLocation, replacedAudioSourcePatch } from './audio'
 import { canChangeClipSpeed, clipSpeedValue, hasSpeedVariation } from './speed'
 import { speedAttrsPatch } from './attributeClipboard'
 import { contiguousRunHeads } from './selection'
@@ -841,6 +842,25 @@ export function createAddAudioClipCommand(
     selectionAfter: clip.id,
     execute(project) {
       return addAudioClipToProject(project, trackId, clip, trackName) ?? project
+    },
+  }
+}
+
+/** 替换音频片段的素材：保留 start/音量/淡化/倍率，只把源区间夹到新素材时长内。 */
+export function createReplaceAudioSourceCommand(
+  trackId: string,
+  clipId: string,
+  sourceUrl: string,
+  sourceDuration: number,
+): EditorCommand {
+  return {
+    label: '替换音频素材',
+    selectionAfter: clipId,
+    execute(project) {
+      const location = findAudioClipLocation(project, clipId)
+      if (!location || location.track.id !== trackId) return project
+      const patch = replacedAudioSourcePatch(location.clip, sourceUrl, sourceDuration)
+      return updateAudioClipInProject(project, trackId, clipId, patch) ?? project
     },
   }
 }

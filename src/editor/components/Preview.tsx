@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { aspectValue } from '../core/aspect'
 import { audioClipDuration, audioFadeGain } from '../core/audio'
-import { clipFrameSourceAt } from '../core/clipTime'
+import { clipFrameSourceAt, clipSpeed } from '../core/clipTime'
 import { advancePlaybackClock, createPlaybackClockAnchor, type PlaybackClockAnchor } from '../core/playbackClock'
 import { clipGainAt, clipVolumeAt } from '../core/clipAudio'
 import { previewGain } from '../services/previewGain'
@@ -736,6 +736,12 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
             continue
           }
           const target = clipFrameSourceAt(clip, Math.max(0, local))
+          // 音频片段变速：播放速率跟随片段倍率；keepPitch=false 时允许变调。
+          const speed = clipSpeed(clip)
+          if (Math.abs(element.playbackRate - speed) > 0.001) {
+            element.playbackRate = speed
+          }
+          element.preservesPitch = clip.keepPitch !== false
           if (Math.abs(element.currentTime - target) > 0.15) {
             try {
               element.currentTime = target

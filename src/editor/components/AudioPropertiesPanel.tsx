@@ -1,3 +1,4 @@
+import { useRef, useState } from 'react'
 import { FREEZE_MAX_DURATION } from '../core/constants'
 import { hasVolumeAnimation } from '../core/animation'
 import { audioClipDuration, getAudioActionAvailability } from '../core/audio'
@@ -19,6 +20,9 @@ export function AudioPropertiesPanel({ track, clip }: AudioPropertiesPanelProps)
   const project = useEditorStore((state) => state.project)
   const playhead = useEditorStore((state) => state.playhead)
   const moveAudioClip = useEditorStore((state) => state.moveAudioClip)
+  const replaceAudioClipSource = useEditorStore((state) => state.replaceAudioClipSource)
+  const replaceInputRef = useRef<HTMLInputElement | null>(null)
+  const [replacing, setReplacing] = useState(false)
   const splitAtPlayhead = useEditorStore((state) => state.splitAtPlayhead)
   const trimLeftAtPlayhead = useEditorStore((state) => state.trimLeftAtPlayhead)
   const trimRightAtPlayhead = useEditorStore((state) => state.trimRightAtPlayhead)
@@ -143,6 +147,33 @@ export function AudioPropertiesPanel({ track, clip }: AudioPropertiesPanelProps)
               <dd>{duration.toFixed(2)} s</dd>
             </div>
           </dl>
+          <div className="inline-actions">
+            <button
+              type="button"
+              className="button mini"
+              disabled={replacing}
+              onClick={() => replaceInputRef.current?.click()}
+            >
+              {replacing ? '正在读取素材…' : '替换素材…'}
+            </button>
+          </div>
+          <input
+            ref={replaceInputRef}
+            type="file"
+            accept="audio/*,video/*,.mp3,.wav,.m4a,.aac,.flac,.mp4,.mov,.webm"
+            hidden
+            onChange={async (event) => {
+              const file = event.target.files?.[0]
+              event.target.value = ''
+              if (!file) return
+              setReplacing(true)
+              try {
+                await replaceAudioClipSource(track.id, clip.id, file)
+              } finally {
+                setReplacing(false)
+              }
+            }}
+          />
         </section>
 
         <section className="panel-section">
@@ -245,6 +276,47 @@ export function AudioPropertiesPanel({ track, clip }: AudioPropertiesPanelProps)
               </select>
             </label>
           </div>
+        </section>
+
+        <section className="panel-section">
+          <div className="section-title">
+            <span>变速</span>
+            <span className="section-hint">0.1 – 10x</span>
+          </div>
+          <div className="control-with-field">
+            <CommitSlider
+              value={Number((clip.speed ?? 1).toFixed(2))}
+              min={0.1}
+              max={10}
+              step={0.05}
+              ariaLabel="音频变速"
+              onPreview={() => undefined}
+              onCommit={(value) => commit({ speed: value }, '调整音频变速')}
+              format={(value) => `${Number(value.toFixed(2))}x`}
+            />
+            <CommitNumber
+              value={Number((clip.speed ?? 1).toFixed(2))}
+              min={0.1}
+              max={10}
+              step={0.05}
+              unit="x"
+              ariaLabel="音频变速数值"
+              onCommit={(value) => commit({ speed: value }, '调整音频变速')}
+            />
+          </div>
+          <label className="control-toggle">
+            <input
+              type="checkbox"
+              checked={clip.keepPitch !== false}
+              onChange={(event) =>
+                commit({ keepPitch: event.target.checked }, '切换音频保调')
+              }
+            />
+            保持音调
+          </label>
+          <p className="control-note">
+            时长 = 源跨度 ÷ 倍率；分割/裁剪会按倍率换算源区间。导出用 atempo 保音高。
+          </p>
         </section>
 
         <section className="panel-section">

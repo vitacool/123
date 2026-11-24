@@ -350,6 +350,12 @@ export interface EditorState {
    * （主轨 / 叠加 / 音频 / 字幕 / 背景）改到新素材。片段入出点与关键帧不变。
    */
   relinkMissingAsset: (url: string, file: File) => Promise<boolean>
+  /** 替换音频片段的素材（保留起点/音量/淡化/倍率，源区间按新时长夹取）。 */
+  replaceAudioClipSource: (
+    trackId: string,
+    clipId: string,
+    file: File,
+  ) => Promise<boolean>
   /** 更新素材缩略图（重新生成成功后调用；主素材同步更新）。 */
   updateAssetThumbnail: (assetId: string, thumbnail: string | undefined) => void
   /** 重命名素材（只改显示名，不改 url/blob）。 */

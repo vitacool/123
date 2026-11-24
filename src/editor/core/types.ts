@@ -267,6 +267,10 @@ export interface AudioClip {
   volume: number
   fadeIn: number
   fadeOut: number
+  /** 播放倍率 0.1–10，缺省 1（旧草稿无此字段）。 */
+  speed?: number
+  /** 变速时是否保持音调，缺省 true。 */
+  keepPitch?: boolean
   /** 淡入曲线，缺省 linear。 */
   fadeInCurve?: FadeCurve
   /** 淡出曲线，缺省 linear。 */

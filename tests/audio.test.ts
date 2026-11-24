@@ -6,11 +6,13 @@ import {
   audioFadeGain,
   getAudioActionAvailability,
   moveAudioClipInProject,
+  replacedAudioSourcePatch,
   resizeAudioClipInProject,
   splitAudioClipInProject,
   trimAudioClipAt,
   updateAudioTrackInProject,
 } from '../src/editor/core/audio'
+import { createReplaceAudioSourceCommand } from '../src/editor/core/commands'
 import { buildExportArgs, buildExportPlan } from '../src/editor/core/exportPlan'
 import { createInitialProject } from '../src/editor/core/operations'
 import { getProjectEnd } from '../src/editor/core/timeline'
@@ -95,6 +97,86 @@ describe('audio timeline operations', () => {
     const leftTrimmed = resizeAudioClipInProject(project, 'track-a', 'audio-a', 'left', 1, 8)
     expect(leftTrimmed?.audioTracks?.[0].clips[0].sourceStart).toBe(1)
     expect(leftTrimmed?.audioTracks?.[0].clips[0].start).toBe(3)
+  })
+
+  it('换素材：源区间夹到新时长内，起点/音量/倍率保持不变', () => {
+    const patch = replacedAudioSourcePatch(
+      makeClip({ sourceStart: 2, sourceEnd: 6 }),
+      'blob:new',
+      4,
+    )
+    expect(patch).toEqual({ sourceUrl: 'blob:new', sourceStart: 2, sourceEnd: 4 })
+
+    // 原入点超出新素材时长 → 夹到末尾前 0.05s。
+    const clamped = replacedAudioSourcePatch(
+      makeClip({ sourceStart: 8, sourceEnd: 9 }),
+      'blob:new',
+      5,
+    )
+    expect(clamped.sourceEnd).toBe(5)
+    expect(clamped.sourceStart).toBeLessThan(clamped.sourceEnd)
+
+    const project = projectWithAudio(
+      makeClip({ start: 5, sourceStart: 2, sourceEnd: 6, volume: 1.2, speed: 2 }),
+    )
+    const next = createReplaceAudioSourceCommand(
+      'track-a',
+      'audio-a',
+      'blob:new',
+      4,
+    ).execute(project)
+    const replaced = next.audioTracks![0].clips[0]
+    expect(replaced).toMatchObject({
+      sourceUrl: 'blob:new',
+      sourceStart: 2,
+      sourceEnd: 4,
+      start: 5,
+      volume: 1.2,
+      speed: 2,
+    })
+  })
+
+  it('变速：时长按倍率缩短，分割/裁剪按倍率换算源区间', () => {
+    const project = projectWithAudio(makeClip({ sourceEnd: 6, start: 2, speed: 2 }))
+    const clip = project.audioTracks![0].clips[0]
+    // 源跨度 6s / 2x = 3s → 2..5
+    expect(audioClipEnd(clip)).toBe(5)
+
+    // 时间轴 3s 处分割：local 1s × 2 = 源 2s
+    const split = splitAudioClipInProject(project, 'track-a', 'audio-a', 3, 'audio-b')!
+    expect(split.audioTracks![0].clips.map((item) => item.sourceEnd)).toContain(2)
+    expect(split.audioTracks![0].clips.map((item) => item.sourceStart)).toContain(2)
+
+    // 右裁到 3s：sourceEnd = 0 + 1s × 2 = 2
+    const trimmed = trimAudioClipAt(project, 'track-a', 'audio-a', 3, 'right')!
+    expect(trimmed.audioTracks![0].clips[0].sourceEnd).toBe(2)
+
+    // 左裁到 3s：sourceStart = 2，start = 3
+    const left = trimAudioClipAt(project, 'track-a', 'audio-a', 3, 'left')!
+    expect(left.audioTracks![0].clips[0].sourceStart).toBe(2)
+    expect(left.audioTracks![0].clips[0].start).toBe(3)
+
+    // 右拉 1s 时间轴 → 源 +2s（6 → 8，正好到素材末尾）
+    const resized = resizeAudioClipInProject(project, 'track-a', 'audio-a', 'right', 1, 8)!
+    expect(resized.audioTracks![0].clips[0].sourceEnd).toBe(8)
+  })
+
+  it('变速音频导出用 atempo，时长按倍率计算', () => {
+    const project = projectWithAudio(
+      makeClip({ sourceEnd: 6, start: 0, speed: 2, keepPitch: true }),
+    )
+    const plan = buildExportPlan(project, [VIDEO, AUDIO], true)
+    expect(plan.graph).toContain('atempo=2')
+    expect(plan.totalDuration).toBe(10)
+  })
+
+  it('keepPitch=false 时音频导出改 asetrate', () => {
+    const project = projectWithAudio(
+      makeClip({ sourceEnd: 6, start: 0, speed: 2, keepPitch: false }),
+    )
+    const plan = buildExportPlan(project, [VIDEO, AUDIO], true)
+    expect(plan.graph).toContain('asetrate=96000')
+    expect(plan.graph).not.toContain('atempo=2')
   })
 
   it('updates track mute/volume and computes fade gain', () => {

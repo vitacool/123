@@ -1832,6 +1832,12 @@ function applyAudioTracks(
         `[${input}:a]atrim=start=${num(start)}:end=${num(end)}`,
         'asetpts=PTS-STARTPTS',
       ]
+      // 音频片段变速：在源区间裁剪之后、音量/淡化之前变速；
+      // 后面的 duration 已是「时间轴时长」，淡化/关键帧时基保持一致。
+      const audioSpeed = clipSpeedValue(clip)
+      if (audioSpeed !== 1) {
+        filters.push(...speedAudioFilters(audioSpeed, clipKeepsPitch(clip)))
+      }
       if (volumeKeys && volumeKeys.length > 0) {
         // volume 在 adelay 之前：t 从 atrim 后的 0 开始，是片段本地时间；
         // 轨道 gain 乘进表达式，因为这条分支没有第二次 volume 滤镜。
@@ -1895,6 +1901,12 @@ function applyAudioTracks(
         `[${input}:a]atrim=start=${num(start)}:end=${num(end)}`,
         'asetpts=PTS-STARTPTS',
       ]
+      // 音频片段变速：在源区间裁剪之后、音量/淡化之前变速；
+      // 后面的 duration 已是「时间轴时长」，淡化/关键帧时基保持一致。
+      const audioSpeed = clipSpeedValue(clip)
+      if (audioSpeed !== 1) {
+        filters.push(...speedAudioFilters(audioSpeed, clipKeepsPitch(clip)))
+      }
       if (volumeKeys && volumeKeys.length > 0) {
         // 同样在 adelay 之前，t = 片段本地时间；叠加轨没有轨道级增益。
         const expression = buildVolumeExpression(volumeKeys, duration)

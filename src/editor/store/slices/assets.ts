@@ -3,7 +3,7 @@ import { createId } from '../../core/ids'
 import { createInitialProject } from '../../core/operations'
 import { projectNameFromSource } from '../../core/projectLibrary'
 import { isAssetReferenced, unusedAssets, assetKindOf } from '../../core/assets'
-import { createRemoveAssetClipsCommand, createAddAudioClipCommand, createAddClipCommand, createAddClipToNewOverlayTrackCommand, createRelinkAssetCommand } from '../../core/commands'
+import { createRemoveAssetClipsCommand, createAddAudioClipCommand, createAddClipCommand, createAddClipToNewOverlayTrackCommand, createRelinkAssetCommand, createReplaceAudioSourceCommand } from '../../core/commands'
 import { readAssetFile } from '../../services/assetReader'
 import { persistImportedAssets } from '../../services/draftStore'
 import { resolveAssetPlacement } from '../../core/assetPlacement'
@@ -14,7 +14,7 @@ import type { StoreGet, StoreInternals, StoreSet } from '../internal'
 
 
 /** assets slice：素材库、主素材、待回收素材与倒放任务状态 */
-export type AssetsSlice = Pick<EditorState, 'source' | 'assets' | 'missingAssets' | 'pendingReclaim' | 'reverseJob' | 'loadSource' | 'addAssets' | 'removeAsset' | 'relinkMissingAsset' | 'updateAssetThumbnail' | 'renameAsset' | 'cleanupUnusedAssets' | 'disposePendingAssets' | 'addAssetToTimeline' | 'updateSourceMeta' | 'cancelReverse'>
+export type AssetsSlice = Pick<EditorState, 'source' | 'assets' | 'missingAssets' | 'pendingReclaim' | 'reverseJob' | 'loadSource' | 'addAssets' | 'removeAsset' | 'relinkMissingAsset' | 'replaceAudioClipSource' | 'updateAssetThumbnail' | 'renameAsset' | 'cleanupUnusedAssets' | 'disposePendingAssets' | 'addAssetToTimeline' | 'updateSourceMeta' | 'cancelReverse'>
 
 export function createAssetsSlice(ctx: {
   get: StoreGet
@@ -296,6 +296,37 @@ export function createAssetsSlice(ctx: {
             : state.source,
       })
       get().notify(`已重命名素材为「${nextName}」`, 'success')
+    },
+    replaceAudioClipSource: async (trackId, clipId, file) => {
+      let asset: MediaAsset
+      try {
+        asset = await readAssetFile(file, {
+          onTranscodeStatus: (status) => get().notify(status, 'info'),
+        })
+      } catch (error) {
+        get().notify(
+          `读取素材失败：${error instanceof Error ? error.message : String(error)}`,
+          'error',
+        )
+        return false
+      }
+      const previousAssets = get().assets
+      if (!previousAssets.some((item) => item.url === asset.url || item.id === asset.id)) {
+        set({ assets: [...previousAssets, asset] })
+      }
+      if (
+        !run(
+          createReplaceAudioSourceCommand(trackId, clipId, asset.url, asset.duration),
+        )
+      ) {
+        set({ assets: previousAssets })
+        URL.revokeObjectURL(asset.url)
+        get().notify('替换失败：目标音频片段不存在或已被删除', 'warning')
+        return false
+      }
+      await persistImportedAssets([asset], { notify: get().notify })
+      get().notify(`已把音频片段替换为「${asset.name}」`, 'success')
+      return true
     },
     cleanupUnusedAssets: () => {
       const state = get()

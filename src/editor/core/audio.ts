@@ -1,5 +1,6 @@
 import type { AudioClip, AudioTrack, Project } from './types'
-import { clipTimelineDuration } from './clipTime'
+import { clipSpeed, clipTimelineDuration } from './clipTime'
+import { fadeProgress } from './clipAudio'
 import { isAudioLocked } from './tracks'
 
 export const AUDIO_MIN_DURATION = 0.05
@@ -166,6 +167,18 @@ export function updateAudioClipInProject(
   }
 }
 
+/** 换素材时把源区间夹到新素材时长内；保留尽量多的原入出点。 */
+export function replacedAudioSourcePatch(
+  clip: AudioClip,
+  sourceUrl: string,
+  sourceDuration: number,
+): Pick<AudioClip, 'sourceUrl' | 'sourceStart' | 'sourceEnd'> {
+  const duration = Number.isFinite(sourceDuration) ? Math.max(0.05, sourceDuration) : 0.05
+  const start = Math.min(Math.max(0, clip.sourceStart), Math.max(0, duration - 0.05))
+  const end = Math.min(duration, Math.max(start + 0.05, clip.sourceEnd))
+  return { sourceUrl, sourceStart: start, sourceEnd: end }
+}
+
 export function removeAudioClipFromProject(
   project: Project,
   trackId: string,
@@ -219,25 +232,27 @@ export function resizeAudioClipInProject(
   if (!Number.isFinite(delta) || Math.abs(delta) < 0.0001) return null
   const duration = audioClipDuration(clip)
   if (duration <= 0) return null
+  // 音频只支持单一倍率；源时间与时间轴时间的换算 = ×speed。
+  const speed = clipSpeed(clip)
 
   if (edge === 'left') {
-    const maxExtend = Math.min(clip.sourceStart, clip.start)
+    const maxExtend = Math.min(clip.sourceStart / speed, clip.start)
     const minDelta = -maxExtend
     const maxDelta = duration - AUDIO_MIN_DURATION
     const actual = Math.min(maxDelta, Math.max(minDelta, delta))
     if (Math.abs(actual) < 0.0001) return null
     return updateAudioClipInProject(project, trackId, clipId, {
       start: clip.start + actual,
-      sourceStart: clip.sourceStart + actual,
+      sourceStart: clip.sourceStart + actual * speed,
     })
   }
 
-  const maxExtend = Math.max(0, sourceDuration - clip.sourceEnd)
+  const maxExtend = Math.max(0, (sourceDuration - clip.sourceEnd) / speed)
   const minDelta = -(duration - AUDIO_MIN_DURATION)
   const actual = Math.min(maxExtend, Math.max(minDelta, delta))
   if (Math.abs(actual) < 0.0001) return null
   return updateAudioClipInProject(project, trackId, clipId, {
-    sourceEnd: clip.sourceEnd + actual,
+    sourceEnd: clip.sourceEnd + actual * speed,
   })
 }
 
@@ -247,13 +262,13 @@ export function audioFadeGain(clip: AudioClip, localTime: number): number {
   if (duration <= 0) return 0
   let gain = 1
   if (clip.fadeIn > 0.001 && localTime < clip.fadeIn) {
-    gain *= Math.max(0, localTime / clip.fadeIn)
+    gain *= fadeProgress(localTime / clip.fadeIn, clip.fadeInCurve)
   }
   const fadeOutStart = duration - clip.fadeOut
   if (clip.fadeOut > 0.001 && localTime > fadeOutStart) {
-    gain *= Math.max(0, (duration - localTime) / clip.fadeOut)
+    gain *= fadeProgress((duration - localTime) / clip.fadeOut, clip.fadeOutCurve)
   }
-  return gain
+  return Math.max(0, gain)
 }
 
 export interface AudioActionAvailability {
@@ -293,7 +308,7 @@ export function splitAudioClipInProject(
   const duration = audioClipDuration(location.clip)
   const local = time - location.clip.start
   if (local <= AUDIO_MIN_DURATION || local >= duration - AUDIO_MIN_DURATION) return null
-  const splitSource = location.clip.sourceStart + local
+  const splitSource = location.clip.sourceStart + local * clipSpeed(location.clip)
   const left: AudioClip = { ...location.clip, sourceEnd: splitSource }
   const right: AudioClip = {
     ...location.clip,
@@ -324,13 +339,14 @@ export function trimAudioClipAt(
   const duration = audioClipDuration(clip)
   const local = time - clip.start
   if (local <= AUDIO_MIN_DURATION || local >= duration - AUDIO_MIN_DURATION) return null
+  const speed = clipSpeed(clip)
   if (edge === 'left') {
     return updateAudioClipInProject(project, trackId, clipId, {
-      sourceStart: clip.sourceStart + local,
+      sourceStart: clip.sourceStart + local * speed,
       start: time,
     })
   }
   return updateAudioClipInProject(project, trackId, clipId, {
-    sourceEnd: clip.sourceStart + local,
+    sourceEnd: clip.sourceStart + local * speed,
   })
 }
