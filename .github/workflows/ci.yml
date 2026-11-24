@@ -15,6 +15,10 @@ concurrency:
 env:
   # Playwright 在 CI 里不要复用本地服务器
   CI: 'true'
+  # onnxruntime-node 1.21.0 在 Linux/x64 上会误判 CUDA（nvcc 不存在也按 CUDA 12 处理），
+  # 去下载不存在的 onnxruntime-linux-x64-gpu-1.21.0.tgz 而 404，导致 pnpm install 失败。
+  # 浏览器端用的是 onnxruntime-web；Node 的 CUDA EP 对本项目无用，跳过下载。
+  ONNXRUNTIME_NODE_INSTALL_CUDA: skip
 
 jobs:
   # 类型检查 + lint + 单元测试：三者都快，合并成一个 job 减少排队。
