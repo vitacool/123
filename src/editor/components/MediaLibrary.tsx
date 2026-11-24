@@ -135,9 +135,11 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
       filterAssetsByFolder(visible, folderFilter),
       project,
       usageFilter,
+      assets,
     ),
     sortMode,
   )
+  const filtering = usageFilter !== 'all' || folderFilter !== null
 
   const unused = unusedAssets(project, assets)
 
@@ -179,6 +181,11 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
   const clearSearch = () => {
     setQuery('')
     searchRef.current?.focus()
+  }
+
+  const clearFilters = () => {
+    setUsageFilter('all')
+    setFolderFilter(null)
   }
 
   const renderCard = (asset: MediaAsset) => {
@@ -431,7 +438,8 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
 
       {searching && (
         <p className="media-search-status">
-          搜索「{keyword}」· 找到 {visible.length} 个素材（全部分类）
+          搜索「{keyword}」· 找到 {sortedVisible.length} 个素材
+          {filtering ? '（已筛选）' : '（全部分类）'}
         </p>
       )}
 
@@ -455,10 +463,23 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
           </div>
         )}
 
-        {assets.length > 0 && !searching && visible.length === 0 && (
+        {assets.length > 0 && !searching && counts[activeKind] === 0 && (
           <div className="media-kind-empty">
             <p>该分类暂无素材</p>
             <small>点上方「导入素材」添加</small>
+          </div>
+        )}
+
+        {assets.length > 0 && visible.length > 0 && sortedVisible.length === 0 && (
+          <div className="media-search-empty">
+            <p>当前筛选没有素材</p>
+            <button
+              type="button"
+              className="button mini ghost-mini"
+              onClick={clearFilters}
+            >
+              清除筛选
+            </button>
           </div>
         )}
 

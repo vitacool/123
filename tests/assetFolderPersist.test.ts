@@ -24,8 +24,10 @@ describe('素材文件夹持久化', () => {
     const assets = normalizeProjectFileAssets([
       { id: 'a', url: 'blob:a', folder: '  旅行  ' },
       { id: 'b', url: 'blob:b', folder: 42 },
+      { id: 'c', url: 'blob:c', folder: 'x'.repeat(80) },
     ])
     expect(assets[0].folder).toBe('旅行')
     expect(assets[1].folder).toBeUndefined()
+    expect(assets[2].folder).toHaveLength(40)
   })
 })

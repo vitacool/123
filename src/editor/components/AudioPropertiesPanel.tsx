@@ -307,8 +307,13 @@ export function AudioPropertiesPanel({ track, clip }: AudioPropertiesPanelProps)
               max={10}
               step={0.05}
               ariaLabel="音频变速"
-              onPreview={() => undefined}
-              onCommit={(value) => commit({ speed: value }, '调整音频变速')}
+              onPreview={(value) =>
+                setPreviewPatch({ clipId: clip.id, patch: { speed: value } })
+              }
+              onCommit={(value) => {
+                setPreviewPatch(null)
+                commit({ speed: value }, '调整音频变速')
+              }}
               format={(value) => `${Number(value.toFixed(2))}x`}
             />
             <CommitNumber
@@ -318,7 +323,10 @@ export function AudioPropertiesPanel({ track, clip }: AudioPropertiesPanelProps)
               step={0.05}
               unit="x"
               ariaLabel="音频变速数值"
-              onCommit={(value) => commit({ speed: value }, '调整音频变速')}
+              onCommit={(value) => {
+                setPreviewPatch(null)
+                commit({ speed: value }, '调整音频变速')
+              }}
             />
           </div>
           <label className="control-toggle">

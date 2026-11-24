@@ -1,3 +1,4 @@
+import { ASSET_FOLDER_MAX_LENGTH } from './core/assets'
 import type { DraftAsset, DraftSettings, DraftSnapshot, MissingAsset } from './core/draft'
 import { normalizeMissingAssets } from './core/draft'
 import type { Project } from './core/types'
@@ -101,7 +102,7 @@ export function normalizeProjectFileAssets(input: unknown): DraftAsset[] {
         : {}),
       ...(typeof raw.local === 'boolean' ? { local: raw.local } : {}),
       ...(typeof raw.folder === 'string' && raw.folder.trim()
-        ? { folder: raw.folder.trim().slice(0, 60) }
+        ? { folder: raw.folder.trim().slice(0, ASSET_FOLDER_MAX_LENGTH) }
         : {}),
       ...(reversedFrom ? { reversedFrom } : {}),
     })

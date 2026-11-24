@@ -32,7 +32,8 @@ async function reverseAudioAssetOnce(
   asset: MediaAsset,
   options: ReverseAudioOptions,
 ): Promise<File> {
-  if (asset.kind !== 'audio') throw new Error('只有音频素材支持音频倒放')
+  if (asset.kind === 'image') throw new Error('图片没有音轨，无法倒放音频')
+  if (asset.hasAudio === false) throw new Error('该素材没有音轨，无法倒放音频')
   const { signal, onStatus } = options
   const throwIfAborted = (): void => {
     if (!signal?.aborted) return

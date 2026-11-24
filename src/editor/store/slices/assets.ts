@@ -4,6 +4,7 @@ import { createInitialProject } from '../../core/operations'
 import { projectNameFromSource } from '../../core/projectLibrary'
 import { isAssetReferenced, unusedAssets, assetKindOf, normalizeAssetFolder } from '../../core/assets'
 import { createRemoveAssetClipsCommand, createAddAudioClipCommand, createAddClipCommand, createAddClipToNewOverlayTrackCommand, createRelinkAssetCommand, createReplaceAudioSourceCommand, createReverseAudioClipCommand } from '../../core/commands'
+import { buildReversedAudioAsset } from '../../core/audio'
 import { reverseAudioAsset } from '../../services/reverseAudio'
 import { readAssetFile } from '../../services/assetReader'
 import { persistImportedAssets } from '../../services/draftStore'
@@ -338,8 +339,8 @@ export function createAssetsSlice(ctx: {
         return false
       }
       const asset = state.assets.find((item) => item.url === clip.sourceUrl)
-      if (!asset || asset.kind !== 'audio' || !(asset.duration > 0)) {
-        get().notify('找不到原音频素材或时长未知，无法倒放', 'warning')
+      if (!asset || asset.kind === 'image' || !(asset.duration > 0)) {
+        get().notify('找不到可倒放的音频素材或时长未知', 'warning')
         return false
       }
       let file: File
@@ -359,18 +360,7 @@ export function createAssetsSlice(ctx: {
         return false
       }
       const url = URL.createObjectURL(file)
-      const reversedAsset: MediaAsset = {
-        id: createId('asset'),
-        url,
-        name: file.name,
-        size: file.size,
-        duration: asset.duration,
-        width: 0,
-        height: 0,
-        kind: 'audio',
-        file,
-        hasAudio: true,
-      }
+      const reversedAsset = buildReversedAudioAsset(asset, file, createId('asset'), url)
       const previousAssets = get().assets
       set({ assets: [...previousAssets, reversedAsset] })
       if (

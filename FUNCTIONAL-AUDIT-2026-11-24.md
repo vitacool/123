@@ -97,11 +97,28 @@
 
 **P3 其余待做**：slip/slide/roll、素材库文件夹/筛选、完整文案注入（i18n）。
 
-**P3 + 音频能力 + 长片虚拟化 + 素材库筛选/文件夹验证**：`tsc` 0 错误；全量 `vitest` **1235 passed / 2 skipped**；完整 e2e（Edge）**22 passed**；全仓 `eslint` 0 error（22 条存量 warning）。
+**当前全量验证**：`tsc` 0 错误；全量 `vitest` **1240 passed / 2 skipped**；完整 e2e（Edge）**22 passed**；全仓 `eslint` 0 error（22 条存量 warning）。
 
 **当前验证（Round 3 收尾，Batch C 完成）**：`tsc` 0 错误；全量 `vitest` **1189 passed / 2 skipped**；完整 e2e（Edge）**22 passed**；本批改动 `eslint` 0 error（仅存量警告）。
 
 **当前验证（Batch B 收尾）**：`tsc` 0 错误；全量 `vitest` **1170 passed / 2 skipped**；完整 e2e（Edge）**22 passed**；Batch B 改动 `eslint` 0 error。
+
+---
+
+## 0.4 遗留 bug 修复（2026-11-24 晚）
+
+| # | 问题 | 处理 |
+|---|---|---|
+| 1 | 音频倒放未写 `reversedFrom` | 新增 `buildReversedAudioAsset` 记录原素材与整段区间；清理未使用素材不会再删掉撤销所依赖的原素材 |
+| 2 | 使用情况筛选基于可见子集 | `filterAssetsByUsage` 增加 catalog 参数，引用判定始终用全量素材库 |
+| 3 | 倒放未镜像关键帧缓动 | `reverseAudioClipPatch` 同步对调 `easeIn` / `easeOut` |
+| 4 | 素材库筛选后计数/空态错误 | 计数改用筛选后的结果；新增「当前筛选没有素材 / 清除筛选」空态 |
+| 5 | 文件夹上限不一致（40 vs 60） | 工程文件导入统一使用 `ASSET_FOLDER_MAX_LENGTH`（40） |
+| 6 | 视频素材当音频用时无法倒放 | 音频倒放允许 `video` 素材（`-vn` 提取音轨），仅拒绝图片/无音轨 |
+| 7 | 非法画质档位未归一化 | `normalizeProjectExportQuality` 把非法 `tier` 回退为缺省（standard） |
+| 8 | 音频变速拖动不试听 | 速度滑块走 `previewPatch`，预览按临时倍率设置 `playbackRate` / 取源时间 / 淡化时长 |
+
+验证：`tsc` 0；`vitest` **1240 passed / 2 skipped**；e2e（Edge）**22 passed**；eslint 0 error。
 
 ---
 
@@ -349,7 +366,7 @@
 
 ## 五、README 已承认的限制（仍算功能缺点，按影响排序）
 
-1. 只用 `libx264 + aac` 输出 MP4，无 WebM/ProRes/GIF、无码率/质量档。
+1. 只用 `libx264 + aac` 输出 MP4，无 WebM/ProRes/GIF；已有高画质/标准/小体积三档 CRF，但没有直接输入码率的控制。
 2. 单画布比例；切换比例只改一个字段（`operations.ts:1216-1218`），不自动重构图，也不提示已有构图会变。
 3. HEVC 导入要转 H.264 代理（慢、轻微画质损失），且代理名会污染「重链匹配」。
 4. 智能字幕首次需下载 Whisper small（约 480MB）/ medium（约 1.5GB）；只按素材识别，不按片段。

@@ -1,4 +1,4 @@
-import type { AudioClip, AudioTrack, Project } from './types'
+import type { AudioClip, AudioTrack, Easing, MediaAsset, Project } from './types'
 import { clipSpeed, clipTimelineDuration } from './clipTime'
 import { fadeProgress } from './clipAudio'
 import { isAudioLocked } from './tracks'
@@ -167,6 +167,13 @@ export function updateAudioClipInProject(
   }
 }
 
+/** 倒放后时间方向反转，easeIn/easeOut 也要对调，音量自动化形状才对称。 */
+function mirrorEase(ease: Easing): Easing {
+  if (ease === 'easeIn') return 'easeOut'
+  if (ease === 'easeOut') return 'easeIn'
+  return ease
+}
+
 /** 音频倒放后的片段补丁：源区间镜像、淡入淡出与曲线对调、音量关键帧镜像。 */
 export function reverseAudioClipPatch(
   clip: AudioClip,
@@ -183,7 +190,7 @@ export function reverseAudioClipPatch(
         ...(volumeKeys
           ? {
               volume: volumeKeys
-                .map((key) => ({ ...key, t: 1 - key.t }))
+                .map((key) => ({ ...key, t: 1 - key.t, ease: mirrorEase(key.ease) }))
                 .sort((left, right) => left.t - right.t),
             }
           : {}),
@@ -198,6 +205,32 @@ export function reverseAudioClipPatch(
     fadeInCurve: clip.fadeOutCurve,
     fadeOutCurve: clip.fadeInCurve,
     ...(anim ? { anim } : {}),
+  }
+}
+
+export function buildReversedAudioAsset(
+  asset: MediaAsset,
+  file: File,
+  id: string,
+  url: string,
+): MediaAsset {
+  return {
+    id,
+    url,
+    name: file.name,
+    size: file.size,
+    duration: asset.duration,
+    width: 0,
+    height: 0,
+    kind: 'audio',
+    file,
+    hasAudio: true,
+    reversedFrom: {
+      assetId: asset.id,
+      sourceUrl: asset.url,
+      start: 0,
+      end: asset.duration,
+    },
   }
 }
 
@@ -291,8 +324,12 @@ export function resizeAudioClipInProject(
 }
 
 /** Gain multiplier for a clip at a local playhead time, including fades. */
-export function audioFadeGain(clip: AudioClip, localTime: number): number {
-  const duration = audioClipDuration(clip)
+export function audioFadeGain(
+  clip: AudioClip,
+  localTime: number,
+  durationOverride?: number,
+): number {
+  const duration = Math.max(0, durationOverride ?? audioClipDuration(clip))
   if (duration <= 0) return 0
   let gain = 1
   if (clip.fadeIn > 0.001 && localTime < clip.fadeIn) {

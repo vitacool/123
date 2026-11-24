@@ -169,8 +169,13 @@ export function normalizeProjectExportQuality(project: Project): Project {
     quality.loudness === 'platform' || quality.loudness === 'broadcast'
       ? quality.loudness
       : 'off'
-  if (quality.loudness === loudness) return project
-  return { ...project, exportQuality: { ...quality, loudness } }
+  // 非法档位（手工改工程文件）回退缺省：UI 按 standard 显示，导出也按 standard CRF。
+  const tier =
+    quality.tier === 'high' || quality.tier === 'standard' || quality.tier === 'small'
+      ? quality.tier
+      : undefined
+  if (quality.loudness === loudness && quality.tier === tier) return project
+  return { ...project, exportQuality: { ...quality, loudness, tier } }
 }
 
 /**

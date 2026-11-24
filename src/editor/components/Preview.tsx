@@ -723,8 +723,18 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
         for (const clip of track.clips) {
           const element = audioRefs.current.get(clip.id)
           if (!element) continue
-          const duration = audioClipDuration(clip)
+          const baseDuration = audioClipDuration(clip)
           const local = time - clip.start
+          // 拖动音频变速滑块时用临时倍率预览（松手才写入项目）。
+          const patch = state.previewPatch
+          const previewSpeed =
+            patch?.clipId === clip.id && typeof patch.patch.speed === 'number'
+              ? Math.min(10, Math.max(0.1, patch.patch.speed))
+              : null
+          const speed = previewSpeed ?? clipSpeed(clip)
+          const sourceSpan = Math.max(0, clip.sourceEnd - clip.sourceStart)
+          const duration =
+            previewSpeed !== null && speed > 0 ? sourceSpan / speed : baseDuration
           const active =
             isAudioTrackActive(state.project, track) &&
             local >= -0.01 &&
@@ -735,9 +745,11 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
             previewGain.setGain(element, 0)
             continue
           }
-          const target = clipFrameSourceAt(clip, Math.max(0, local))
+          const target = Math.min(
+            clip.sourceEnd,
+            clip.sourceStart + Math.max(0, local) * speed,
+          )
           // 音频片段变速：播放速率跟随片段倍率；keepPitch=false 时允许变调。
-          const speed = clipSpeed(clip)
           if (Math.abs(element.playbackRate - speed) > 0.001) {
             element.playbackRate = speed
           }
@@ -758,7 +770,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
                     Math.max(0, local),
                     effectiveClipVolume(state, clip),
                   ) *
-                  audioFadeGain(clip, Math.max(0, local)),
+                  audioFadeGain(clip, Math.max(0, local), duration),
               )
             : 0
           // >1 的增益交给 GainNode（element.volume 上限只有 1）。

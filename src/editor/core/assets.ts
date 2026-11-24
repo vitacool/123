@@ -108,9 +108,11 @@ export function filterAssetsByUsage(
   assets: readonly MediaAsset[],
   project: Project,
   usage: AssetUsageFilter,
+  /** 计算引用关系用的全量素材库；缺省等于 assets。 */
+  catalog: readonly MediaAsset[] = assets,
 ): MediaAsset[] {
   if (usage === 'all') return [...assets]
-  const unusedIds = new Set(unusedAssets(project, assets).map((asset) => asset.id))
+  const unusedIds = new Set(unusedAssets(project, catalog).map((asset) => asset.id))
   return assets.filter((asset) =>
     usage === 'unused' ? unusedIds.has(asset.id) : !unusedIds.has(asset.id),
   )
