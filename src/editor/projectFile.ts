@@ -100,6 +100,9 @@ export function normalizeProjectFileAssets(input: unknown): DraftAsset[] {
         ? { thumbnail: raw.thumbnail }
         : {}),
       ...(typeof raw.local === 'boolean' ? { local: raw.local } : {}),
+      ...(typeof raw.folder === 'string' && raw.folder.trim()
+        ? { folder: raw.folder.trim().slice(0, 60) }
+        : {}),
       ...(reversedFrom ? { reversedFrom } : {}),
     })
   }

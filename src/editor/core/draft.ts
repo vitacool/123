@@ -441,6 +441,8 @@ export interface DraftAsset {
   kind?: DraftAssetKind
   hasAudio?: boolean
   thumbnail?: string
+  /** 素材库文件夹；缺省未分类（旧草稿无此字段）。 */
+  folder?: string
   /** True when the original media was stored as a Blob in IndexedDB. */
   local?: boolean
   /** 「倒放」素材的来源区间；旧草稿没有该字段。 */

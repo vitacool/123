@@ -366,6 +366,15 @@ describe('store：removeAsset / cleanupUnusedAssets', () => {
     expect(store.getState().missingAssets).toHaveLength(0)
   })
 
+  it('setAssetFolder：写入/清空文件夹，空名视为未分类', () => {
+    const store = makeStore()
+    const assetId = store.getState().assets[0].id
+    store.getState().setAssetFolder(assetId, '  旅行  ')
+    expect(store.getState().assets[0].folder).toBe('旅行')
+    store.getState().setAssetFolder(assetId, '')
+    expect(store.getState().assets[0].folder).toBeUndefined()
+  })
+
   it('renameAsset：素材与主素材显示名一起更新，空名/同名不改', () => {
     const store = makeStore()
     const assetId = store.getState().assets[0].id

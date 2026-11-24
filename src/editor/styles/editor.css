@@ -1077,6 +1077,7 @@
 
 .framecut-root .media-sort {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   padding: 0 12px 6px;

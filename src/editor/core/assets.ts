@@ -62,6 +62,38 @@ export function sortAssets(
   return copy.sort((left, right) => value(right) - value(left))
 }
 
+export const ASSET_FOLDER_MAX_LENGTH = 40
+
+/** 文件夹名归一化：去首尾空白、压缩空白、限长；空串表示未分类。 */
+export function normalizeAssetFolder(name: unknown): string {
+  if (typeof name !== 'string') return ''
+  return name.replace(/\s+/g, ' ').trim().slice(0, ASSET_FOLDER_MAX_LENGTH)
+}
+
+/** 素材库里出现过的文件夹名（去重、按中文/数字排序）。 */
+export function listAssetFolders(assets: readonly MediaAsset[]): string[] {
+  const names = new Set<string>()
+  for (const asset of assets) {
+    const folder = normalizeAssetFolder(asset.folder)
+    if (folder) names.add(folder)
+  }
+  return [...names].sort((left, right) =>
+    left.localeCompare(right, 'zh-Hans-CN', { numeric: true, sensitivity: 'base' }),
+  )
+}
+
+/**
+ * 按文件夹筛选：`null` 表示全部；空串表示未分类；其余按归一化后的名字精确匹配。
+ */
+export function filterAssetsByFolder(
+  assets: readonly MediaAsset[],
+  folder: string | null,
+): MediaAsset[] {
+  if (folder === null) return [...assets]
+  const target = normalizeAssetFolder(folder)
+  return assets.filter((asset) => normalizeAssetFolder(asset.folder) === target)
+}
+
 /** 素材库使用情况筛选。 */
 export type AssetUsageFilter = 'all' | 'used' | 'unused'
 

@@ -630,6 +630,7 @@ export async function restoreDraft(input: unknown): Promise<RestoredDraft | null
         height: meta.height,
         // 旧草稿可能没有 kind：用统一判定补回，避免「音频被加到主轨 / 跑进视频 Tab」。
         kind: assetKindOf(meta),
+        ...(meta.folder ? { folder: meta.folder } : {}),
         hasAudio: meta.hasAudio,
         thumbnail: meta.thumbnail,
         ...(meta.reversedFrom ? { reversedFrom: meta.reversedFrom } : {}),
@@ -708,6 +709,7 @@ export function toDraftAsset(asset: MediaAsset): DraftAsset {
     kind: asset.kind,
     hasAudio: asset.hasAudio,
     thumbnail: asset.thumbnail,
+    ...(asset.folder ? { folder: asset.folder } : {}),
     ...(asset.reversedFrom ? { reversedFrom: asset.reversedFrom } : {}),
     local,
   }

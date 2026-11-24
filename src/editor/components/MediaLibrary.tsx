@@ -8,6 +8,8 @@ import {
   countAssetReferences,
   matchesAssetName,
   filterAssetsByUsage,
+  filterAssetsByFolder,
+  listAssetFolders,
   reversedDependents,
   sortAssets,
   unusedAssets,
@@ -63,6 +65,7 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
   const removeAsset = useEditorStore((state) => state.removeAsset)
   const updateAssetThumbnail = useEditorStore((state) => state.updateAssetThumbnail)
   const renameAsset = useEditorStore((state) => state.renameAsset)
+  const setAssetFolder = useEditorStore((state) => state.setAssetFolder)
   const notify = useEditorStore((state) => state.notify)
   const cleanupUnusedAssets = useEditorStore((state) => state.cleanupUnusedAssets)
 
@@ -71,6 +74,10 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
   const [query, setQuery] = useState('')
   const [sortMode, setSortMode] = useState<AssetSortMode>('added')
   const [usageFilter, setUsageFilter] = useState<AssetUsageFilter>('all')
+  /** null = 全部文件夹；'' = 未分类；其余为文件夹名。 */
+  const [folderFilter, setFolderFilter] = useState<string | null>(null)
+  const [folderEditId, setFolderEditId] = useState<string | null>(null)
+  const [folderDraft, setFolderDraft] = useState('')
   const [pending, setPending] = useState<PendingDelete | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; asset: MediaAsset } | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
@@ -123,7 +130,14 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
   const visible = searching
     ? assets.filter((asset) => matchesAssetName(asset, keyword))
     : assets.filter((asset) => assetKindOf(asset) === activeKind)
-  const sortedVisible = sortAssets(filterAssetsByUsage(visible, project, usageFilter), sortMode)
+  const sortedVisible = sortAssets(
+    filterAssetsByUsage(
+      filterAssetsByFolder(visible, folderFilter),
+      project,
+      usageFilter,
+    ),
+    sortMode,
+  )
 
   const unused = unusedAssets(project, assets)
 
@@ -143,6 +157,12 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
     const name = renameDraft.trim()
     if (name && name !== asset.name) renameAsset(asset.id, name)
     setRenamingId(null)
+  }
+
+  /** 提交素材文件夹（留空 = 移出文件夹）。 */
+  const commitAssetFolder = (asset: MediaAsset) => {
+    setAssetFolder(asset.id, folderDraft)
+    setFolderEditId(null)
   }
 
   const requestDelete = (asset: MediaAsset) => {
@@ -220,6 +240,7 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
           <span className="media-card-copy">
             <strong>{highlightName(asset.name, keyword)}</strong>
             <small>
+              {asset.folder ? `${asset.folder} · ` : ''}
               {audio ? '音频' : `${asset.width}×${asset.height}`}
               {references > 0 ? ` · 引用 ${references}` : ' · 未使用'}
             </small>
@@ -243,6 +264,29 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
               if (event.key === 'Escape') {
                 event.preventDefault()
                 setRenamingId(null)
+              }
+            }}
+          />
+        )}
+        {folderEditId === asset.id && (
+          <input
+            className="media-card-rename"
+            value={folderDraft}
+            autoFocus
+            maxLength={40}
+            placeholder="文件夹名（留空=未分类）"
+            aria-label={`设置素材文件夹 ${asset.name}`}
+            onChange={(event) => setFolderDraft(event.target.value)}
+            onBlur={() => commitAssetFolder(asset)}
+            onKeyDown={(event) => {
+              event.stopPropagation()
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                commitAssetFolder(asset)
+              }
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                setFolderEditId(null)
               }
             }}
           />
@@ -367,6 +411,22 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
             </option>
           ))}
         </select>
+        <span>文件夹</span>
+        <select
+          value={folderFilter ?? '*'}
+          aria-label="素材文件夹筛选"
+          onChange={(event) =>
+            setFolderFilter(event.target.value === '*' ? null : event.target.value)
+          }
+        >
+          <option value="*">全部</option>
+          <option value="">未分类</option>
+          {listAssetFolders(assets).map((folder) => (
+            <option key={folder} value={folder}>
+              {folder}
+            </option>
+          ))}
+        </select>
       </div>
 
       {searching && (
@@ -419,6 +479,15 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
               onSelect: () => {
                 setRenamingId(menu.asset.id)
                 setRenameDraft(menu.asset.name)
+                setFolderEditId(null)
+              },
+            },
+            {
+              label: '移动到文件夹…',
+              onSelect: () => {
+                setFolderEditId(menu.asset.id)
+                setFolderDraft(menu.asset.folder ?? '')
+                setRenamingId(null)
               },
             },
             ...(menu.asset.kind === 'audio'

@@ -362,6 +362,8 @@ export interface EditorState {
   updateAssetThumbnail: (assetId: string, thumbnail: string | undefined) => void
   /** 重命名素材（只改显示名，不改 url/blob）。 */
   renameAsset: (assetId: string, name: string) => void
+  /** 把素材移到文件夹（空串 = 未分类）。 */
+  setAssetFolder: (assetId: string, folder: string) => void
   /** 一次性清理所有未被任何片段引用的素材（同样走延迟回收）。 */
   cleanupUnusedAssets: () => void
   /**

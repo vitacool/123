@@ -2,7 +2,7 @@ import type { AudioClip, Clip, MediaAsset } from '../../core/types'
 import { createId } from '../../core/ids'
 import { createInitialProject } from '../../core/operations'
 import { projectNameFromSource } from '../../core/projectLibrary'
-import { isAssetReferenced, unusedAssets, assetKindOf } from '../../core/assets'
+import { isAssetReferenced, unusedAssets, assetKindOf, normalizeAssetFolder } from '../../core/assets'
 import { createRemoveAssetClipsCommand, createAddAudioClipCommand, createAddClipCommand, createAddClipToNewOverlayTrackCommand, createRelinkAssetCommand, createReplaceAudioSourceCommand, createReverseAudioClipCommand } from '../../core/commands'
 import { reverseAudioAsset } from '../../services/reverseAudio'
 import { readAssetFile } from '../../services/assetReader'
@@ -15,7 +15,7 @@ import type { StoreGet, StoreInternals, StoreSet } from '../internal'
 
 
 /** assets slice：素材库、主素材、待回收素材与倒放任务状态 */
-export type AssetsSlice = Pick<EditorState, 'source' | 'assets' | 'missingAssets' | 'pendingReclaim' | 'reverseJob' | 'loadSource' | 'addAssets' | 'removeAsset' | 'relinkMissingAsset' | 'replaceAudioClipSource' | 'reverseAudioClip' | 'updateAssetThumbnail' | 'renameAsset' | 'cleanupUnusedAssets' | 'disposePendingAssets' | 'addAssetToTimeline' | 'updateSourceMeta' | 'cancelReverse'>
+export type AssetsSlice = Pick<EditorState, 'source' | 'assets' | 'missingAssets' | 'pendingReclaim' | 'reverseJob' | 'loadSource' | 'addAssets' | 'removeAsset' | 'relinkMissingAsset' | 'replaceAudioClipSource' | 'reverseAudioClip' | 'updateAssetThumbnail' | 'renameAsset' | 'setAssetFolder' | 'cleanupUnusedAssets' | 'disposePendingAssets' | 'addAssetToTimeline' | 'updateSourceMeta' | 'cancelReverse'>
 
 export function createAssetsSlice(ctx: {
   get: StoreGet
@@ -386,6 +386,19 @@ export function createAssetsSlice(ctx: {
       await persistImportedAssets([reversedAsset], { notify: get().notify })
       get().notify('已生成倒放音频并替换片段', 'success')
       return true
+    },
+    setAssetFolder: (assetId, folder) => {
+      const state = get()
+      const asset = state.assets.find((item) => item.id === assetId)
+      if (!asset) return
+      const next = normalizeAssetFolder(folder)
+      if (normalizeAssetFolder(asset.folder) === next) return
+      set({
+        assets: state.assets.map((item) =>
+          item.id === assetId ? { ...item, folder: next || undefined } : item,
+        ),
+      })
+      get().notify(next ? `已移到文件夹「${next}」` : '已移出文件夹', 'success')
     },
     cleanupUnusedAssets: () => {
       const state = get()

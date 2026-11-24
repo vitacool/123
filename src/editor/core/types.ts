@@ -478,6 +478,8 @@ export interface SourceInfo {
 /** A video in the project media library. `url` matches `Clip.sourceUrl`. */
 export interface MediaAsset extends SourceInfo {
   id: string
+  /** 素材库文件夹名；缺省表示未分类（旧数据无此字段）。 */
+  folder?: string
   /**
    * 「倒放」生成的新素材会记录来源区间，便于同一片段同一区间重复倒放时复用，
    * 以及刷新草稿后仍能识别。缺省表示普通导入素材（旧数据同样没有该字段）。
