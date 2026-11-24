@@ -22,7 +22,7 @@ const BASE_URL = process.env.FRAMECUT_E2E_URL ?? `http://127.0.0.1:${PORT}/`
 const webServerCommand = [
   'node scripts/copy-ffmpeg-core.mjs',
   ...(process.env.CI ? [] : ['node scripts/copy-asr-assets.mjs']),
-  `node node_modules/vite/bin/vite.js --port ${PORT} --strictPort`,
+  `node node_modules/vite/bin/vite.js --host 127.0.0.1 --port ${PORT} --strictPort`,
 ].join(' && ')
 
 export default defineConfig({
