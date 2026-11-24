@@ -93,10 +93,11 @@
 | P3-11 繁简转换写死 | ✅ 已修 | 智能字幕新增「输出字形：简体/繁体/保持原文」；opencc 转换从 worker 硬编码改为显式选项；**ASR 缓存键包含字形变体**，切换不会复用旧结果 | 新增 `tests/scriptConvert.test.ts` + `tests/asr.test.ts` 变体键用例 |
 | P3-15 无错误边界 | ✅ 已修（边界） | 新增 `ErrorBoundary`：任一子组件渲染抛错时显示「重新加载」恢复界面并保留错误详情，不再整页白屏 | 新增 `tests/errorBoundary.test.ts`；完整 i18n/文案注入仍未做 |
 | P3-14 音频片段能力缺口 | ✅ 已修 | 音频片段新增**变速 0.1–10x（保音高/变调）**；**换素材**；**倒放**（FFmpeg `areverse` 生成整段倒放音频 → 源区间镜像、淡化/曲线对调、音量关键帧镜像）。分割/裁剪/边缘拖动均按倍率换算 | `tests/audio.test.ts` 新增变速、换素材、倒放镜像、导图用例 |
+| P3-4 长片时间轴全量渲染 | ✅ 已修 | 主轨/叠加轨片段与转场按**视口窗口**（含一屏 overscan）渲染；拖动吸附点在拖拽开始时构建一次，pointermove 不再全量重扫片段/标记 | 新增 `tests/timelineWindow.test.ts`（窗口换算/相交判定） |
 
-**P3 其余待做**：slip/slide/roll、长片虚拟化、素材库文件夹/筛选、完整文案注入（i18n）。
+**P3 其余待做**：slip/slide/roll、素材库文件夹/筛选、完整文案注入（i18n）。
 
-**P3 + 音频变速/换素材/倒放验证**：`tsc` 0 错误；全量 `vitest` **1221 passed / 2 skipped**；完整 e2e（Edge）**22 passed**；全仓 `eslint` 0 error（22 条存量 warning）。
+**P3 + 音频能力 + 长片虚拟化验证**：`tsc` 0 错误；全量 `vitest` **1226 passed / 2 skipped**；完整 e2e（Edge）**22 passed**；全仓 `eslint` 0 error（22 条存量 warning）。
 
 **当前验证（Round 3 收尾，Batch C 完成）**：`tsc` 0 错误；全量 `vitest` **1189 passed / 2 skipped**；完整 e2e（Edge）**22 passed**；本批改动 `eslint` 0 error（仅存量警告）。
 

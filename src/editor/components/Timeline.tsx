@@ -18,6 +18,7 @@ import { EasingPopover } from './EasingPopover'
 import type { Easing, TransitionType } from '../core/types'
 import { clipSpeedValue } from '../core/speed'
 import { clipTimelineDuration } from '../core/clipTime'
+import { isSegmentVisible, timelineWindow } from '../core/timelineWindow'
 import { idsInRect, type SelectableSpan } from '../core/selection'
 import type {
   DragEvent as ReactDragEvent,
@@ -121,6 +122,8 @@ interface ClipDrag {
   active: boolean
   clientX: number
   clientY: number
+  /** 拖拽开始时构建一次；移动期间项目不变，不必每次 pointermove 重扫全部片段。 */
+  snapPoints: { time: number; label: string }[]
 }
 
 interface TransitionDragState {
@@ -307,6 +310,19 @@ export function Timeline({ onPickFile }: TimelineProps) {
   // 有封面时把时间轴左侧的留白加宽，避免封面块压住 t=0 的片段与标尺刻度。
   const hasCoverBlock = Boolean(project.cover?.dataUrl)
   const pad = BASE_PAD + (hasCoverBlock ? COVER_BLOCK_WIDTH + COVER_GAP : 0)
+  // 长片虚拟化：只渲染视口（含 overscan）内的片段，避免几百片段时 DOM 无限增长。
+  const renderWindow = useMemo(
+    () => timelineWindow(scrollLeft, viewportWidth, pps, pad),
+    [scrollLeft, viewportWidth, pps, pad],
+  )
+  const visibleSegments = useMemo(
+    () => segments.filter((segment) => isSegmentVisible(segment, renderWindow)),
+    [segments, renderWindow],
+  )
+  const visibleSegmentIds = useMemo(
+    () => new Set(visibleSegments.map((segment) => segment.clip.id)),
+    [visibleSegments],
+  )
   const assetByUrl = useMemo(
     () => new Map(assets.map((asset) => [asset.url, asset])),
     [assets],
@@ -689,30 +705,6 @@ export function Timeline({ onPickFile }: TimelineProps) {
               )?.clips ?? [],
             )
       const settings = store.getState().timelineSettings
-      const projectNow = store.getState().project
-      const sourceNow = findClipLocation(projectNow, current.clipId)
-      const sourceStart = sourceNow?.segment.start ?? -1
-      const sourceEnd = sourceNow?.segment.end ?? -1
-      const outsideSource = (time: number) => time <= sourceStart - 0.0001 || time >= sourceEnd + 0.0001
-      const autoPoints: { time: number; label: string }[] = []
-      if (settings.autoSnap) {
-        for (const segment of getTimeline(projectNow.clips)) {
-          if (segment.clip.id === current.clipId) continue
-          autoPoints.push({ time: segment.start, label: '片段边缘' }, { time: segment.end, label: '片段边缘' })
-        }
-        for (const track of projectNow.overlayTracks ?? []) {
-          for (const segment of getTimeline(track.clips)) {
-            if (segment.clip.id === current.clipId) continue
-            autoPoints.push({ time: segment.start, label: '片段边缘' }, { time: segment.end, label: '片段边缘' })
-          }
-        }
-        for (const marker of projectNow.markers) {
-          if (outsideSource(marker.time)) autoPoints.push({ time: marker.time, label: '标记' })
-        }
-        if (outsideSource(0)) autoPoints.push({ time: 0, label: '时间轴起点' })
-        const head = store.getState().playhead
-        if (outsideSource(head)) autoPoints.push({ time: head, label: '播放头' })
-      }
       const evaluateSnap = (points: { time: number; label: string }[], threshold: number) => {
         let best: { delta: number; label: string } | null = null
         let bestDistance = threshold + 1
@@ -744,7 +736,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
         snapKind = 'magnet'
         snapLabel = '主轨贴合'
       } else {
-        const snap = settings.autoSnap && !event.altKey ? evaluateSnap(autoPoints, 12 / pps) : null
+        const snap = settings.autoSnap && !event.altKey ? evaluateSnap(current.snapPoints, 12 / pps) : null
         const snappedTime = Math.max(0, rawTime + (snap?.delta ?? 0))
         targetIndex = clamp(
           others.filter(
@@ -1046,6 +1038,36 @@ export function Timeline({ onPickFile }: TimelineProps) {
       const grabOffset = sourceLocation
         ? clamp(pointerTime - sourceLocation.segment.start, 0, sourceLocation.segment.duration)
         : 0
+      // 吸附点在拖拽开始时算一次：拖拽期间 project/标记/播放头不变。
+      const snapPoints: { time: number; label: string }[] = []
+      if (store.getState().timelineSettings.autoSnap) {
+        const sourceStart = sourceLocation?.segment.start ?? -1
+        const sourceEnd = sourceLocation?.segment.end ?? -1
+        const outsideSource = (time: number): boolean =>
+          time <= sourceStart - 0.0001 || time >= sourceEnd + 0.0001
+        for (const segment of getTimeline(project.clips)) {
+          if (segment.clip.id === clipId) continue
+          snapPoints.push(
+            { time: segment.start, label: '片段边缘' },
+            { time: segment.end, label: '片段边缘' },
+          )
+        }
+        for (const track of project.overlayTracks ?? []) {
+          for (const segment of getTimeline(track.clips)) {
+            if (segment.clip.id === clipId) continue
+            snapPoints.push(
+              { time: segment.start, label: '片段边缘' },
+              { time: segment.end, label: '片段边缘' },
+            )
+          }
+        }
+        for (const marker of project.markers) {
+          if (outsideSource(marker.time)) snapPoints.push({ time: marker.time, label: '标记' })
+        }
+        if (outsideSource(0)) snapPoints.push({ time: 0, label: '时间轴起点' })
+        const head = store.getState().playhead
+        if (outsideSource(head)) snapPoints.push({ time: head, label: '播放头' })
+      }
       const drag: ClipDrag = {
         clipId,
         trackId,
@@ -1063,6 +1085,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
         active: false,
         clientX: event.clientX,
         clientY: event.clientY,
+        snapPoints,
       }
       clipDragRef.current = drag
       setClipDrag(drag)
@@ -1831,7 +1854,9 @@ export function Timeline({ onPickFile }: TimelineProps) {
                       backgroundPositionX: `${pad}px`,
                     }}
                   >
-                    {trackSegments.map((segment) => {
+                    {trackSegments
+                      .filter((segment) => isSegmentVisible(segment, renderWindow))
+                      .map((segment) => {
                       const { clip } = segment
                       const width = Math.max(4, segment.duration * pps - 2)
                       const asset = assetForClip(clip)
@@ -2023,7 +2048,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
                 <span className="timeline-cover-badge">封面</span>
               </button>
             )}
-            {segments.map((segment) => {
+            {visibleSegments.map((segment) => {
               const { clip } = segment
               const asset = assetForClip(clip)
               const thumbnail = thumbnailFor(clip)
@@ -2134,6 +2159,12 @@ export function Timeline({ onPickFile }: TimelineProps) {
             {segments.map((segment, index) => {
               const next = segments[index + 1]
               if (!next) return null
+              if (
+                !visibleSegmentIds.has(segment.clip.id) &&
+                !visibleSegmentIds.has(next.clip.id)
+              ) {
+                return null
+              }
               const nextClip = next.clip
               const gap = Math.max(0, nextClip.gapBefore ?? 0)
               if (!hasTransitionPair(segment.clip, nextClip, gap)) return null
