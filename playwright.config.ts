@@ -12,6 +12,19 @@ import { defineConfig, devices } from '@playwright/test'
 const PORT = 5199
 const BASE_URL = process.env.FRAMECUT_E2E_URL ?? `http://127.0.0.1:${PORT}/`
 
+/**
+ * 统一用 dev server 跑 e2e（本地 Edge 已验证 22 条全过）。
+ *
+ * CI 冷启动要把 @huggingface/transformers / onnxruntime-web 做依赖预打包，
+ * 2 核 runner 上可能超过 120s，所以 CI 的超时放宽到 300s；ASR 资源不参与 e2e，
+ * CI 下跳过 copy-asr 以减少启动前的网络等待。
+ */
+const webServerCommand = [
+  'node scripts/copy-ffmpeg-core.mjs',
+  ...(process.env.CI ? [] : ['node scripts/copy-asr-assets.mjs']),
+  `node node_modules/vite/bin/vite.js --port ${PORT} --strictPort`,
+].join(' && ')
+
 export default defineConfig({
   testDir: './e2e',
   // 导出要跑 FFmpeg.wasm，单个用例可能超过默认 30s
@@ -69,15 +82,16 @@ export default defineConfig({
   webServer: process.env.FRAMECUT_E2E_URL
     ? undefined
     : {
-        // public/ffmpeg 与 public/onnxruntime 是生成物（.gitignore），
-        // 全新 clone 里必须先跑 copy 脚本，否则导出会 404 ffmpeg-core.js。
-        command: [
-          'node scripts/copy-ffmpeg-core.mjs',
-          'node scripts/copy-asr-assets.mjs',
-          `node node_modules/vite/bin/vite.js --port ${PORT} --strictPort`,
-        ].join(' && '),
+        // public/ffmpeg 是生成物（.gitignore），全新 clone 必须先复制，否则导出 404。
+        //
+        // 为什么用「build + preview」而不是 dev server：
+        // dev 首启会把 @huggingface/transformers / onnxruntime-web 做依赖预打包，
+        // 2 核 CI 上冷启动经常超过 120s，Playwright 会报 webServer 超时；preview
+        // 直接跑生产产物，既快又顺带验证了应用构建。ASR 资源（public/onnxruntime、
+        // public/vad）不参与 e2e，不需要在启动前复制。
+        command: webServerCommand,
         url: BASE_URL,
         reuseExistingServer: !process.env.CI,
-        timeout: 120_000,
+        timeout: process.env.CI ? 300_000 : 120_000,
       },
 })
