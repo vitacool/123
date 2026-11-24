@@ -38,6 +38,7 @@ import { hasAnimation, resolveClipOverrides } from '../core/animation'
 import { drawClipFrame } from '../core/clipRender'
 import { paintTransitionFrame } from '../core/transitionRender'
 import { webglKeyer } from '../services/webglKeyer'
+import { cpuKeyFrame } from '../services/cpuChromaKey'
 import { sourceFitRect } from '../core/geometry'
 import { findClipLocation, findSegmentAt, getProjectEnd, getTimeline, segmentsAt } from '../core/timeline'
 import {
@@ -445,7 +446,21 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
         keyFrame: {
           keyFrame: (...args: Parameters<typeof webglKeyer.keyFrame>) => {
             const result = webglKeyer.keyFrame(...args)
-            if (!result && !chromaWarnRef.current) {
+            if (result) return result
+            const cpu = cpuKeyFrame(...args)
+            if (cpu) {
+              if (!chromaWarnRef.current) {
+                chromaWarnRef.current = true
+                store
+                  .getState()
+                  .notify(
+                    'WebGL 抠像不可用，已切换 CPU 抠像（预览会变慢；导出仍正常）',
+                    'warning',
+                  )
+              }
+              return cpu
+            }
+            if (!chromaWarnRef.current) {
               chromaWarnRef.current = true
               store
                 .getState()
@@ -454,7 +469,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
                   'warning',
                 )
             }
-            return result
+            return null
           },
         },
         createCanvas: (w, h) => {

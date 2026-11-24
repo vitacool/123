@@ -1,4 +1,4 @@
-import { webglKeyer } from './webglKeyer'
+import { keyFrameProcessor } from './keyFrameProcessor'
 import { canCleanup, execOnRuntime, type RuntimeHandle } from './ffmpegRuntime'
 import { backgroundCssColor, clipBackground } from '../core/background'
 import { clipFreezeFrame, clipSpanSourceAt, clipTimelineDuration } from '../core/clipTime'
@@ -370,7 +370,7 @@ export async function renderAnimatedClipToFile(
       sourceWidth: source.width,
       sourceHeight: source.height,
       overrides: resolveClipOverrides(clip, localTime, duration),
-      keyFrame: webglKeyer,
+      keyFrame: keyFrameProcessor,
       createCanvas: (w, h) => {
         const offscreen = document.createElement('canvas')
         offscreen.width = Math.max(1, Math.round(w))

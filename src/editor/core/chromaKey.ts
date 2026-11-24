@@ -127,6 +127,47 @@ export function chromaAlphaAtPixel(r: number, g: number, b: number, key: ChromaK
   return chromaAlphaAtNeighborhood([[r, g, b]], key)
 }
 
+/**
+ * CPU 兜底：就地把 RGBA 像素抠成带 alpha 的图像。
+ *
+ * 与 WebGL/FFmpeg 的差异：为了在 1080p 下还能跑，**不做 3×3 邻域平均**，
+ * 只按单像素色差计算（边缘会略硬）；色差/alpha/despill 公式仍与导出一致。
+ * 仅在 WebGL 不可用时用于预览；导出始终走 FFmpeg。
+ */
+export function keyChromaImageData(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  key: ChromaKey,
+): void {
+  const count = Math.max(0, Math.floor(width) * Math.floor(height))
+  if (count <= 0 || data.length < count * 4) return
+  const { u: keyU, v: keyV } = keyUV(key)
+  const despill = despillParams(key)
+  for (let index = 0; index < count; index += 1) {
+    const offset = index * 4
+    const r = data[offset]
+    const g = data[offset + 1]
+    const b = data[offset + 2]
+    const { u, v } = rgbToChromaUV(r, g, b)
+    const du = u - keyU
+    const dv = v - keyV
+    const diff = Math.sqrt((du * du + dv * dv) / (255 * 255 * 2))
+    const alpha = chromaAlphaFromDiff(diff, key)
+    if (alpha <= 0) {
+      data[offset + 3] = 0
+      continue
+    }
+    if (alpha < 1) data[offset + 3] = Math.round(data[offset + 3] * alpha)
+    if (despill) {
+      const [dr, dg, db] = despillPixel([r, g, b], despill)
+      data[offset] = dr
+      data[offset + 1] = dg
+      data[offset + 2] = db
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // despill（vf_despill.c）
 // ---------------------------------------------------------------------------

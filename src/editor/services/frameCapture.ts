@@ -3,7 +3,7 @@ import { composeFrame, frameCompositionAt, type FrameImage, type FrameLayer } fr
 import type { Clip, Project, SourceInfo } from '../core/types'
 import { openSource, type FrameSourceHandle } from './animationRenderer'
 import { remoteName } from './assetReader'
-import { webglKeyer } from './webglKeyer'
+import { keyFrameProcessor } from './keyFrameProcessor'
 
 /**
  * 「导出当前帧」的副作用部分：把该时刻需要画面的每个片段 seek 到正确的源时间，
@@ -112,7 +112,7 @@ export async function captureFrameBlob(input: CaptureFrameInput): Promise<Captur
       project,
       time,
       frames,
-      keyFrame: webglKeyer,
+      keyFrame: keyFrameProcessor,
       createCanvas: (w, h) => {
         const off = document.createElement('canvas')
         off.width = Math.max(1, Math.round(w))
