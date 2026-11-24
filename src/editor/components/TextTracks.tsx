@@ -5,6 +5,7 @@ import type {
   PointerEvent as ReactPointerEvent,
 } from 'react'
 import { clamp } from '../core/timeline'
+import { isSegmentVisible, type TimelineTimeWindow } from '../core/timelineWindow'
 import { isTextLocked } from '../core/tracks'
 import type { TextClip, TextTrack } from '../core/types'
 import { useEditorStore, useEditorStoreApi } from '../store/EditorProvider'
@@ -36,10 +37,12 @@ interface EdgeState {
 export function TextTracks({
   onClipContextMenu,
   pad = PAD,
+  timeWindow,
 }: {
   /** 左侧留白：与标尺/主轨共用（有封面块时是 76，不是 12）。 */
   pad?: number
-  /** 右键片段：由 Timeline 统一弹菜单（这里只上报目标）。 */
+  /** 视口时间窗口：长片只渲染可见片段；缺省渲染全部。 */
+  timeWindow?: TimelineTimeWindow
   onClipContextMenu?: (event: ReactMouseEvent<HTMLElement>, clipId: string) => void
 } = {}) {
   const store = useEditorStoreApi()
@@ -191,7 +194,13 @@ export function TextTracks({
           data-text-track-id={track.id}
         >
           <div className="text-track-lane">
-            {track.clips.map((clip) => {
+            {track.clips
+              .filter(
+                (clip) =>
+                  !timeWindow ||
+                  isSegmentVisible({ start: clip.start, end: clip.end }, timeWindow),
+              )
+              .map((clip) => {
               const dragging = drag?.clipId === clip.id ? drag : null
               const trimming = edge?.clipId === clip.id ? edge : null
               let start = dragging ? dragging.start : clip.start

@@ -2289,6 +2289,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
           <AudioTracks
             pps={pps}
             pad={pad}
+            timeWindow={renderWindow}
             onClipContextMenu={(event, clipId) => openClipMenu(event, 'audio', clipId)}
             keySelection={keySelection}
             onSelectKeyframes={selectKeyframes}
@@ -2305,6 +2306,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
 
           <TextTracks
             pad={pad}
+            timeWindow={renderWindow}
             onClipContextMenu={(event, clipId) => openClipMenu(event, 'text', clipId)}
           />
 

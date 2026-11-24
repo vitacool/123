@@ -6,6 +6,7 @@ import { collectSnapPoints, snapTime } from '../core/snap'
 import type { KeyframeRef } from '../core/keyframeEdit'
 import { isAudioLocked } from '../core/tracks'
 import { clamp } from '../core/timeline'
+import { isSegmentVisible, type TimelineTimeWindow } from '../core/timelineWindow'
 import type { AudioClip, AudioTrack } from '../core/types'
 import { useEditorStore, useEditorStoreApi } from '../store/EditorProvider'
 import { ClipKeyframeBand, type SnapCandidate } from './ClipKeyframeBand'
@@ -109,6 +110,7 @@ export function AudioTracks({
   onRequestKeyframeMenu,
   keyframeSnapCandidates,
   autoSnap,
+  timeWindow,
 }: {
   pps: number
   /**
@@ -117,7 +119,8 @@ export function AudioTracks({
    * —— 看起来就是「音画不同步」。
    */
   pad?: number
-  /** 右键片段：由 Timeline 统一弹菜单（这里只上报目标）。 */
+  /** 视口时间窗口：长片只渲染可见片段；缺省渲染全部。 */
+  timeWindow?: TimelineTimeWindow
   onClipContextMenu?: (event: ReactMouseEvent<HTMLElement>, clipId: string) => void
   /** 复用主轨/叠加轨的 ClipKeyframeBand 交互与选中状态。 */
   keySelection?: { clipId: string; refs: KeyframeRef[] } | null
@@ -336,7 +339,16 @@ export function AudioTracks({
         >
           <AudioTrackHead track={track} />
           <div className="audio-clip-lane">
-            {track.clips.map((clip) => {
+            {track.clips
+              .filter(
+                (clip) =>
+                  !timeWindow ||
+                  isSegmentVisible(
+                    { start: clip.start, end: clip.start + audioClipDuration(clip) },
+                    timeWindow,
+                  ),
+              )
+              .map((clip) => {
               const dragging = drag?.clipId === clip.id ? drag : null
               const trimming = edge?.clipId === clip.id ? edge : null
               const duration = audioClipDuration(clip)
