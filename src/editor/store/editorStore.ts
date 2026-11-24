@@ -356,6 +356,8 @@ export interface EditorState {
     clipId: string,
     file: File,
   ) => Promise<boolean>
+  /** 生成整段倒放音频并把片段换成倒放素材（源区间镜像、淡化对调、音量关键帧镜像）。 */
+  reverseAudioClip: (trackId: string, clipId: string) => Promise<boolean>
   /** 更新素材缩略图（重新生成成功后调用；主素材同步更新）。 */
   updateAssetThumbnail: (assetId: string, thumbnail: string | undefined) => void
   /** 重命名素材（只改显示名，不改 url/blob）。 */

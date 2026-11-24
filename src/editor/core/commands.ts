@@ -100,7 +100,7 @@ import { remapProjectUrls } from './draft'
 import { normalizeBackground, withClipBackground } from './background'
 import type { CanvasBackground } from './types'
 import { clipFadeIn, clipFadeOut, clipVolume } from './clipAudio'
-import { findAudioClipLocation, replacedAudioSourcePatch } from './audio'
+import { findAudioClipLocation, replacedAudioSourcePatch, reverseAudioClipPatch } from './audio'
 import { canChangeClipSpeed, clipSpeedValue, hasSpeedVariation } from './speed'
 import { speedAttrsPatch } from './attributeClipboard'
 import { contiguousRunHeads } from './selection'
@@ -842,6 +842,25 @@ export function createAddAudioClipCommand(
     selectionAfter: clip.id,
     execute(project) {
       return addAudioClipToProject(project, trackId, clip, trackName) ?? project
+    },
+  }
+}
+
+/** 把音频片段换成倒放素材：源区间镜像、淡化对调、音量关键帧镜像，其余参数保留。 */
+export function createReverseAudioClipCommand(
+  trackId: string,
+  clipId: string,
+  sourceUrl: string,
+  sourceDuration: number,
+): EditorCommand {
+  return {
+    label: '音频倒放',
+    selectionAfter: clipId,
+    execute(project) {
+      const location = findAudioClipLocation(project, clipId)
+      if (!location || location.track.id !== trackId) return project
+      const patch = reverseAudioClipPatch(location.clip, sourceUrl, sourceDuration)
+      return updateAudioClipInProject(project, trackId, clipId, patch) ?? project
     },
   }
 }

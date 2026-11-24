@@ -167,6 +167,40 @@ export function updateAudioClipInProject(
   }
 }
 
+/** 音频倒放后的片段补丁：源区间镜像、淡入淡出与曲线对调、音量关键帧镜像。 */
+export function reverseAudioClipPatch(
+  clip: AudioClip,
+  sourceUrl: string,
+  sourceDuration: number,
+): Partial<Omit<AudioClip, 'id'>> {
+  const duration = Number.isFinite(sourceDuration) ? Math.max(0.05, sourceDuration) : 0.05
+  const start = Math.max(0, duration - clip.sourceEnd)
+  const end = Math.min(duration, duration - clip.sourceStart)
+  const volumeKeys = clip.anim?.volume
+  const anim = clip.anim
+    ? {
+        ...clip.anim,
+        ...(volumeKeys
+          ? {
+              volume: volumeKeys
+                .map((key) => ({ ...key, t: 1 - key.t }))
+                .sort((left, right) => left.t - right.t),
+            }
+          : {}),
+      }
+    : undefined
+  return {
+    sourceUrl,
+    sourceStart: start,
+    sourceEnd: Math.max(start + 0.05, end),
+    fadeIn: clip.fadeOut,
+    fadeOut: clip.fadeIn,
+    fadeInCurve: clip.fadeOutCurve,
+    fadeOutCurve: clip.fadeInCurve,
+    ...(anim ? { anim } : {}),
+  }
+}
+
 /** 换素材时把源区间夹到新素材时长内；保留尽量多的原入出点。 */
 export function replacedAudioSourcePatch(
   clip: AudioClip,

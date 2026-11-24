@@ -92,11 +92,11 @@
 | P3-12 淡入淡出只有线性 | ✅ 已修 | 新增 `fadeInCurve`/`fadeOutCurve`（linear / exp / log）：预览包络与导出 `afade:curve=` 同一套；视频/音频片段面板均可选；倒放对调、分离音频迁移曲线 | `tests/clipAudio.test.ts`（包络/映射）+ `tests/exportPlan.test.ts`（曲线参数）+ 动画字段表 |
 | P3-11 繁简转换写死 | ✅ 已修 | 智能字幕新增「输出字形：简体/繁体/保持原文」；opencc 转换从 worker 硬编码改为显式选项；**ASR 缓存键包含字形变体**，切换不会复用旧结果 | 新增 `tests/scriptConvert.test.ts` + `tests/asr.test.ts` 变体键用例 |
 | P3-15 无错误边界 | ✅ 已修（边界） | 新增 `ErrorBoundary`：任一子组件渲染抛错时显示「重新加载」恢复界面并保留错误详情，不再整页白屏 | 新增 `tests/errorBoundary.test.ts`；完整 i18n/文案注入仍未做 |
-| P3-14 音频片段能力缺口 | ✅ 部分 | 音频片段新增**变速 0.1–10x（保音高/变调）**：时长 = 源跨度 ÷ 倍率；分割/左右裁/边缘拖动按倍率换算源区间；预览 `playbackRate` + `preservesPitch`；导出 `atempo` / `asetrate`。另新增**换素材**：保留起点/音量/淡化/倍率，源区间按新素材时长夹取。**倒放未做**（需要生成倒放音频资产的后台任务，属较大改造） | `tests/audio.test.ts` 新增变速换算、换素材、导图用例 |
+| P3-14 音频片段能力缺口 | ✅ 已修 | 音频片段新增**变速 0.1–10x（保音高/变调）**；**换素材**；**倒放**（FFmpeg `areverse` 生成整段倒放音频 → 源区间镜像、淡化/曲线对调、音量关键帧镜像）。分割/裁剪/边缘拖动均按倍率换算 | `tests/audio.test.ts` 新增变速、换素材、倒放镜像、导图用例 |
 
-**P3 其余待做**：slip/slide/roll、长片虚拟化、素材库文件夹/筛选、音频片段倒放/换素材、完整文案注入（i18n）。
+**P3 其余待做**：slip/slide/roll、长片虚拟化、素材库文件夹/筛选、完整文案注入（i18n）。
 
-**P3 + 音频变速/换素材验证**：`tsc` 0 错误；全量 `vitest` **1220 passed / 2 skipped**；完整 e2e（Edge）**22 passed**；全仓 `eslint` 0 error（22 条存量 warning）。
+**P3 + 音频变速/换素材/倒放验证**：`tsc` 0 错误；全量 `vitest` **1221 passed / 2 skipped**；完整 e2e（Edge）**22 passed**；全仓 `eslint` 0 error（22 条存量 warning）。
 
 **当前验证（Round 3 收尾，Batch C 完成）**：`tsc` 0 错误；全量 `vitest` **1189 passed / 2 skipped**；完整 e2e（Edge）**22 passed**；本批改动 `eslint` 0 error（仅存量警告）。
 

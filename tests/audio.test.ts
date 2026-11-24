@@ -7,6 +7,7 @@ import {
   getAudioActionAvailability,
   moveAudioClipInProject,
   replacedAudioSourcePatch,
+  reverseAudioClipPatch,
   resizeAudioClipInProject,
   splitAudioClipInProject,
   trimAudioClipAt,
@@ -97,6 +98,39 @@ describe('audio timeline operations', () => {
     const leftTrimmed = resizeAudioClipInProject(project, 'track-a', 'audio-a', 'left', 1, 8)
     expect(leftTrimmed?.audioTracks?.[0].clips[0].sourceStart).toBe(1)
     expect(leftTrimmed?.audioTracks?.[0].clips[0].start).toBe(3)
+  })
+
+  it('倒放：源区间镜像、淡化/曲线对调、音量关键帧镜像', () => {
+    const clip = makeClip({
+      sourceStart: 2,
+      sourceEnd: 6,
+      fadeIn: 1,
+      fadeOut: 2,
+      fadeInCurve: 'exp',
+      fadeOutCurve: 'log',
+      anim: {
+        volume: [
+          { t: 0.2, value: 2, ease: 'linear' },
+          { t: 0.8, value: 0.5, ease: 'linear' },
+        ],
+      },
+    })
+    const patch = reverseAudioClipPatch(clip, 'blob:reversed', 8)
+    // 8-6=2 .. 8-2=6（原区间对称，便于验证）
+    expect(patch.sourceStart).toBe(2)
+    expect(patch.sourceEnd).toBe(6)
+    expect(patch.sourceUrl).toBe('blob:reversed')
+    // 淡化值/曲线对调
+    expect(patch.fadeIn).toBe(2)
+    expect(patch.fadeOut).toBe(1)
+    expect(patch.fadeInCurve).toBe('log')
+    expect(patch.fadeOutCurve).toBe('exp')
+    // 关键帧 t 镜像并重新排序
+    const keys = patch.anim?.volume ?? []
+    expect(keys[0].t).toBeCloseTo(0.2)
+    expect(keys[0].value).toBe(0.5)
+    expect(keys[1].t).toBeCloseTo(0.8)
+    expect(keys[1].value).toBe(2)
   })
 
   it('换素材：源区间夹到新时长内，起点/音量/倍率保持不变', () => {

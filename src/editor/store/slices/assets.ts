@@ -3,7 +3,8 @@ import { createId } from '../../core/ids'
 import { createInitialProject } from '../../core/operations'
 import { projectNameFromSource } from '../../core/projectLibrary'
 import { isAssetReferenced, unusedAssets, assetKindOf } from '../../core/assets'
-import { createRemoveAssetClipsCommand, createAddAudioClipCommand, createAddClipCommand, createAddClipToNewOverlayTrackCommand, createRelinkAssetCommand, createReplaceAudioSourceCommand } from '../../core/commands'
+import { createRemoveAssetClipsCommand, createAddAudioClipCommand, createAddClipCommand, createAddClipToNewOverlayTrackCommand, createRelinkAssetCommand, createReplaceAudioSourceCommand, createReverseAudioClipCommand } from '../../core/commands'
+import { reverseAudioAsset } from '../../services/reverseAudio'
 import { readAssetFile } from '../../services/assetReader'
 import { persistImportedAssets } from '../../services/draftStore'
 import { resolveAssetPlacement } from '../../core/assetPlacement'
@@ -14,7 +15,7 @@ import type { StoreGet, StoreInternals, StoreSet } from '../internal'
 
 
 /** assets slice：素材库、主素材、待回收素材与倒放任务状态 */
-export type AssetsSlice = Pick<EditorState, 'source' | 'assets' | 'missingAssets' | 'pendingReclaim' | 'reverseJob' | 'loadSource' | 'addAssets' | 'removeAsset' | 'relinkMissingAsset' | 'replaceAudioClipSource' | 'updateAssetThumbnail' | 'renameAsset' | 'cleanupUnusedAssets' | 'disposePendingAssets' | 'addAssetToTimeline' | 'updateSourceMeta' | 'cancelReverse'>
+export type AssetsSlice = Pick<EditorState, 'source' | 'assets' | 'missingAssets' | 'pendingReclaim' | 'reverseJob' | 'loadSource' | 'addAssets' | 'removeAsset' | 'relinkMissingAsset' | 'replaceAudioClipSource' | 'reverseAudioClip' | 'updateAssetThumbnail' | 'renameAsset' | 'cleanupUnusedAssets' | 'disposePendingAssets' | 'addAssetToTimeline' | 'updateSourceMeta' | 'cancelReverse'>
 
 export function createAssetsSlice(ctx: {
   get: StoreGet
@@ -326,6 +327,64 @@ export function createAssetsSlice(ctx: {
       }
       await persistImportedAssets([asset], { notify: get().notify })
       get().notify(`已把音频片段替换为「${asset.name}」`, 'success')
+      return true
+    },
+    reverseAudioClip: async (trackId, clipId) => {
+      const state = get()
+      const track = (state.project.audioTracks ?? []).find((item) => item.id === trackId)
+      const clip = track?.clips.find((item) => item.id === clipId)
+      if (!track || !clip) {
+        get().notify('目标音频片段不存在', 'warning')
+        return false
+      }
+      const asset = state.assets.find((item) => item.url === clip.sourceUrl)
+      if (!asset || asset.kind !== 'audio' || !(asset.duration > 0)) {
+        get().notify('找不到原音频素材或时长未知，无法倒放', 'warning')
+        return false
+      }
+      let file: File
+      try {
+        file = await reverseAudioAsset(asset, {
+          onStatus: (message) => get().notify(message, 'info'),
+        })
+      } catch (error) {
+        const cancelled =
+          error instanceof Error && error.name === 'AbortError'
+        get().notify(
+          cancelled
+            ? '已取消音频倒放'
+            : `音频倒放失败：${error instanceof Error ? error.message : String(error)}`,
+          cancelled ? 'info' : 'error',
+        )
+        return false
+      }
+      const url = URL.createObjectURL(file)
+      const reversedAsset: MediaAsset = {
+        id: createId('asset'),
+        url,
+        name: file.name,
+        size: file.size,
+        duration: asset.duration,
+        width: 0,
+        height: 0,
+        kind: 'audio',
+        file,
+        hasAudio: true,
+      }
+      const previousAssets = get().assets
+      set({ assets: [...previousAssets, reversedAsset] })
+      if (
+        !run(
+          createReverseAudioClipCommand(trackId, clipId, url, asset.duration),
+        )
+      ) {
+        set({ assets: previousAssets })
+        URL.revokeObjectURL(url)
+        get().notify('音频倒放失败：片段已被删除', 'warning')
+        return false
+      }
+      await persistImportedAssets([reversedAsset], { notify: get().notify })
+      get().notify('已生成倒放音频并替换片段', 'success')
       return true
     },
     cleanupUnusedAssets: () => {

@@ -21,8 +21,10 @@ export function AudioPropertiesPanel({ track, clip }: AudioPropertiesPanelProps)
   const playhead = useEditorStore((state) => state.playhead)
   const moveAudioClip = useEditorStore((state) => state.moveAudioClip)
   const replaceAudioClipSource = useEditorStore((state) => state.replaceAudioClipSource)
+  const reverseAudioClip = useEditorStore((state) => state.reverseAudioClip)
   const replaceInputRef = useRef<HTMLInputElement | null>(null)
   const [replacing, setReplacing] = useState(false)
+  const [reversingAudio, setReversingAudio] = useState(false)
   const splitAtPlayhead = useEditorStore((state) => state.splitAtPlayhead)
   const trimLeftAtPlayhead = useEditorStore((state) => state.trimLeftAtPlayhead)
   const trimRightAtPlayhead = useEditorStore((state) => state.trimRightAtPlayhead)
@@ -151,10 +153,25 @@ export function AudioPropertiesPanel({ track, clip }: AudioPropertiesPanelProps)
             <button
               type="button"
               className="button mini"
-              disabled={replacing}
+              disabled={replacing || reversingAudio}
               onClick={() => replaceInputRef.current?.click()}
             >
               {replacing ? '正在读取素材…' : '替换素材…'}
+            </button>
+            <button
+              type="button"
+              className="button mini"
+              disabled={replacing || reversingAudio}
+              onClick={async () => {
+                setReversingAudio(true)
+                try {
+                  await reverseAudioClip(track.id, clip.id)
+                } finally {
+                  setReversingAudio(false)
+                }
+              }}
+            >
+              {reversingAudio ? '正在倒放…' : '倒放'}
             </button>
           </div>
           <input
