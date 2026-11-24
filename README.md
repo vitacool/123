@@ -522,40 +522,43 @@ pnpm dev              # 开发服务器 http://127.0.0.1:5173/（带 COOP/COEP�
 
 pnpm typecheck        # tsc -b（类型门禁：strict + noUnusedLocals/Parameters）
 pnpm lint             # ESLint flat config（见下：只报告，不自动修复）
-pnpm test             # vitest（当前 79 文件 / 989 通过）
+pnpm test             # vitest（当前 119 文件 / 1243 通过 / 2 skipped）
 pnpm test:coverage    # 同上 + v8 覆盖率（产物在 coverage/，先只报告不设门槛）
 pnpm build            # tsc -b && vite build（应用产物 dist/）
 pnpm build:lib        # tsc -b && vite build --config vite.config.lib.ts（库产物 dist-lib/ + .d.ts）
 ```
 
+> **Windows 本机构建注意**：在部分 Windows 环境，`pnpm build` / `pnpm build:lib` 可能在
+> `vite:worker-import-meta-url` 阶段失败，报
+> `remove C:\...\Temp\esbuild-xxx: Access is denied`。这是 esbuild 清理临时文件时被杀软/索引器
+> 锁住，不是源码或类型错误（`tsc` / `vitest` / e2e 均通过）。处理方式：给 `node_modules` 与系统临时目录
+> 加 Defender 排除，或直接以 CI（Ubuntu）的 `build:lib` 结果为准。
+
 **ESLint**：[eslint.config.js](eslint.config.js) 用 flat config，`typescript-eslint` + `eslint-plugin-react-hooks`，
 其中 `react-hooks/exhaustive-deps` 与 `rules-of-hooks` 是 **error**。策略是"先量化、不自动修"：
 
-- 存量 101 个 error 通过 [eslint-suppressions.json](eslint-suppressions.json) 记录为**基线条目**（ESLint 10 的 bulk
-  suppressions）：规则仍是 error，**新增**违规会立刻让 `pnpm lint` 失败，而存量不会被批量改写。
-- 分类（共 97 条抑制 + 14 条 warning）：`exhaustive-deps` 46、`no-useless-assignment` 16、
-  `set-state-in-effect` 14、`no-non-null-assertion` 13、`refs` 6、`prefer-const` 6、
-  `no-control-regex` 5（导出文件名清洗用，刻意保留）、其余为单点问题。集中在
-  `components/Timeline.tsx`(25)、`Preview.tsx`(9)、`ContextMenu.tsx`(7)、`ExportDialog.tsx`(7)。
-- 与 hooks 依赖相关的 46 条**没有**批量加依赖数组：那会改变运行时行为，需要逐条评估后再手工改。
+- 存量违规通过 [eslint-suppressions.json](eslint-suppressions.json) 记录为**基线条目**（ESLint 10 的 bulk
+  suppressions）：规则仍是 error，**新增**违规会立刻让 `pnpm lint` 失败。当前实测 **0 error / 22 warning**。
+- 存量的具体规则/文件分布以 `eslint-suppressions.json` 为准；与 hooks 依赖相关的条目**没有**批量加依赖数组：
+  那会改变运行时行为，需要逐条评估后再手工改。
 
 **覆盖率基线**（`pnpm test:coverage`，只统计**可单测的逻辑层** `core/` + `store/`）：
-语句 **78.35%** / 分支 **77.66%** / 函数 **79.41%**。不统计 `components/` 与 `services/` ——
-Timeline（2239 行）、Preview（1600 行）、ffmpegExporter 需要真实浏览器与 FFmpeg.wasm，单测覆盖必然接近 0，
-把它们算进来只会让数字变成噪声；它们的验证在 Playwright E2E。当前最弱的文件（后续补测的优先目标）：
-`core/captionModels.ts` 0%、`store/slices/playback.ts` 35.3%、`store/slices/editing.ts` 35.9%、
-`core/cover.ts` 39.1%、`core/frameCompose.ts` 39.9%、`store/slices/selection.ts` 43.3%、
-`core/commands.ts` 53.3%、`core/keyframes.ts` 53.9%。
+历史基线为语句 **78.35%** / 分支 **77.66%** / 函数 **79.41%**（最新一次未重跑覆盖率，以实测输出为准）。
+不统计 `components/` 与 `services/` —— Timeline（2200+ 行）、Preview（1600+ 行）、ffmpegExporter
+需要真实浏览器与 FFmpeg.wasm，单测覆盖必然接近 0，把它们算进来只会让数字变成噪声；它们的验证在 Playwright E2E。
 
 **Playwright E2E**（Chromium + Firefox）：
 
 ```bash
-pnpm test:e2e              # 两个浏览器都跑（6 个用例 × 2 = 12）
+pnpm test:e2e              # Chromium + Firefox 全量
 pnpm test:e2e:chromium     # 只跑 Chromium
 pnpm test:e2e:firefox      # 只跑 Firefox
+# 没有安装 Playwright 浏览器时，可用系统 Edge：
+pnpm exec playwright test --project=edge
 ```
 
-覆盖三条主链路（README 上游的 `.verify/` 是更早的手写 CDP 脚本，Playwright 是正式入口）：
+当前 e2e 共 **22 条**（本机 Edge 实测 22 passed）；覆盖导入/导出、拖动/裁剪、草稿恢复、
+重播、工程文件导入与持久化、P0/P2 回归矩阵等。
 
 | 用例 | 断言 |
 | --- | --- |
