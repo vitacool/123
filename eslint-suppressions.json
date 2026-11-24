@@ -19,7 +19,7 @@
   },
   "src/editor/components/AudioWaveform.tsx": {
     "react-hooks/exhaustive-deps": {
-      "count": 2
+      "count": 1
     },
     "react-hooks/set-state-in-effect": {
       "count": 1
