@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { ASPECT_PRESETS } from '../core/constants'
+import { formatSavedAt } from '../core/format'
 import { DEFAULT_PROJECT_NAME, normalizeProjectName } from '../core/projectLibrary'
 import { toggleTheme, type FrameCutTheme, type ResolvedTheme } from '../core/theme'
 import { getProjectEnd } from '../core/timeline'
@@ -45,6 +46,8 @@ export function TopBar({
   const setAspectRatio = useEditorStore((state) => state.setAspectRatio)
   const openExportDialog = useEditorStore((state) => state.openExportDialog)
   const cropSession = useEditorStore((state) => state.cropSession)
+  const draftSave = useEditorStore((state) => state.draftSave)
+  const draftSaveLocked = useEditorStore((state) => state.draftSaveLocked)
   const totalDuration = getProjectEnd(project)
   /** 项目名内联编辑：draft 为 null 表示没在编辑。 */
   const [nameDraft, setNameDraft] = useState<string | null>(null)
@@ -52,6 +55,30 @@ export function TopBar({
   // 未提供项目名时退回「主素材名」，保持旧版显示。
   const displayName = projectName ?? source?.name ?? DEFAULT_PROJECT_NAME
   const canRename = Boolean(onRenameProject)
+
+  /** 保存状态徽标：让用户知道最后一次改动有没有落盘。 */
+  const saveLabel = draftSaveLocked
+    ? '另一页正在编辑 · 不保存'
+    : draftSave.status === 'saved'
+      ? `已保存${draftSave.at ? ` ${formatSavedAt(draftSave.at)}` : ''}`
+      : draftSave.status === 'saving'
+        ? '保存中…'
+        : draftSave.status === 'pending'
+          ? '未保存'
+          : draftSave.status === 'error'
+            ? '保存失败'
+            : ''
+  const saveTitle = draftSaveLocked
+    ? '另一个标签页正在编辑同一项目：本页改动不会写入草稿，避免两个窗口互相覆盖'
+    : draftSave.status === 'pending'
+      ? '改动会在约 0.7 秒后自动保存'
+      : draftSave.status === 'saving'
+        ? '正在写入本地草稿'
+        : draftSave.status === 'saved'
+          ? draftSave.at
+            ? `最后保存于 ${formatSavedAt(draftSave.at)}`
+            : '已保存'
+          : '本次改动未写入草稿：请检查存储空间，或先删掉一个旧项目'
 
   const commitName = () => {
     if (nameDraft === null) return
@@ -167,6 +194,16 @@ export function TopBar({
             <Icon name="plus" size={16} />
             新建项目
           </button>
+        )}
+        {saveLabel && (
+          <span
+            className={`save-badge is-${draftSaveLocked ? 'locked' : draftSave.status}`}
+            role="status"
+            aria-live="polite"
+            title={saveTitle}
+          >
+            {saveLabel}
+          </span>
         )}
         <span className="local-badge">
           <Icon name="spark" size={13} />

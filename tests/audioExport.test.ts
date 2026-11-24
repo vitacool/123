@@ -110,6 +110,15 @@ describe('audio-only export plan', () => {
     expect(args[args.indexOf('-t') + 1]).toBe('3')
   })
 
+  it('多轨混音终点有限幅器（避免 100% + 100% 削波）', () => {
+    let project = makeProject()
+    project = addAudioTrackToProject(project, 'audio-track').project
+    project = addAudioClipToProject(project, 'audio-track', clipAudio())!
+    const plan = buildExportPlan(project, [SOURCE], true)
+    expect(plan.graph).toContain('alimiter=limit=0.97:level=false')
+    expect(plan.graph).toContain('[amix]alimiter')
+  })
+
   it('主轨有转场时音频仍用 acrossfade，且图里没有任何视频标签', () => {
     const base = makeProject()
     const template = base.clips[0]

@@ -8,6 +8,60 @@ import type { Clip, MediaAsset, Project, ReverseAssetOrigin } from './types'
  * 「素材缺失」，UI 需要显示占位而不是静默画错素材。
  */
 
+/** 素材文件名归一化：去扩展名与 HEVC 代理后缀，忽略大小写与空白。 */
+function duplicateKey(name: string): string {
+  return (name ?? '')
+    .replace(/\.[^.]+$/, '')
+    .replace(/-(h264|h265|hevc)$/i, '')
+    .trim()
+    .toLowerCase()
+}
+
+/**
+ * 判断一次导入是否与素材库里已有素材重复（同名 + 同大小）。
+ * 用于在读取/转码**之前**跳过，避免同一文件反复导入把 IndexedDB 配额翻倍。
+ * 注：HEVC 代理的 `size` 是转码后的体积，与原文件不同，这类素材不在判重范围。
+ */
+export function findDuplicateAsset(
+  file: { name: string; size: number },
+  assets: readonly MediaAsset[],
+): MediaAsset | undefined {
+  const key = duplicateKey(file.name)
+  return assets.find(
+    (asset) => asset.size === file.size && duplicateKey(asset.name) === key,
+  )
+}
+
+/** 素材库排序方式：导入顺序 / 名称 / 时长（长→短）/ 大小（大→小）。 */
+export type AssetSortMode = 'added' | 'name' | 'duration' | 'size'
+
+export const ASSET_SORT_OPTIONS: readonly { value: AssetSortMode; label: string }[] = [
+  { value: 'added', label: '导入顺序' },
+  { value: 'name', label: '名称' },
+  { value: 'duration', label: '时长（长→短）' },
+  { value: 'size', label: '大小（大→小）' },
+]
+
+/** 返回排序后的副本；added 保持原顺序（稳定）。 */
+export function sortAssets(
+  assets: readonly MediaAsset[],
+  mode: AssetSortMode,
+): MediaAsset[] {
+  const copy = [...assets]
+  if (mode === 'added') return copy
+  if (mode === 'name') {
+    return copy.sort((left, right) =>
+      left.name.localeCompare(right.name, 'zh-Hans-CN', {
+        numeric: true,
+        sensitivity: 'base',
+      }),
+    )
+  }
+  const value = (asset: MediaAsset): number =>
+    mode === 'duration' ? asset.duration : asset.size
+  return copy.sort((left, right) => value(right) - value(left))
+}
+
 /** 当前素材库里的 url 集合。 */
 export function assetUrlSet(assets: readonly MediaAsset[]): Set<string> {
   return new Set(assets.map((asset) => asset.url))

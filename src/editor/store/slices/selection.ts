@@ -177,7 +177,34 @@ export function createSelectionSlice(ctx: {
       for (const track of state.project.textTracks ?? []) {
         if (isTextLocked(track)) lockedTrackIds.add(track.id)
       }
-      const plan = planPaste(state.project, payload, state.playhead, { lockedTrackIds })
+      // 目标轨：当前选中的叠加片段所在轨。先点目标叠加轨再粘贴即可跨轨。
+      const targetLocation = findClipLocation(state.project, state.selectedClipId)
+      const targetOverlayTrackId =
+        targetLocation?.track && !isOverlayLocked(targetLocation.track)
+          ? targetLocation.track.id
+          : null
+      // 原轨被锁且没有指定目标轨：明确拒绝，而不是静默新建一条轨。
+      const lockedOrigin =
+        !targetOverlayTrackId &&
+        payload.items.some(
+          (item) =>
+            item.kind === 'overlay' && item.trackId && lockedTrackIds.has(item.trackId),
+        )
+      if (lockedOrigin) {
+        state.notify('原叠加轨已锁定：请先解锁，或选中目标叠加轨再粘贴', 'warning')
+        return
+      }
+      if (
+        isMainLocked(state.project) &&
+        payload.items.some((item) => item.kind === 'main')
+      ) {
+        state.notify('主轨已锁定，无法粘贴', 'warning')
+        return
+      }
+      const plan = planPaste(state.project, payload, state.playhead, {
+        lockedTrackIds,
+        targetOverlayTrackId,
+      })
       const outIds: string[] = []
       const nextId: IdFactory = (prefix) => createId(prefix === 'overlay' ? 'overlay' : prefix)
       if (run(createPasteCommand(plan, nextId, outIds))) {
@@ -209,9 +236,8 @@ export function createSelectionSlice(ctx: {
       }).filter((item): item is { id: string; start: number; duration: number } => item !== null)
       if (items.length === 0) return
       const moves = planBatchMove(items, delta)
-      if (run(createMoveManyCommand(moves.map((move) => move.id), moves[0].delta))) {
-        get().notify(`已移动 ${moves.length} 个片段`, 'info')
-      }
+      // 键盘逐帧微调会连续触发，不弹 toast（否则每按一次都刷屏）。
+      run(createMoveManyCommand(moves.map((move) => move.id), moves[0].delta))
     },
     copyClipColor: (clipId) => {
       const state = get()

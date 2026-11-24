@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { audioClipDuration } from '../core/audio'
 import type { AudioClip, SourceInfo } from '../core/types'
-import { getAudioPeaks, type AudioPeaks } from '../services/audioWaveform'
+import { getAudioPeaks, samplePeakRange, type AudioPeaks } from '../services/audioWaveform'
 import { useEditorStore } from '../store/EditorProvider'
 import { readThemeToken } from '../services/themeTokens'
 
@@ -47,23 +46,15 @@ export function AudioWaveform({ clip, asset, width, height }: AudioWaveformProps
       if (!context) return
       context.clearRect(0, 0, pixelWidth, pixelHeight)
       if (!peaks || peaks.duration <= 0) return
-      const duration = audioClipDuration(clip)
-      if (duration <= 0) return
-      const startRatio = Math.min(1, clip.sourceStart / peaks.duration)
-      const endRatio = Math.min(1, clip.sourceEnd / peaks.duration)
       const center = pixelHeight / 2
       context.fillStyle = readThemeToken('--fc-waveform', 'rgba(61, 89, 106, 0.55)')
       const step = Math.max(2, Math.round(2 * ratio))
-      for (let x = 0; x < pixelWidth; x += step) {
-        const position = x / Math.max(1, pixelWidth)
-        const sourcePosition = startRatio + (endRatio - startRatio) * position
-        const index = Math.min(
-          peaks.peaks.length - 1,
-          Math.max(0, Math.round(sourcePosition * (peaks.peaks.length - 1))),
-        )
-        const amplitude = peaks.peaks[index] * center * 0.9
-        context.fillRect(x, center - amplitude, Math.max(1, step - 1), amplitude * 2)
-      }
+      const columns = Math.max(1, Math.floor(pixelWidth / step))
+      const values = samplePeakRange(peaks, clip.sourceStart, clip.sourceEnd, columns)
+      values.forEach((amplitude, index) => {
+        const height = amplitude * center * 0.9
+        context.fillRect(index * step, center - height, Math.max(1, step - 1), height * 2)
+      })
     }
     raf = requestAnimationFrame(paint)
     return () => cancelAnimationFrame(raf)

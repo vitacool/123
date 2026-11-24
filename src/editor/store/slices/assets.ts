@@ -3,7 +3,9 @@ import { createId } from '../../core/ids'
 import { createInitialProject } from '../../core/operations'
 import { projectNameFromSource } from '../../core/projectLibrary'
 import { isAssetReferenced, unusedAssets, assetKindOf } from '../../core/assets'
-import { createRemoveAssetClipsCommand, createAddAudioClipCommand, createAddClipCommand, createAddClipToNewOverlayTrackCommand } from '../../core/commands'
+import { createRemoveAssetClipsCommand, createAddAudioClipCommand, createAddClipCommand, createAddClipToNewOverlayTrackCommand, createRelinkAssetCommand } from '../../core/commands'
+import { readAssetFile } from '../../services/assetReader'
+import { persistImportedAssets } from '../../services/draftStore'
 import { resolveAssetPlacement } from '../../core/assetPlacement'
 import type { AssetPlacementIntent } from '../../core/assetPlacement'
 import { IMAGE_DEFAULT_DURATION } from '../../core/image'
@@ -12,7 +14,7 @@ import type { StoreGet, StoreInternals, StoreSet } from '../internal'
 
 
 /** assets slice：素材库、主素材、待回收素材与倒放任务状态 */
-export type AssetsSlice = Pick<EditorState, 'source' | 'assets' | 'missingAssets' | 'pendingReclaim' | 'reverseJob' | 'loadSource' | 'addAssets' | 'removeAsset' | 'cleanupUnusedAssets' | 'disposePendingAssets' | 'addAssetToTimeline' | 'updateSourceMeta' | 'cancelReverse'>
+export type AssetsSlice = Pick<EditorState, 'source' | 'assets' | 'missingAssets' | 'pendingReclaim' | 'reverseJob' | 'loadSource' | 'addAssets' | 'removeAsset' | 'relinkMissingAsset' | 'updateAssetThumbnail' | 'renameAsset' | 'cleanupUnusedAssets' | 'disposePendingAssets' | 'addAssetToTimeline' | 'updateSourceMeta' | 'cancelReverse'>
 
 export function createAssetsSlice(ctx: {
   get: StoreGet
@@ -158,9 +160,28 @@ export function createAssetsSlice(ctx: {
         current.source?.url === asset.url
           ? assets.find((item) => item.kind !== 'audio') ?? null
           : current.source
+      const nextMissingAssets = removeClips
+        ? // 连带删片段后，这个素材不再需要占位记录。
+          current.missingAssets.filter((item) => item.url !== asset.url)
+        : referenced
+          ? [
+              // 「仅从素材库移除」必须把素材写进 missingAssets：占位片段的
+              // 存活依据是 missingAssets，不是 pendingReclaim（后者只活在本会话，
+              // 刷新就没了）。不写的话，重载时 pruneProjectUrls 会把引用它的
+              // 片段全部剔掉——用户看到的「片段变空白」会在刷新后直接消失。
+              ...current.missingAssets.filter((item) => item.url !== asset.url),
+              {
+                url: asset.url,
+                name: asset.name,
+                kind: assetKindOf(asset),
+                duration: asset.duration,
+              },
+            ]
+          : current.missingAssets
       set({
         assets,
         source: nextSource,
+        missingAssets: nextMissingAssets,
         pendingReclaim: {
           ...current.pendingReclaim,
           [assetId]: {
@@ -175,7 +196,106 @@ export function createAssetsSlice(ctx: {
       })
       // 如果它已经没有任何引用（含历史栈），这里立刻回收；否则先挂着等撤销窗口关闭。
       reconcilePendingAssets()
-      state.notify(`已删除素材「${asset.name}」，撤销可恢复`, 'info')
+      state.notify(
+        removeClips
+          ? `已删除素材「${asset.name}」及关联片段，撤销可恢复`
+          : `已删除素材「${asset.name}」，片段保留为占位`,
+        'info',
+      )
+    },
+    /**
+     * 重新链接缺失素材：把工程里所有引用 `url` 的地方改到新读入的素材上。
+     * 片段入出点、关键帧、音量都保留，只换源；成功后落盘 Blob。
+     * 旧的 missingAssets 记录会保留到下一次草稿恢复时由引用关系自动清理，
+     * 这样撤销重链后片段仍然有占位依据（不会被当成无主片段剔除）。
+     */
+    relinkMissingAsset: async (url, file) => {
+      if (!get().missingAssets.some((item) => item.url === url)) {
+        get().notify('该素材已不需要重新链接', 'info')
+        return false
+      }
+      let asset: MediaAsset
+      try {
+        asset = await readAssetFile(file, {
+          onTranscodeStatus: (status) => get().notify(status, 'info'),
+        })
+      } catch (error) {
+        get().notify(
+          `读取素材失败：${error instanceof Error ? error.message : String(error)}`,
+          'error',
+        )
+        return false
+      }
+      // 先把新素材放进 assets，再跑命令：run 内部会按「URL → assetId」重建
+      // 字幕联动，若此时还找不到新素材的 URL，link.assetId 会被当成陌生 key，
+      // 关联字幕可能被判成「来源片段已删除」而删掉。
+      const previousAssets = get().assets
+      set({
+        assets: [
+          ...previousAssets.filter(
+            (item) => item.id !== asset.id && item.url !== asset.url,
+          ),
+          asset,
+        ],
+      })
+      if (!run(createRelinkAssetCommand(url, asset.url, asset.id))) {
+        set({ assets: previousAssets })
+        URL.revokeObjectURL(asset.url)
+        get().notify('重新链接失败：工程里没有引用该素材的位置', 'warning')
+        return false
+      }
+      const current = get()
+      const currentSource = current.source
+      const nextSource =
+        currentSource?.url === url
+          ? asset
+          : // 原来主素材就是这条缺失素材（删除后 source 变 null）时，重链成功后要
+            // 重新把它接回 source，否则预览/导出会缺主素材尺寸。
+            (currentSource ?? (assetKindOf(asset) === 'audio' ? null : asset))
+      set({
+        source: nextSource,
+        // 这里**故意保留**旧的 missingAssets 记录：重链是进历史的，
+        // 用户撤销后片段会重新指向旧 URL。若此刻删掉记录，下一次加载
+        // pruneProjectUrls 会把撤销回来的片段当成无主片段剔掉（丢工作）。
+        // 未引用的记录会在 restoreDraft 的 filterReferencedMissingAssets 里自动清掉。
+      })
+      // 新素材 Blob 必须立刻落盘：否则刷新后占位又会回来。
+      await persistImportedAssets([asset], { notify: get().notify })
+      // 旧 URL 已经没人引用，待回收素材可以真正释放了。
+      reconcilePendingAssets()
+      get().notify(`已重新链接「${asset.name}」`, 'success')
+      return true
+    },
+    updateAssetThumbnail: (assetId, thumbnail) => {
+      const state = get()
+      const asset = state.assets.find((item) => item.id === assetId)
+      if (!asset) return
+      set({
+        assets: state.assets.map((item) =>
+          item.id === assetId ? { ...item, thumbnail } : item,
+        ),
+        source:
+          state.source && state.source.url === asset.url
+            ? { ...state.source, thumbnail }
+            : state.source,
+      })
+    },
+    renameAsset: (assetId, name) => {
+      const state = get()
+      const asset = state.assets.find((item) => item.id === assetId)
+      if (!asset) return
+      const nextName = name.trim().slice(0, 200)
+      if (!nextName || nextName === asset.name) return
+      set({
+        assets: state.assets.map((item) =>
+          item.id === assetId ? { ...item, name: nextName } : item,
+        ),
+        source:
+          state.source && state.source.url === asset.url
+            ? { ...state.source, name: nextName }
+            : state.source,
+      })
+      get().notify(`已重命名素材为「${nextName}」`, 'success')
     },
     cleanupUnusedAssets: () => {
       const state = get()

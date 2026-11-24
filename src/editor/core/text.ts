@@ -171,6 +171,9 @@ export function resolveCaptionStyle(
     align: override?.align ?? group?.align ?? clip.align,
     bold: override?.bold ?? group?.bold ?? clip.bold,
     fontFamily: override?.fontFamily ?? group?.fontFamily ?? clip.fontFamily,
+    lineHeight: override?.lineHeight ?? group?.lineHeight ?? clip.lineHeight,
+    letterSpacing: override?.letterSpacing ?? group?.letterSpacing ?? clip.letterSpacing,
+    italic: override?.italic ?? group?.italic ?? clip.italic,
   }
 }
 
@@ -596,6 +599,25 @@ export function cueToCaptionClip(
   return clip
 }
 
+/**
+ * Decodes a subtitle file's bytes. UTF-8 is tried strictly first; on failure
+ * falls back to GB18030 (a superset of GBK, common in Chinese subtitle files),
+ * then to lenient UTF-8. This avoids the old behavior where a GBK file was
+ * "successfully" imported as a page of replacement characters.
+ */
+export function decodeSubtitleBytes(bytes: ArrayBuffer): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    // Not valid UTF-8 — try the common Chinese encodings below.
+  }
+  try {
+    return new TextDecoder('gb18030', { fatal: true }).decode(bytes)
+  } catch {
+    return new TextDecoder('utf-8').decode(bytes)
+  }
+}
+
 /** Serialises cues to standard SRT. */
 export function serializeSrt(cues: readonly { start: number; end: number; text: string }[]): string {
   const pad = (value: number, width: number): string => String(value).padStart(width, '0')
@@ -613,6 +635,28 @@ export function serializeSrt(cues: readonly { start: number; end: number; text: 
       return `${index + 1}\n${timestamp(cue.start)} --> ${timestamp(cue.end)}\n${body}\n`
     })
     .join('\n')
+}
+
+/** Serialises cues to WebVTT (standard header + `.` millisecond separator). */
+export function serializeVtt(
+  cues: readonly { start: number; end: number; text: string }[],
+): string {
+  const pad = (value: number, width: number): string => String(value).padStart(width, '0')
+  const timestamp = (seconds: number): string => {
+    const totalMs = Math.max(0, Math.round(seconds * 1000))
+    const hours = Math.floor(totalMs / 3_600_000)
+    const minutes = Math.floor((totalMs % 3_600_000) / 60_000)
+    const secs = Math.floor((totalMs % 60_000) / 1000)
+    const ms = totalMs % 1000
+    return `${pad(hours, 2)}:${pad(minutes, 2)}:${pad(secs, 2)}.${pad(ms, 3)}`
+  }
+  const body = cues
+    .map((cue) => {
+      const text = cue.text.replace(/\r\n?/g, '\n').trim()
+      return `${timestamp(cue.start)} --> ${timestamp(cue.end)}\n${text}`
+    })
+    .join('\n\n')
+  return body ? `WEBVTT\n\n${body}\n` : 'WEBVTT\n\n'
 }
 
 /** Creates (or replaces onto) a caption-kind track and adds the given clips. */

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { paintTransitionFrame } from '../core/transitionRender'
 import type { TransitionType } from '../core/types'
 import { useEditorStore } from '../store/EditorProvider'
@@ -17,6 +17,24 @@ export function TransitionThumb({ type, width = 56, height = 34 }: TransitionThu
   const [hovered, setHovered] = useState(false)
   const resolvedTheme = useEditorStore((state) => state.resolvedTheme)
 
+  /**
+   * 主题色只在主题切换时读一次。
+   *
+   * 旧实现每一帧 paint 里都 clearThemeTokenCache() + 3 次 readThemeToken()，
+   * 每次都会 getComputedStyle(.framecut-root)：悬停期间约每秒 180 次强制样式重算。
+   */
+  const colors = useMemo(() => {
+    // 显式引用主题值：CSS 变量读的是 DOM 当前值，ESLint 看不出这层依赖，
+    // 但 `resolvedTheme` 确实是这条缓存的失效钥匙（主题切换后必须重读）。
+    void resolvedTheme
+    clearThemeTokenCache()
+    return {
+      muted: readThemeToken('--fc-muted', '#898277'),
+      accent: readThemeToken('--fc-accent', '#3f8f5f'),
+      ink: readThemeToken('--fc-on-solid', '#ffffff'),
+    }
+  }, [resolvedTheme])
+
   useEffect(() => {
     const reduced =
       typeof window !== 'undefined' &&
@@ -30,15 +48,21 @@ export function TransitionThumb({ type, width = 56, height = 34 }: TransitionThu
     }
     const period = 1600
     const started = performance.now()
+    /** 悬停预览只播两轮就停在 50% 帧：旧实现会一直 60fps 重绘，光标停在卡片上就持续吃 CPU。 */
+    const maxElapsed = period * 2
     const tick = () => {
-      const progress = ((performance.now() - started) % period) / period
-      paint(progress)
+      const elapsed = performance.now() - started
+      if (elapsed > maxElapsed) {
+        paint(0.5)
+        return
+      }
+      paint((elapsed % period) / period)
       rafRef.current = requestAnimationFrame(tick)
     }
     rafRef.current = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(rafRef.current)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hovered, type, width, height, resolvedTheme])
+  }, [hovered, type, width, height, resolvedTheme, colors])
 
   /** 画一帧缩略图：A/B 两个色块 + 字母，交给共享的转场绘制函数合成。 */
   function paint(progress: number): void {
@@ -56,11 +80,9 @@ export function TransitionThumb({ type, width = 56, height = 34 }: TransitionThu
     ctx.globalCompositeOperation = 'source-over'
     ctx.clearRect(0, 0, pixelWidth, pixelHeight)
 
-    // 颜色跟随主题（界面色，不是作品内容）。
-    clearThemeTokenCache()
-    const colorA = readThemeToken('--fc-muted', '#898277')
-    const colorB = readThemeToken('--fc-accent', '#3f8f5f')
-    const ink = readThemeToken('--fc-on-solid', '#ffffff')
+    // 颜色跟随主题（界面色，不是作品内容）。颜色在 colors 里按主题缓存，
+    // 这里不再每帧清缓存 / getComputedStyle。
+    const { muted: colorA, accent: colorB, ink } = colors
 
     const block = (target: CanvasRenderingContext2D, color: string, letter: string) => {
       target.save()

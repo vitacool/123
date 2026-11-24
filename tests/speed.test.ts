@@ -111,11 +111,19 @@ describe('变速滤镜生成', () => {
     }
   })
 
-  it('keepPitch=false 用 asetrate + aresample', () => {
-    expect(asetrateChain(2)).toEqual(['asetrate=96000', 'aresample=48000'])
+  it('keepPitch=false 用 asetrate + aresample（先归一采样率，44.1k 源才不会偏）', () => {
+    expect(asetrateChain(2)).toEqual([
+      'aresample=48000',
+      'asetrate=96000',
+      'aresample=48000',
+    ])
     expect(asetrateChain(1)).toEqual([])
     expect(speedAudioFilters(2, true)).toEqual(['atempo=2'])
-    expect(speedAudioFilters(2, false)).toEqual(['asetrate=96000', 'aresample=48000'])
+    expect(speedAudioFilters(2, false)).toEqual([
+      'aresample=48000',
+      'asetrate=96000',
+      'aresample=48000',
+    ])
   })
 })
 

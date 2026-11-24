@@ -189,6 +189,52 @@ export function TextPropertiesPanel({ track, clip }: TextPropertiesPanelProps) {
 
         <section className="panel-section">
           <div className="section-title">
+            <span>时间</span>
+            <span className="section-hint">秒</span>
+          </div>
+          <div className="control-with-field">
+            <span className="section-hint">开始</span>
+            <CommitNumber
+              value={Number(clip.start.toFixed(2))}
+              min={0}
+              max={86400}
+              step={0.1}
+              unit="s"
+              ariaLabel="开始时间"
+              onCommit={(value) =>
+                updateTextClip(
+                  track.id,
+                  clip.id,
+                  { start: value, end: Math.max(value + 0.2, clip.end) },
+                  '修改开始时间',
+                )
+              }
+            />
+          </div>
+          <div className="control-with-field">
+            <span className="section-hint">结束</span>
+            <CommitNumber
+              value={Number(clip.end.toFixed(2))}
+              min={0.2}
+              max={86400}
+              step={0.1}
+              unit="s"
+              ariaLabel="结束时间"
+              onCommit={(value) =>
+                updateTextClip(
+                  track.id,
+                  clip.id,
+                  { end: Math.max(clip.start + 0.2, value) },
+                  '修改结束时间',
+                )
+              }
+            />
+          </div>
+          <p className="control-note">改时间会解除与视频片段的联动（字幕不再跟随）。</p>
+        </section>
+
+        <section className="panel-section">
+          <div className="section-title">
             <span>内容</span>
             <span className="section-hint">{text.length}/500</span>
           </div>
@@ -263,6 +309,63 @@ export function TextPropertiesPanel({ track, clip }: TextPropertiesPanelProps) {
               onCommit={(value) => commitStyle({ fontSize: value / 100 }, '调整文本字号')}
             />
           </div>
+        </section>
+
+        <section className="panel-section">
+          <div className="section-title">
+            <span>排版</span>
+            <span className="section-hint">行距 / 字距 / 斜体</span>
+          </div>
+          <div className="control-with-field">
+            <span className="section-hint">行距</span>
+            <CommitSlider
+              value={Math.round((style.lineHeight ?? 1.26) * 100)}
+              min={80}
+              max={300}
+              step={1}
+              ariaLabel="文本行距"
+              onPreview={(value) =>
+                setCaptionStylePreview({
+                  trackId: track.id,
+                  style: { ...style, lineHeight: value / 100 },
+                })
+              }
+              onCommit={(value) => {
+                setCaptionStylePreview(null)
+                commitStyle({ lineHeight: value / 100 }, '调整文本行距')
+              }}
+              format={(value) => `${Math.round(value)}%`}
+            />
+          </div>
+          <div className="control-with-field">
+            <span className="section-hint">字距</span>
+            <CommitSlider
+              value={Math.round((style.letterSpacing ?? 0) * 100)}
+              min={-20}
+              max={50}
+              step={1}
+              ariaLabel="文本字间距"
+              onPreview={(value) =>
+                setCaptionStylePreview({
+                  trackId: track.id,
+                  style: { ...style, letterSpacing: value / 100 },
+                })
+              }
+              onCommit={(value) => {
+                setCaptionStylePreview(null)
+                commitStyle({ letterSpacing: value / 100 }, '调整文本字间距')
+              }}
+              format={(value) => `${Math.round(value)}%`}
+            />
+          </div>
+          <label className="control-toggle">
+            <input
+              type="checkbox"
+              checked={style.italic === true}
+              onChange={(event) => commitStyle({ italic: event.target.checked }, '切换文本斜体')}
+            />
+            斜体
+          </label>
         </section>
 
         <section className="panel-section">

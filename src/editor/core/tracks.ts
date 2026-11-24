@@ -48,8 +48,18 @@ export function textTrackState(track: TextTrack): TrackState {
 /** Solo is audio-only; enabled solo tracks suppress every other audio source. */
 export function anySoloActive(project: Project): boolean {
   if (mainTrackState(project).enabled && mainTrackState(project).solo) return true
-  return (project.audioTracks ?? []).some((track) => {
-    const state = audioTrackState(track)
+  if (
+    (project.audioTracks ?? []).some((track) => {
+      const state = audioTrackState(track)
+      return state.enabled && state.solo
+    })
+  ) {
+    return true
+  }
+  // 叠加轨也参与混音（导出 amix / 预览混音），它的 S 必须同样能压住其它音源；
+  // 否则按钮可点但听感完全不变（曾经的死 UI）。
+  return (project.overlayTracks ?? []).some((track) => {
+    const state = overlayTrackState(track)
     return state.enabled && state.solo
   })
 }

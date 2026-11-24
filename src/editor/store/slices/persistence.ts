@@ -39,8 +39,11 @@ export function createPersistenceSlice(ctx: {
         missingAssets: draft.missingAssets ?? [],
         source: draft.source,
         selectedClipId: firstSelection,
-        // 切项目必须重置多选集合（否则复制/删除会读到上一个项目的失效 id）。
+        // 切项目必须重置多选集合与剪贴板（否则复制/粘贴会拿到上一个项目的
+        // 失效 id 或指向旧素材的片段）。
         selectedIds: firstSelection ? [firstSelection] : [],
+        clipboard: { items: [], count: 0 },
+        colorClipboard: null,
         playhead: clamp(
           draft.playhead,
           0,

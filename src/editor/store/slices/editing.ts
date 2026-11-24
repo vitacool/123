@@ -4,7 +4,7 @@ import type { TimelineWord } from '../../core/captionMapping'
 import type { StoreGet, StoreInternals, StoreSet } from '../internal'
 import { aspectValue } from '../../core/aspect'
 import { CROP_PRESETS } from '../../core/constants'
-import { createAddAudioTrackCommand, createAddMarkerCommand, createAddEmptyOverlayTrackCommand, createAddTextClipCommand, createAddTextTrackCommand, createImportAutoCaptionsCommand, createImportSubtitlesCommand, createReplaceAutoCaptionsCommand, createDeleteMarkerCommand, createInsertFreezeCommand, createMoveAudioClipCommand, createMoveOverlayClipCommand, createMoveClipToTrackAtTimeCommand, createMoveTextClipCommand, createRemoveAudioClipCommand, createRemoveAudioTrackCommand, createRemoveOverlayTrackCommand, createRemoveTextClipCommand, createRemoveTextTrackCommand, createReorderClipCommand, createReorderOverlayClipCommand, createResizeAudioClipCommand, createResizeClipEdgeCommand, createResizeFreezeCommand, createResizeOverlayClipEdgeCommand, createResizeTextClipCommand, createSetAspectRatioCommand, createSetExportQualityCommand, createSplitAudioClipCommand, createSplitCommand, createSetTransitionAllCommand, createSetColorAllCommand, createMoveOverlayTrackCommand, createSetCoverCommand, createClearCoverCommand, createSetKeyframeCommand, createRemoveKeyframeCommand, createMoveKeyframesCommand, createSetKeyframeEasingCommand, createClearPropertyKeyframesCommand, createRemoveKeyframesCommand, createSplitOverlayClipCommand, createSplitTextClipCommand, createTrimAudioClipCommand, createTrimLeftCommand, createTrimOverlayClipCommand, createTrimRightCommand, createTrimTextClipCommand, createUpdateAudioClipCommand, createUpdateAudioTrackCommand, createUpdateAnyClipCommand, createReverseClipCommand, createUpdateMainTrackCommand, createUpdateMarkerCommand, createUpdateOverlayTrackCommand, createUpdateCaptionClipStyleCommand, createUpdateCaptionTrackStyleCommand, createReplaceCaptionTextCommand, createMergeCaptionWithPreviousCommand, createSplitCaptionCommand, createMoveTrackCommand, createUpdateTextClipCommand, createUpdateTextTrackCommand } from '../../core/commands'
+import { createAddAudioTrackCommand, createAddMarkerCommand, createAddEmptyOverlayTrackCommand, createAddTextClipCommand, createAddTextTrackCommand, createImportAutoCaptionsCommand, createImportSubtitlesCommand, createReplaceAutoCaptionsCommand, createDeleteMarkerCommand, createInsertFreezeCommand, createMoveAudioClipCommand, createMoveOverlayClipCommand, createMoveClipToTrackAtTimeCommand, createMoveTextClipCommand, createRemoveAudioClipCommand, createRemoveAudioTrackCommand, createRemoveOverlayTrackCommand, createRemoveTextClipCommand, createRemoveTextTrackCommand, createReorderClipCommand, createReorderOverlayClipCommand, createResizeAudioClipCommand, createResizeClipEdgeCommand, createResizeFreezeCommand, createResizeOverlayClipEdgeCommand, createResizeTextClipCommand, createSetAspectRatioCommand, createSetExportQualityCommand, createSplitAudioClipCommand, createSplitCommand, createSetTransitionAllCommand, createSetTransitionCommand, createSetColorAllCommand, createMoveOverlayTrackCommand, createSetCoverCommand, createClearCoverCommand, createSetKeyframeCommand, createRemoveKeyframeCommand, createMoveKeyframesCommand, createSetKeyframeEasingCommand, createClearPropertyKeyframesCommand, createRemoveKeyframesCommand, createSplitOverlayClipCommand, createSplitTextClipCommand, createTrimAudioClipCommand, createTrimLeftCommand, createTrimOverlayClipCommand, createTrimRightCommand, createTrimTextClipCommand, createUpdateAudioClipCommand, createUpdateAudioTrackCommand, createUpdateAnyClipCommand, createReverseClipCommand, createUpdateMainTrackCommand, createUpdateMarkerCommand, createUpdateOverlayTrackCommand, createUpdateCaptionClipStyleCommand, createUpdateCaptionTrackStyleCommand, createReplaceCaptionTextCommand, createMergeCaptionWithPreviousCommand, createSplitCaptionCommand, createMoveTrackCommand, createUpdateTextClipCommand, createUpdateTextTrackCommand } from '../../core/commands'
 import type { EditorCommand } from '../../core/commands'
 import { clampCrop, applyTransitionToAllJunctions, applyColorToAllClips, normalizeAngle, displayToArrayIndex } from '../../core/operations'
 import { createId } from '../../core/ids'
@@ -13,10 +13,10 @@ import {
   findAudioClipLocation,
   getAudioActionAvailability,
 } from '../../core/audio'
-import { captionStyleForTrack, cueToTextClip, findTextClipLocation, getTextActionAvailability } from '../../core/text'
+import { captionStyleForTrack, findTextClipLocation, getTextActionAvailability } from '../../core/text'
 import { splitCaptionText } from '../../core/captions'
 import { normalizeBackground } from '../../core/background'
-import { clampSpeed, canChangeClipSpeed, clipSpeedValue, normalizeSpeedCurve } from '../../core/speed'
+import { clampSpeed, canChangeClipSpeed, clipSpeedValue, hasSpeedVariation, normalizeSpeedCurve } from '../../core/speed'
 import { clipFreezeFrame, clipTimelineDuration } from '../../core/clipTime'
 import {
   clampTransitionDuration,
@@ -144,6 +144,15 @@ export function createEditingSlice(ctx: {
       const location = findClipLocation(state.project, clipId)
       if (!location || location.clip.type === 'freeze') {
         state.notify('定格片段没有声音，无法分离音频', 'warning')
+        return
+      }
+      // AudioClip 没有变速能力：2x 片段分离出的音频会保留源跨度、按 1x 播放，
+      // 比画面长一倍且内容不对。先拦下并给出可执行的下一步。
+      if (
+        clipSpeedValue(location.clip) !== 1 ||
+        hasSpeedVariation(location.clip)
+      ) {
+        state.notify('变速片段暂不支持分离音频：请先把片段恢复为 1×', 'warning')
         return
       }
       const audioTrackId = createId('audioTrack')
@@ -353,10 +362,7 @@ export function createEditingSlice(ctx: {
         state.notify('转场需要相邻的下一个片段', 'warning')
         return
       }
-      if (Math.max(0, next.gapBefore ?? 0) > 0.0001) {
-        state.notify('两段之间存在空隙，先移除空隙才能加转场', 'warning')
-        return
-      }
+      const gap = Math.max(0, next.gapBefore ?? 0)
       const limit = maxTransitionDuration(clip, next)
       if (limit <= 0) {
         state.notify('两侧片段太短，放不下转场', 'warning')
@@ -364,16 +370,16 @@ export function createEditingSlice(ctx: {
       }
       const wanted = duration ?? clip.transitionOut?.duration ?? TRANSITION_MIN_DURATION * 2
       const clamped = Math.min(clampTransitionDuration(wanted), limit)
+      const normalizedType = normalizeTransitionType(type)
       run(
-        createUpdateAnyClipCommand(
+        createSetTransitionCommand(
           clipId,
+          next.id,
           {
-            transitionOut: {
-              type: normalizeTransitionType(type),
-              duration: Math.max(TRANSITION_MIN_DURATION, clamped),
-            },
+            type: normalizedType,
+            duration: Math.max(TRANSITION_MIN_DURATION, clamped),
           },
-          `转场 ${transitionLabel(normalizeTransitionType(type))} ${clamped.toFixed(1)}s`,
+          `转场 ${transitionLabel(normalizedType)} ${clamped.toFixed(1)}s${gap > 0.0001 ? '（闭合空隙）' : ''}`,
         ),
       )
     },
@@ -1215,6 +1221,25 @@ export function createEditingSlice(ctx: {
         get().notify('已新增文本轨', 'success')
       }
     },
+    addCaptionAtPlayhead: (trackId) => {
+      const state = get()
+      const track = (state.project.textTracks ?? []).find((item) => item.id === trackId)
+      if (!track) return
+      if (isTextLocked(track)) {
+        state.notify('字幕轨已锁定，请先解锁', 'warning')
+        return
+      }
+      const start = Math.max(0, state.playhead)
+      const cue = cueToCaptionClip(
+        { start, end: start + 2, text: '新字幕' },
+        createId('text'),
+        state.project.aspectRatio,
+      )
+      if (run(createAddTextClipCommand(trackId, cue))) {
+        get().selectClip(cue.id)
+        get().notify('已在播放头添加一条字幕', 'success')
+      }
+    },
     removeTextTrack: (trackId) => {
       const state = get()
       if (!(state.project.textTracks ?? []).some((track) => track.id === trackId)) return
@@ -1397,15 +1422,24 @@ export function createEditingSlice(ctx: {
     importSubtitles: (cues) => {
       if (cues.length === 0) return
       const state = get()
-      const trackId = state.project.textTracks?.[0]?.id ?? createId('textTrack')
-      const clips = cues.map((cue) => cueToTextClip(cue, createId('text')))
+      const project = state.project
+      // 每次导入都新建一条 caption 轨，并给出可区分的名字：
+      // 复用 `textTracks[0]` 会把导入字幕混进智能字幕轨，且轨道类型取决于此前状态。
+      const usedImported = (project.textTracks ?? []).filter(
+        (track) => track.kind === 'caption' && track.name.startsWith('导入字幕'),
+      ).length
+      const trackName = usedImported === 0 ? '导入字幕' : `导入字幕 ${usedImported + 1}`
+      const trackId = createId('textTrack')
+      const clips = cues.map((cue) =>
+        cueToCaptionClip(cue, createId('text'), project.aspectRatio),
+      )
       if (
-        run(createImportSubtitlesCommand(trackId, clips)) &&
+        run(createImportSubtitlesCommand(trackId, clips, trackName)) &&
         clips.length > 0
       ) {
         get().selectClip(clips[0].id)
         set({ playhead: Math.max(0, cues[0].start) })
-        get().notify(`已导入 ${clips.length} 条字幕`, 'success')
+        get().notify(`已导入 ${clips.length} 条字幕到「${trackName}」`, 'success')
       }
     },
     rotateSelected: (delta) => {

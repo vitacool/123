@@ -19,6 +19,7 @@ import {
 } from '../src/editor/core/clipboard'
 import { createDeleteManyCommand, createMoveManyCommand } from '../src/editor/core/commands'
 import { createInitialProject, addOverlayTrackFromClip, createClip } from '../src/editor/core/operations'
+import { createEditorStore } from '../src/editor/store/editorStore'
 import { addTextClipToProject, addTextTrackToProject } from '../src/editor/core/text'
 import type { Project } from '../src/editor/core/types'
 
@@ -127,6 +128,31 @@ describe('剪贴板：收集与粘贴规划', () => {
     expect(plan.video[0].index).toBe(2)
   })
 
+  it('指定目标叠加轨时，叠加片段粘到目标轨（跨轨粘贴）', () => {
+    let project = createInitialProject({ url: 'a', duration: 10 }, 'c1')
+    project = addOverlayTrackFromClip(project, 'c1', 'over-a', 'ov-a')!.project
+    project = addOverlayTrackFromClip(project, 'c1', 'over-b', 'ov-b')!.project
+    const payload = buildClipboardPayload(project, ['ov-a'])
+    const plan = planPaste(project, payload, 2, { targetOverlayTrackId: 'over-b' })
+    expect(plan.video).toHaveLength(1)
+    expect(plan.video[0].trackId).toBe('over-b')
+  })
+
+  it('粘贴一组片段：首段从锚点开始，后续段保留原 gapBefore', () => {
+    const base = createInitialProject({ url: 'a', duration: 10 }, 'c1')
+    const project: Project = {
+      ...base,
+      clips: [createClip('a', 0, 2, {}, 'c1'), createClip('a', 2, 4, { gapBefore: 1.5 }, 'c2')],
+    }
+    const payload = buildClipboardPayload(project, ['c1', 'c2'])
+    const plan = planPaste(project, payload, 0)
+    const next = applyPastePlan(project, plan, (prefix) => `${prefix}-pasted`).project
+    const added = next.clips.filter((clip) => !project.clips.some((old) => old.id === clip.id))
+    expect(added).toHaveLength(2)
+    expect(added[0].gapBefore, '首段不带前导空隙').toBe(0)
+    expect(added[1].gapBefore, '后续段保留相对间距').toBe(1.5)
+  })
+
   it('findFreeSlot 冲突后移', () => {
     expect(findFreeSlot(1, 2, [{ start: 0, end: 3 }])).toBeCloseTo(3.05)
     expect(findFreeSlot(1, 2, [])).toBe(1)
@@ -176,6 +202,24 @@ describe('剪贴板：收集与粘贴规划', () => {
     const plan = planPaste(project, payload, 5, { lockedTrackIds: new Set(['at']) })
     expect(plan.audio[0].trackId).toBeNull()
     expect(plan.audio[0].clip.start).toBe(5)
+  })
+})
+
+describe('moveSelectionBy（键盘微调）', () => {
+  it('主轨首段右移 0.1s 通过 gapBefore 生效，且不再弹 toast', () => {
+    const store = createEditorStore()
+    store.getState().loadSource({
+      url: 'a',
+      name: 'a.mp4',
+      size: 1024,
+      duration: 10,
+      width: 640,
+      height: 360,
+    })
+    const clipId = store.getState().project.clips[0].id
+    store.getState().selectClip(clipId)
+    store.getState().moveSelectionBy(0.1)
+    expect(store.getState().project.clips[0].gapBefore).toBeCloseTo(0.1)
   })
 })
 

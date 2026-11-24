@@ -37,6 +37,8 @@ export interface ClipboardPayload {
 }
 
 const EMPTY_PAYLOAD: ClipboardPayload = { items: [], count: 0 }
+/** 空剪贴板（切换项目时重置用）。 */
+export const EMPTY_CLIPBOARD: ClipboardPayload = EMPTY_PAYLOAD
 
 /** 按 id 集合收集可复制的片段，offset 以组内最早者为 0。 */
 export function buildClipboardPayload(project: Project, ids: readonly string[]): ClipboardPayload {
@@ -152,16 +154,27 @@ export function planPaste(
   project: Project,
   payload: ClipboardPayload,
   playhead: number,
-  options: { lockedTrackIds?: ReadonlySet<string> } = {},
+  options: {
+    lockedTrackIds?: ReadonlySet<string>
+    /** 指定目标叠加轨（用户选中的那条）；可用时所有叠加片段都粘到它上面。 */
+    targetOverlayTrackId?: string | null
+  } = {},
 ): PastePlan {
   const locked = options.lockedTrackIds ?? new Set<string>()
   const plan: PastePlan = { video: [], audio: [], text: [] }
   const anchor = Math.max(0, playhead)
+  const overlayTarget =
+    options.targetOverlayTrackId &&
+    getOverlayTracks(project).some((track) => track.id === options.targetOverlayTrackId) &&
+    !locked.has(options.targetOverlayTrackId)
+      ? options.targetOverlayTrackId
+      : null
 
   const videoByTrack = new Map<string, ClipboardVideoItem[]>()
   for (const item of payload.items) {
     if (item.kind === 'main' || item.kind === 'overlay') {
-      const key = item.kind === 'main' ? '__main__' : item.trackId ?? ''
+      const key =
+        item.kind === 'main' ? '__main__' : overlayTarget ?? item.trackId ?? ''
       const list = videoByTrack.get(key)
       if (list) list.push(item)
       else videoByTrack.set(key, [item])
@@ -293,7 +306,17 @@ export function applyPastePlan(
   for (const [key, items] of videoByTrack) {
     const clones = items
       .sort((left, right) => left.index - right.index)
-      .map((item) => ({ index: item.index, clip: { ...item.clip, id: nextId('clip'), gapBefore: 0 } }))
+      .map((item, offsetIndex) => ({
+        index: item.index,
+        clip: {
+          ...item.clip,
+          id: nextId('clip'),
+          // 第一段从粘贴锚点开始（不带前导空隙）；后续段保留原来的相对间距，
+          // 否则「复制一段带空隙的组」粘出来会挤成一团。
+          gapBefore:
+            offsetIndex === 0 ? 0 : Math.max(0, item.clip.gapBefore ?? 0),
+        },
+      }))
     const insert = (list: Clip[]): Clip[] => {
       const copy = [...list]
       clones.forEach((entry) => {

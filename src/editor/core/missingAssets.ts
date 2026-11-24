@@ -15,10 +15,13 @@ export interface MissingAssetsSelection {
   skipped: Set<string>
 }
 
-/** 文件名归一化：去扩展名、去首尾空白、小写（用于自动匹配）。 */
+/** 文件名归一化：去代理后缀、去扩展名、去首尾空白、小写（用于自动匹配）。 */
 export function normalizeAssetName(name: string): string {
   return (name ?? '')
     .replace(/\.[^.]+$/, '')
+    // HEVC 等素材导入时会生成「原名-h264.mp4」代理并把它当作 asset.name 持久化。
+    // 匹配时剥掉这个后缀，用户一次多选原文件（旅行.mov）才不会被判成「已忽略」。
+    .replace(/-(h264|h265|hevc)$/i, '')
     .trim()
     .toLowerCase()
 }

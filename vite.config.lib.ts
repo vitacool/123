@@ -6,6 +6,19 @@ import framecutScope from './tools/postcss-framecut-scope.mjs'
 // Embeddable ES module build. React stays external; the host serves the
 // `public/ffmpeg` assets or passes `ffmpegBaseUrl` to <VideoEditor />.
 export default defineConfig({
+  /**
+   * 关键：库构建必须用**相对** base。
+   *
+   * ASR 的 whisperWorker / vadWorker 在源码里是
+   * `new Worker(new URL('../../workers/whisperWorker.ts', import.meta.url))`，
+   * Vite 会把它改写成「base + assets/xxx.js」。base 若保持默认 `'/'`，产物里就是
+   * `new URL("/assets/whisperWorker-xxx.js", import.meta.url)` —— 前导 `/` 会让
+   * `import.meta.url` 失效，URL 固定解析到**站点根** `/assets/`。宿主按 README
+   * 「复制完整 dist-lib」把库放到 `/studio/` 时就 404，而 worker 加载失败不会抛错
+   * （只在异步 error 事件里），表现为识别永久卡住。
+   * `base: './'` 产出相对路径，跟随 framecut-editor.js 所在目录（assets/ 兄弟目录）。
+   */
+  base: './',
   // 样式隔离：所有选择器加 .framecut-root 前缀、@keyframes 加 fc- 前缀（构建时处理）。
   css: {
     postcss: {

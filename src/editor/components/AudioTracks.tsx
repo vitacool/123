@@ -2,6 +2,7 @@ import { isDragging, matchesPointer } from './pointerDrag'
 import { useEffect, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { audioClipDuration } from '../core/audio'
+import { collectSnapPoints, snapTime } from '../core/snap'
 import type { KeyframeRef } from '../core/keyframeEdit'
 import { isAudioLocked } from '../core/tracks'
 import { clamp } from '../core/timeline'
@@ -22,6 +23,8 @@ interface DragState {
   pointerId: number
   startX: number
   originalStart: number
+  /** 片段在时间轴上的时长（拖尾部吸附用）。 */
+  duration: number
   start: number
 }
 
@@ -141,6 +144,8 @@ export function AudioTracks({
   const assets = useEditorStore((state) => state.assets)
   const selectedClipId = useEditorStore((state) => state.selectedClipId)
   const selectClip = useEditorStore((state) => state.selectClip)
+  const toggleSelectClip = useEditorStore((state) => state.toggleSelectClip)
+  const rangeSelectClip = useEditorStore((state) => state.rangeSelectClip)
   const moveAudioClip = useEditorStore((state) => state.moveAudioClip)
   const resizeAudioClipEdge = useEditorStore((state) => state.resizeAudioClipEdge)
 
@@ -154,10 +159,26 @@ export function AudioTracks({
     const handleMove = (event: PointerEvent) => {
       const current = dragRef.current
       if (!matchesPointer(current, event)) return
-      const next = {
-        ...current,
-        start: Math.max(0, current.originalStart + (event.clientX - current.startX) / pps),
+      const rawStart = Math.max(
+        0,
+        current.originalStart + (event.clientX - current.startX) / pps,
+      )
+      let nextStart = rawStart
+      // 音频片段复用与视频相同的吸附点（播放头/标记/各轨边缘），阈值 12px。
+      if (autoSnap !== false && !event.altKey) {
+        const state = store.getState()
+        const points = collectSnapPoints(state.project, state.playhead)
+        const threshold = 12 / pps
+        const head = snapTime(rawStart, points, threshold)
+        const tail = snapTime(rawStart + current.duration, points, threshold)
+        if (head && (!tail || head.distance <= tail.distance)) {
+          nextStart = head.time
+        } else if (tail) {
+          nextStart = tail.time - current.duration
+        }
+        nextStart = Math.max(0, nextStart)
       }
+      const next = { ...current, start: nextStart }
       dragRef.current = next
       setDrag(next)
     }
@@ -186,7 +207,7 @@ export function AudioTracks({
       window.removeEventListener('pointerup', finish)
       window.removeEventListener('pointercancel', cancel)
     }
-  }, [isDragging(drag), pps, moveAudioClip])
+  }, [isDragging(drag), pps, moveAudioClip, autoSnap, store])
 
   useEffect(() => {
     if (!isDragging(edge)) return
@@ -234,6 +255,21 @@ export function AudioTracks({
   ) => {
     if (event.button !== 0) return
     if (isAudioLocked(track)) return
+    // Ctrl/⌘ 切换、Shift 区间：只做选择，不进入单片段拖动（否则会只拖一条）。
+    if (event.ctrlKey || event.metaKey) {
+      event.preventDefault()
+      event.stopPropagation()
+      toggleSelectClip(clip.id)
+      store.getState().setPlaying(false)
+      return
+    }
+    if (event.shiftKey) {
+      event.preventDefault()
+      event.stopPropagation()
+      rangeSelectClip(clip.id)
+      store.getState().setPlaying(false)
+      return
+    }
     event.preventDefault()
     event.stopPropagation()
     selectClip(clip.id)
@@ -244,6 +280,7 @@ export function AudioTracks({
       pointerId: event.pointerId,
       startX: event.clientX,
       originalStart: clip.start,
+      duration: audioClipDuration(clip),
       start: clip.start,
     }
     dragRef.current = next

@@ -1,7 +1,7 @@
 import { env, pipeline } from '@huggingface/transformers'
-import { Converter } from 'opencc-js'
+import { convertAsrScript } from '../services/asr/scriptConvert'
 import { cleanAsrWords } from '../core/asrFilters'
-import type { AsrLanguage, AsrWord } from '../core/asr'
+import type { AsrLanguage, AsrScript, AsrWord } from '../core/asr'
 
 const scope = self as unknown as {
   postMessage: (message: unknown, transfer?: Transferable[]) => void
@@ -15,24 +15,43 @@ env.useBrowserCache = true
 env.remoteHost = 'https://hf-mirror.com'
 env.remotePathTemplate = '{model}/resolve/{revision}/'
 
-const wasm = env.backends.onnx.wasm
-if (wasm) {
-  wasm.wasmPaths = new URL('/onnxruntime/', self.location.href).href
-  // A portion of the available cores keeps the browser responsive.
-  wasm.numThreads = Math.max(1, Math.min(4, Math.floor((navigator.hardwareConcurrency ?? 4) / 2)))
-  wasm.proxy = false
-}
-
-/** Simplified Chinese for all output (Traditional → Simplified, t2cn only). */
-const toSimplified = Converter({ from: 'tw', to: 'cn' })
+/** 输出字形由主线程按请求传入（缺省 simplified，保持历史行为）。 */
 
 interface TranscribeRequest {
   type: 'transcribe'
   id: number
   audio: Float32Array
   language: AsrLanguage
+  /** 输出字形；缺省 simplified。 */
+  script?: AsrScript
   modelId: string
+  /** 主线程传进来的 ASR 资源根（默认 '/'）。worker 里读不到 document.baseURI。 */
+  assetBase?: string
 }
+
+/** 资源根归一：相对路径按 worker 脚本所在位置解析，绝对路径按站点解析。 */
+function resolveAssetBase(base?: string): string {
+  const raw = base && base.trim() ? base.trim() : '/'
+  const normalized = raw.endsWith('/') ? raw : `${raw}/`
+  try {
+    return new URL(normalized, self.location.href).href
+  } catch {
+    return normalized
+  }
+}
+
+let assetBase = resolveAssetBase()
+
+function applyWasmPaths(): void {
+  const wasm = env.backends.onnx.wasm
+  if (!wasm) return
+  wasm.wasmPaths = new URL('onnxruntime/', assetBase).href
+  // 一部分核心工作保留给浏览器 UI，避免把机器全部核占满。
+  wasm.numThreads = Math.max(1, Math.min(4, Math.floor((navigator.hardwareConcurrency ?? 4) / 2)))
+  wasm.proxy = false
+}
+
+applyWasmPaths()
 
 interface ProgressMessage {
   type: 'progress'
@@ -69,7 +88,32 @@ interface Transcriber {
 }
 
 const pipelineCache = new Map<string, Promise<Transcriber>>()
+/**
+ * 同时驻留的模型上限。
+ *
+ * 每个 whisper pipeline 常驻内存几十到几百 MB（q8 量化 + ONNX session），
+ * 而模型切换/多语言试用会让 `pipelineCache` 只增不减 → 长时间编辑后 OOM。
+ * 这里做 LRU 淘汰：只保留最近用过的 N 个，其余 dispose 掉。
+ */
+const MAX_CACHED_PIPELINES = 2
 const cancelledIds = new Set<number>()
+
+/** 丢弃最久未使用的 pipeline（Map 保持插入序，命中时重新插入即 LRU）。 */
+function evictPipelines(keepKey: string): void {
+  while (pipelineCache.size > MAX_CACHED_PIPELINES) {
+    const oldest = pipelineCache.keys().next().value
+    if (!oldest || oldest === keepKey) break
+    const disposed = pipelineCache.get(oldest)
+    pipelineCache.delete(oldest)
+    void Promise.resolve(disposed)
+      .then((pipeline) => {
+        const disposable = pipeline as unknown as { dispose?: () => Promise<void> | void }
+        return disposable.dispose?.()
+      })
+      .catch(() => undefined)
+    console.info(`[whisper] 淘汰模型 ${oldest}（上限 ${MAX_CACHED_PIPELINES}）`)
+  }
+}
 
 interface DeviceAttempt {
   device: 'webgpu' | 'wasm'
@@ -112,7 +156,12 @@ async function getPipeline(modelId: string, id: number): Promise<Transcriber> {
   for (const attempt of deviceAttempts()) {
     const key = `${modelId}:${attempt.device}:${attempt.dtype}`
     const cached = pipelineCache.get(key)
-    if (cached) return cached
+    if (cached) {
+      // 命中也算「最近使用」：重新插入以维持 LRU 顺序。
+      pipelineCache.delete(key)
+      pipelineCache.set(key, cached)
+      return cached
+    }
     console.info(`[whisper] 加载模型 ${modelId} device=${attempt.device} dtype=${attempt.dtype}`)
     const created = pipeline('automatic-speech-recognition', modelId, {
       device: attempt.device,
@@ -120,6 +169,7 @@ async function getPipeline(modelId: string, id: number): Promise<Transcriber> {
       progress_callback: (event: unknown) => modelProgress(event, id),
     }) as unknown as Promise<Transcriber>
     pipelineCache.set(key, created)
+    evictPipelines(key)
     try {
       return await created
     } catch (error) {
@@ -141,6 +191,7 @@ async function transcribe(
   transcriber: Transcriber,
   audio: Float32Array,
   language: AsrLanguage,
+  script: AsrScript = 'simplified',
 ): Promise<AsrWord[]> {
   const output = await transcriber(audio, {
     task: 'transcribe',
@@ -161,7 +212,7 @@ async function transcribe(
       const start = Number(chunk.timestamp?.[0] ?? 0)
       const rawEnd = chunk.timestamp?.[1]
       const end = rawEnd === null || rawEnd === undefined ? start + 0.2 : Number(rawEnd)
-      return { text: toSimplified((chunk.text ?? '').trim()), start, end }
+      return { text: convertAsrScript((chunk.text ?? '').trim(), script), start, end }
     })
     .filter((word) => word.text.length > 0)
   const cleaned = cleanAsrWords(words)
@@ -169,19 +220,36 @@ async function transcribe(
   return cleaned
 }
 
-scope.onmessage = async (event: MessageEvent) => {
-  const data = event.data as TranscribeRequest | CancelMessage
-  if (!data || !('type' in data)) return
-  if (data.type === 'cancel') {
-    cancelledIds.add(data.id)
-    return
-  }
-  if (data.type !== 'transcribe') return
+/**
+ * 串行队列。
+ *
+ * 同一个 worker 只有一个 ONNX session / 一个 transformers pipeline。取消是
+ * 「块间检查」而不是真的打断推理，所以「取消 → 立刻重试」很容易让两个
+ * `transcriber(audio)` 同时跑在同一个 pipeline 上：内存翻倍、WASM 线程互抢，
+ * 慢机器上直接 OOM。这里把请求排成队列：新请求等前一个彻底结束再开始。
+ */
+let queue: Promise<void> = Promise.resolve()
 
+function enqueue(task: () => Promise<void>): void {
+  queue = queue.then(task).catch(() => undefined)
+}
+
+async function handleTranscribe(data: TranscribeRequest): Promise<void> {
   try {
-    if (cancelledIds.has(data.id)) return
+    if (cancelledIds.has(data.id)) {
+      cancelledIds.delete(data.id)
+      return
+    }
+    // 资源根必须在加载 pipeline 之前生效（wasm/mjs 在 session 创建时解析）。
+    if (data.assetBase) {
+      assetBase = resolveAssetBase(data.assetBase)
+      applyWasmPaths()
+    }
     const transcriber = await getPipeline(data.modelId, data.id)
-    if (cancelledIds.has(data.id)) return
+    if (cancelledIds.has(data.id)) {
+      cancelledIds.delete(data.id)
+      return
+    }
     scope.postMessage({
       type: 'progress',
       id: data.id,
@@ -189,8 +257,12 @@ scope.onmessage = async (event: MessageEvent) => {
       progress: 5,
       detail: '正在识别语音…',
     } satisfies ProgressMessage)
-    const words = await transcribe(transcriber, data.audio, data.language)
-    if (cancelledIds.has(data.id)) return
+    const words = await transcribe(transcriber, data.audio, data.language, data.script)
+    if (cancelledIds.has(data.id)) {
+      // 结果已经没人要了，但模型/pipeline 保持热态，下次直接用。
+      cancelledIds.delete(data.id)
+      return
+    }
     const message: ResultMessage = { type: 'result', id: data.id, words }
     scope.postMessage(message)
     cancelledIds.delete(data.id)
@@ -203,4 +275,15 @@ scope.onmessage = async (event: MessageEvent) => {
     }
     scope.postMessage(message)
   }
+}
+
+scope.onmessage = (event: MessageEvent) => {
+  const data = event.data as TranscribeRequest | CancelMessage
+  if (!data || !('type' in data)) return
+  if (data.type === 'cancel') {
+    cancelledIds.add(data.id)
+    return
+  }
+  if (data.type !== 'transcribe') return
+  enqueue(() => handleTranscribe(data))
 }

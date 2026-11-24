@@ -1,7 +1,7 @@
 import { hasVolumeAnimation } from '../core/animation'
 import { clipFadeIn, clipFadeOut, clipVolume } from '../core/clipAudio'
 import { clipTimelineDuration } from '../core/clipTime'
-import type { Clip } from '../core/types'
+import type { Clip, FadeCurve } from '../core/types'
 import { useEditorStore } from '../store/EditorProvider'
 import { CommitNumber } from './Toast'
 import { CommitSlider } from './CommitSlider'
@@ -10,9 +10,14 @@ import { KeyframeButton } from './KeyframeButton'
 interface ClipAudioSectionProps {
   clip: Clip
   /** 提交一次修改（由父组件包装成 EditorCommand）。 */
-  onCommit: (patch: Partial<Pick<Clip, 'volume' | 'fadeIn' | 'fadeOut'>>, label: string) => void
+  onCommit: (
+    patch: Partial<Pick<Clip, 'volume' | 'fadeIn' | 'fadeOut' | 'fadeInCurve' | 'fadeOutCurve'>>,
+    label: string,
+  ) => void
   /** 拖动中的实时预览（走临时预览通道，不写历史）。 */
-  onPreview?: (patch: Partial<Pick<Clip, 'volume' | 'fadeIn' | 'fadeOut'>>) => void
+  onPreview?: (
+    patch: Partial<Pick<Clip, 'volume' | 'fadeIn' | 'fadeOut' | 'fadeInCurve' | 'fadeOutCurve'>>,
+  ) => void
   /** 分离音频（可选；主轨/叠加轨视频片段提供）。 */
   onDetachAudio?: () => void
   detachDisabled?: boolean
@@ -111,6 +116,45 @@ export function ClipAudioSection({
             />
           </label>
         </div>
+        <div className="position-grid">
+          <label>
+            <span>淡入曲线</span>
+            <select
+              value={clip.fadeInCurve ?? 'linear'}
+              aria-label="淡入曲线"
+              onChange={(event) =>
+                onCommit(
+                  { fadeInCurve: event.target.value as FadeCurve },
+                  '调整淡入曲线',
+                )
+              }
+            >
+              <option value="linear">线性</option>
+              <option value="exp">指数</option>
+              <option value="log">对数</option>
+            </select>
+          </label>
+          <label>
+            <span>淡出曲线</span>
+            <select
+              value={clip.fadeOutCurve ?? 'linear'}
+              aria-label="淡出曲线"
+              onChange={(event) =>
+                onCommit(
+                  { fadeOutCurve: event.target.value as FadeCurve },
+                  '调整淡出曲线',
+                )
+              }
+            >
+              <option value="linear">线性</option>
+              <option value="exp">指数</option>
+              <option value="log">对数</option>
+            </select>
+          </label>
+        </div>
+        {!fadeEnabled && (
+          <p className="control-note">设置淡入/淡出时长后，曲线才会生效。</p>
+        )}
         {onDetachAudio && (
           <div className="inline-actions">
             <button

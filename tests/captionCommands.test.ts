@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   createImportAutoCaptionsCommand,
+  createImportSubtitlesCommand,
   createReplaceAutoCaptionsCommand,
 } from '../src/editor/core/commands'
 import { HistoryStack } from '../src/editor/core/history'
@@ -31,6 +32,20 @@ function projectWithPreviousCaptions(): Project {
   project = addTextClipToProject(project, 'manual', captionClip('manual-1', 1))!
   return project
 }
+
+describe('import subtitle commands', () => {
+  it('SRT/VTT 导入必须建出 caption 轨，否则字幕列表与「导出 SRT」不可达', () => {
+    const before = createEmptyProject()
+    const clips = [captionClip('imported-1', 1), captionClip('imported-2', 4)]
+    const after = createImportSubtitlesCommand('imported-track', clips, '导入字幕').execute(before)
+    const track = (after.textTracks ?? [])[0]
+    expect(track, '导入后必须有一条文本轨').toBeTruthy()
+    expect(track.kind, '必须是 caption 轨，属性面板才会渲染字幕列表面板').toBe('caption')
+    expect(track.name).toBe('导入字幕')
+    expect(track.clips).toHaveLength(2)
+    expect(track.clips[0].text).toBe('字幕imported-1')
+  })
+})
 
 describe('auto caption commands', () => {
   it('replace command swaps the target caption track clips, keeps name, leaves other caption/manual tracks', () => {

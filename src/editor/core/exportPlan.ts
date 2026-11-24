@@ -2,7 +2,7 @@ import { chromaKeyFilter, despillFilter } from './chromaKey'
 import { getOutputDimensions } from './aspect'
 import { buildVolumeExpression, maxVolumeKeyValue } from './animationExpr'
 import { hasVolumeAnimation } from './animation'
-import { clipFadeIn, clipFadeOut, clipVolume } from './clipAudio'
+import { clipFadeIn, clipFadeOut, clipVolume, fadeCurveSuffix } from './clipAudio'
 import {
   backgroundBlurPx,
   backgroundFfmpegColor,
@@ -40,7 +40,7 @@ import {
 import { getOverlayTracks, getProjectEnd, getProjectDuration, getTimeline } from './timeline'
 import { computeClipGeometry } from './geometry'
 import { clampExportRange, exportRangeDuration, type ExportRange } from './exportRange'
-import type { CanvasBackground, Clip, Project, SourceInfo } from './types'
+import type { CanvasBackground, Clip, ExportTier, Project, SourceInfo } from './types'
 
 /** One FFmpeg `-i` input, resolved from a project asset. */
 export interface ExportInput {
@@ -106,17 +106,29 @@ const num = (value: number): string => {
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 
-const qualityCrf = (resolution: Project['exportQuality']['resolution']): number => {
-  switch (resolution) {
-    case '480p':
-      return 23
-    case '720p':
-      return 22
-    case '1080p':
-      return 21
-    case '4K':
-      return 20
-  }
+const TIER_CRF_OFFSET: Record<ExportTier, number> = {
+  high: -3,
+  standard: 0,
+  small: 5,
+}
+
+const qualityCrf = (
+  resolution: Project['exportQuality']['resolution'],
+  tier: ExportTier = 'standard',
+): number => {
+  const base = (() => {
+    switch (resolution) {
+      case '480p':
+        return 23
+      case '720p':
+        return 22
+      case '1080p':
+        return 21
+      case '4K':
+        return 20
+    }
+  })()
+  return clamp(base + (TIER_CRF_OFFSET[tier] ?? 0), 16, 34)
 }
 
 function extensionFor(source: SourceInfo): string {
@@ -544,9 +556,11 @@ function audioTailChain(clip: Clip, duration: number): string[] {
   } else if (gain !== 1) {
     parts.push(`volume=${num(gain)}`)
   }
-  if (fadeIn > 0.001) parts.push(`afade=t=in:st=0:d=${num(fadeIn)}`)
+  if (fadeIn > 0.001) parts.push(`afade=t=in:st=0:d=${num(fadeIn)}${fadeCurveSuffix(clip.fadeInCurve)}`)
   if (fadeOut > 0.001) {
-    parts.push(`afade=t=out:st=${num(Math.max(0, duration - fadeOut))}:d=${num(fadeOut)}`)
+    parts.push(
+      `afade=t=out:st=${num(Math.max(0, duration - fadeOut))}:d=${num(fadeOut)}${fadeCurveSuffix(clip.fadeOutCurve)}`,
+    )
   }
   parts.push(
     'aresample=48000',
@@ -847,7 +861,7 @@ function buildContiguousAudioPlan(
     graph: lines.join(';\n'),
     videoLabel: 'outv',
     audioLabel,
-    crf: qualityCrf(project.exportQuality.resolution),
+    crf: qualityCrf(project.exportQuality.resolution, project.exportQuality.tier),
     inputs: registry.inputs,
   }
 }
@@ -932,7 +946,7 @@ function buildGappedAudioPlan(
     graph: lines.join(';\n'),
     videoLabel: 'outv',
     audioLabel,
-    crf: qualityCrf(project.exportQuality.resolution),
+    crf: qualityCrf(project.exportQuality.resolution, project.exportQuality.tier),
     inputs: registry.inputs,
   }
 }
@@ -1057,7 +1071,7 @@ function buildContiguousExportPlan(
       if (background.type === 'blur') {
         lines.push(`${branch}split=2[mb${index}][mf0${index}]`)
         lines.push(
-          `[mb${index}]${temporal},${blurBackgroundChain(width, height, backgroundBlurPx(background))}[${bg}]`,
+          `[mb${index}]${temporal},${blurBackgroundChain(width, height, backgroundBlurPx(background, height))}[${bg}]`,
         )
         lines.push(`[mf0${index}]${temporal},${maskPieces.prefix}[${pre}]`)
       } else {
@@ -1106,7 +1120,7 @@ function buildContiguousExportPlan(
       // 模糊背景：同一路画面拆两支——一支放大铺满并高斯模糊当底，一支原样叠上去。
       lines.push(`${branch}split=2[bg0${index}][fg0${index}]`)
       lines.push(
-        `[bg0${index}]${temporal},${blurBackgroundChain(width, height, backgroundBlurPx(background))}[bg${index}]`,
+        `[bg0${index}]${temporal},${blurBackgroundChain(width, height, backgroundBlurPx(background, height))}[bg${index}]`,
       )
       lines.push(`[fg0${index}]${temporal},${transform}[fg${index}]`)
       if (composite) {
@@ -1244,7 +1258,7 @@ function buildContiguousExportPlan(
     graph: lines.join(';\n'),
     videoLabel: 'outv',
     audioLabel,
-    crf: qualityCrf(project.exportQuality.resolution),
+    crf: qualityCrf(project.exportQuality.resolution, project.exportQuality.tier),
     inputs: registry.inputs,
   }
 }
@@ -1336,16 +1350,18 @@ function buildGappedExportPlan(
     const composite = hasBlendSettings(unit.clip)
     const rotated = Math.abs(unit.clip.rotation) > 0.001
     const needsComposite = composite || rotated
-    // 默认路径保持历史行为（背景色直接 pad）；需要合成时才保留 alpha 并垫背景层。
+    // 默认路径用片段背景色直接 pad；需要合成时才保留 alpha 并垫背景层。
+    // 以前这里在「非合成」分支写死 black，导致时间轴一有间隙，纯色/模糊背景
+    // 就在成片里消失（预览仍然是背景色）。
     const transform = videoTransformChain(
       unit.clip,
       width,
       height,
       source,
-      needsComposite ? background : { type: 'black' },
+      background,
       { preserveAlpha: needsComposite },
     )
-    // 带蒙版片段（含空隙的时间轴）：alphamerge 后垫黑色背景再合成。
+    // 带蒙版片段（含空隙的时间轴）：alphamerge 后垫画布背景（黑 / 纯色 / 模糊）再合成。
     const unitMaskInput = maskInputs?.get(unit.clip.id)
     const unitMaskPieces =
       unitMaskInput === undefined && !unit.clip.chromaKey
@@ -1357,10 +1373,19 @@ function buildGappedExportPlan(
       const mid = `gmd${index}`
       const fg = `gmf${index}`
       const bg = `gmg${index}`
-      lines.push(`${branch}${temporal},${unitMaskPieces.prefix}[${pre}]`)
-      lines.push(
-        `color=c=0x000000:s=${width}x${height}:r=${fps}:d=${num(unit.duration)},format=yuv420p[${bg}]`,
-      )
+      if (background.type === 'blur') {
+        // 模糊背景：同一路画面拆两支——一支放大铺满并高斯模糊当底，一支打蒙版。
+        lines.push(`${branch}split=2[gmb${index}][gmf0${index}]`)
+        lines.push(
+          `[gmb${index}]${temporal},${blurBackgroundChain(width, height, backgroundBlurPx(background, height))}[${bg}]`,
+        )
+        lines.push(`[gmf0${index}]${temporal},${unitMaskPieces.prefix}[${pre}]`)
+      } else {
+        lines.push(`${branch}${temporal},${unitMaskPieces.prefix}[${pre}]`)
+        lines.push(
+          `color=c=${backgroundFfmpegColor(background)}:s=${width}x${height}:r=${fps}:d=${num(unit.duration)},format=yuv420p[${bg}]`,
+        )
+      }
       if (unitMaskInput !== undefined) {
         lines.push(
           `[${unitMaskInput}:v]format=rgba,scale=${unitMaskPieces.maskWidth}:${unitMaskPieces.maskHeight}[${maskLabel}]`,
@@ -1391,6 +1416,18 @@ function buildGappedExportPlan(
       )
       return
     }
+    if (needsBackgroundLayer(background) && !needsComposite) {
+      // 模糊背景（含空隙的时间轴）：同一路画面拆两支——一支放大铺满并高斯模糊当底，
+      // 一支原样叠上去。与无空隙路径的同构分支保持一致。
+      const prefix = `gb${index}`
+      lines.push(`${branch}split=2[${prefix}bs][${prefix}fs]`)
+      lines.push(
+        `[${prefix}bs]${temporal},${blurBackgroundChain(width, height, backgroundBlurPx(background, height))}[${prefix}bg]`,
+      )
+      lines.push(`[${prefix}fs]${temporal},${transform}[${prefix}fg]`)
+      lines.push(`[${prefix}bg][${prefix}fg]overlay=0:0,format=yuv420p${videoLabel(index)}`)
+      return
+    }
     if (needsComposite) {
       // 不透明度 / 混合模式 / 旋转透明角：画面层叠到画布背景上（模糊背景需要先拆分支）。
       const prefix = `gb${index}`
@@ -1399,7 +1436,7 @@ function buildGappedExportPlan(
       if (background.type === 'blur') {
         lines.push(`${branch}split=2[${prefix}bs][${prefix}fs]`)
         lines.push(
-          `[${prefix}bs]${temporal},${blurBackgroundChain(width, height, backgroundBlurPx(background))}${backgroundLabel}`,
+          `[${prefix}bs]${temporal},${blurBackgroundChain(width, height, backgroundBlurPx(background, height))}${backgroundLabel}`,
         )
         lines.push(`[${prefix}fs]${temporal},${transform}${foreground}`)
       } else {
@@ -1503,7 +1540,7 @@ function buildGappedExportPlan(
     graph: lines.join(';\n'),
     videoLabel: 'outv',
     audioLabel: audioOutput,
-    crf: qualityCrf(project.exportQuality.resolution),
+    crf: qualityCrf(project.exportQuality.resolution, project.exportQuality.tier),
     inputs: registry.inputs,
   }
 }
@@ -1722,7 +1759,7 @@ function buildOverlayExportPlan(
     graph: lines.join(';\n'),
     videoLabel: 'outv',
     audioLabel,
-    crf: qualityCrf(project.exportQuality.resolution),
+    crf: qualityCrf(project.exportQuality.resolution, project.exportQuality.tier),
     inputs,
     usesOverlaySource: units.length > 0,
   }
@@ -1807,11 +1844,13 @@ function applyAudioTracks(
       }
       // 淡入淡出在音量曲线之后叠加（顺序不可反）。
       if (clip.fadeIn > 0.001) {
-        filters.push(`afade=t=in:st=0:d=${num(Math.min(clip.fadeIn, duration))}`)
+        filters.push(
+          `afade=t=in:st=0:d=${num(Math.min(clip.fadeIn, duration))}${fadeCurveSuffix(clip.fadeInCurve)}`,
+        )
       }
       if (clip.fadeOut > 0.001) {
         filters.push(
-          `afade=t=out:st=${num(Math.max(0, duration - clip.fadeOut))}:d=${num(Math.min(clip.fadeOut, duration))}`,
+          `afade=t=out:st=${num(Math.max(0, duration - clip.fadeOut))}:d=${num(Math.min(clip.fadeOut, duration))}${fadeCurveSuffix(clip.fadeOutCurve)}`,
         )
       }
       filters.push(
@@ -1866,10 +1905,14 @@ function applyAudioTracks(
       // 音量曲线在前，淡入淡出在后。
       const fadeIn = clipFadeIn(clip)
       const fadeOut = clipFadeOut(clip)
-      if (fadeIn > 0.001) filters.push(`afade=t=in:st=0:d=${num(Math.min(fadeIn, duration))}`)
+      if (fadeIn > 0.001) {
+        filters.push(
+          `afade=t=in:st=0:d=${num(Math.min(fadeIn, duration))}${fadeCurveSuffix(clip.fadeInCurve)}`,
+        )
+      }
       if (fadeOut > 0.001) {
         filters.push(
-          `afade=t=out:st=${num(Math.max(0, duration - fadeOut))}:d=${num(Math.min(fadeOut, duration))}`,
+          `afade=t=out:st=${num(Math.max(0, duration - fadeOut))}:d=${num(Math.min(fadeOut, duration))}${fadeCurveSuffix(clip.fadeOutCurve)}`,
         )
       }
       filters.push(
@@ -1930,7 +1973,13 @@ function applyAudioTracks(
   appendPart(
     `${mainLabel}${branchInputs}amix=inputs=${branches.length + 1}:duration=longest:dropout_transition=0:normalize=0[amix]`,
   )
-  appendPart(`[amix]apad=whole_dur=${num(totalDuration)},atrim=duration=${num(totalDuration)}[outa]`)
+  /**
+   * 混音终点限幅：`amix normalize=0` 保留各路原始增益，主轨 100% + 音乐 100%
+   * 峰值就能到 2.0，直接交给 AAC 会削波。`level=false` 关掉自动增益，
+   * 只做峰值限制，安静项目不会被“抬响”。
+   */
+  appendPart('[amix]alimiter=limit=0.97:level=false[amixl]')
+  appendPart(`[amixl]apad=whole_dur=${num(totalDuration)},atrim=duration=${num(totalDuration)}[outa]`)
 
   let videoLabel = plan.videoLabel
   if (!audioOnly && totalDuration > plan.totalDuration + 0.001) {
@@ -1988,8 +2037,11 @@ export function buildExportArgs(
   return args
 }
 
-export function getExportCrf(resolution: Project['exportQuality']['resolution']): number {
-  return qualityCrf(resolution)
+export function getExportCrf(
+  resolution: Project['exportQuality']['resolution'],
+  tier: ExportTier = 'standard',
+): number {
+  return qualityCrf(resolution, tier)
 }
 
 /**

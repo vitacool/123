@@ -1,7 +1,6 @@
-import { useRef } from 'react'
 import {
   BACKGROUND_TYPES,
-  backgroundBlurPx,
+  backgroundBlurAmount,
   BLUR_MAX,
   BLUR_MIN,
   DEFAULT_BACKGROUND,
@@ -9,11 +8,10 @@ import {
   normalizeBackground,
   projectBackground,
 } from '../core/background'
-import type { CanvasBackground, MediaAsset } from '../core/types'
+import type { CanvasBackground } from '../core/types'
 import { useEditorStore } from '../store/EditorProvider'
 import { CommitNumber } from './Toast'
 import { CommitSlider } from './CommitSlider'
-import { Icon } from './Icon'
 
 /**
  * 画布背景设置（无选中片段时展示，也可从顶栏入口打开）。
@@ -22,15 +20,12 @@ import { Icon } from './Icon'
  */
 export function CanvasBackgroundPanel() {
   const project = useEditorStore((state) => state.project)
-  const assets = useEditorStore((state) => state.assets)
   const setCanvasBackground = useEditorStore((state) => state.setCanvasBackground)
   const applyBackgroundToAll = useEditorStore((state) => state.applyBackgroundToAll)
   const setPreviewPatch = useEditorStore((state) => state.setPreviewPatch)
-  const fileRef = useRef<HTMLInputElement>(null)
 
   const background = projectBackground(project)
-  const blur = backgroundBlurPx(background)
-  const imageAssets = assets.filter((asset) => asset.kind === 'image')
+  const blur = backgroundBlurAmount(background)
 
   const update = (patch: Partial<CanvasBackground>) => {
     setCanvasBackground(normalizeBackground({ ...background, ...patch }))
@@ -79,7 +74,7 @@ export function CanvasBackgroundPanel() {
             </label>
           )}
 
-          {(background.type === 'blur' || background.type === 'image') && (
+          {background.type === 'blur' && (
             <div className="control-with-field">
               <CommitSlider
                 value={blur}
@@ -114,52 +109,9 @@ export function CanvasBackgroundPanel() {
             </div>
           )}
 
-          {background.type === 'image' && (
-            <>
-              {imageAssets.length > 0 && (
-                <label className="select-field">
-                  <span className="section-hint">选择素材库中的图片</span>
-                  <select
-                    value={background.imageUrl ?? ''}
-                    aria-label="背景图片"
-                    onChange={(event) => update({ imageUrl: event.target.value || undefined })}
-                  >
-                    <option value="">未选择</option>
-                    {imageAssets.map((asset: MediaAsset) => (
-                      <option key={asset.id} value={asset.url}>
-                        {asset.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-              <div className="inline-actions">
-                <button
-                  type="button"
-                  className="button mini"
-                  onClick={() => fileRef.current?.click()}
-                >
-                  <Icon name="upload" size={14} />
-                  选择图片文件
-                </button>
-              </div>
-              <input
-                ref={fileRef}
-                type="file"
-                accept="image/jpeg,image/png,image/webp,image/gif"
-                hidden
-                onChange={(event) => {
-                  const file = event.target.files?.[0]
-                  if (!file) return
-                  update({ imageUrl: URL.createObjectURL(file) })
-                  event.target.value = ''
-                }}
-              />
-            </>
-          )}
-
           <p className="control-note">
             黑场为默认值；模糊会用每个片段自身的画面放大填充并高斯模糊。
+            图片背景尚未实现，旧工程里的图片背景会按黑色导出。
           </p>
         </section>
 

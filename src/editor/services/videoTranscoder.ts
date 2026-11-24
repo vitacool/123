@@ -63,7 +63,7 @@ async function transcodeOnce(
   try {
     await ffmpeg.writeFile(inputName, new Uint8Array(await file.arrayBuffer()))
     callbacks.onStatus?.('正在转码为 H.264 MP4…')
-    await execOnRuntime(runtime, [
+    const code = await execOnRuntime(runtime, [
       '-threads', '1',
       '-i', inputName,
       '-threads', '1',
@@ -83,6 +83,12 @@ async function transcodeOnce(
       '-max_muxing_queue_size', '1024',
       outputName,
     ], { signal: callbacks.signal })
+    if (code !== 0) {
+      // 不能只看 readFile 是否成功：退出码非零时输出文件往往不存在，
+      // 用户会收到「文件不存在」这种和真实原因无关的错误。
+      const tail = logs.slice(-4).join(' | ')
+      throw new Error(`FFmpeg 转码失败（退出码 ${code}）${tail ? `：${tail}` : ''}`)
+    }
     callbacks.onProgress?.(100)
     const data = await ffmpeg.readFile(outputName)
     if (typeof data === 'string') throw new Error('转码输出为空')

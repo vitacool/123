@@ -14,6 +14,7 @@ import {
   projectNameFromSource,
   projectThumbnail,
   sortProjectRecords,
+  summarizeProjectSnapshot,
   type DraftProjectRecord,
 } from '../src/editor/core/projectLibrary'
 
@@ -72,6 +73,22 @@ function record(id: string, updatedAt: number, mediaIds: string[] = []): DraftPr
     }),
   }
 }
+
+describe('项目列表摘要', () => {
+  it('统计片段数 / 总时长 / 素材数 / 缺失数', () => {
+    const base = snapshot()
+    const summary = summarizeProjectSnapshot({
+      ...base,
+      missingAssets: [{ url: 'blob:gone', name: 'gone.mp4', kind: 'video' }],
+    })
+    expect(summary).toEqual({
+      clipCount: 1,
+      duration: 10,
+      assetCount: 1,
+      missingCount: 1,
+    })
+  })
+})
 
 describe('项目名', () => {
   it('默认取主素材名并去掉扩展名', () => {

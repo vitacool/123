@@ -90,7 +90,8 @@ export function ClipCompositingSection({
         </select>
       </label>
       <p className="control-note">
-        当前：{blendModeLabel(mode)}。混合模式与下方叠加层的画面合成，主轨片段仅受不透明度影响。
+        当前：{blendModeLabel(mode)}。叠加片段与下方图层合成；主轨片段与画布背景合成
+        （不透明度、混合模式、旋转透明角都生效）。
       </p>
     </section>
   )

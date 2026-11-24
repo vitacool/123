@@ -69,7 +69,6 @@ export function ClipTransitionSection({
     Boolean(disabled) ||
     Boolean(unavailableReason) ||
     isLast ||
-    hasGap ||
     nextIsFreeze ||
     limitTooSmall
   const limitLimited = !nextIsFreeze && limit >= TRANSITION_MIN_DURATION
@@ -80,7 +79,12 @@ export function ClipTransitionSection({
     : isLast
       ? { tone: 'is-muted' as const, text: '已是最后一个片段' }
       : hasGap
-        ? { tone: 'is-blocked' as const, text: '与下一片段之间有空隙，转场不生效' }
+        ? {
+            tone: 'is-ok' as const,
+            text: current
+              ? `空隙 ${gap.toFixed(2)}s：应用/修改转场会自动闭合空隙`
+              : '与下一片段之间有空隙，添加转场会自动闭合',
+          }
         : nextIsFreeze
           ? { tone: 'is-blocked' as const, text: '下一片段是定格片段，不支持转场' }
           : limitTooSmall

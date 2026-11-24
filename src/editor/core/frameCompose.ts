@@ -196,7 +196,7 @@ export function composeFrame(input: ComposeFrameInput): void {
     const scale = Math.max(width / frame.width, height / frame.height)
     const drawWidth = frame.width * scale
     const drawHeight = frame.height * scale
-    const blur = backgroundBlurPx(background)
+    const blur = backgroundBlurPx(background, height)
     ctx.save()
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.filter = blur > 0 ? `blur(${blur}px)` : 'none'

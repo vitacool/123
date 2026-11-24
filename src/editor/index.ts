@@ -147,5 +147,6 @@ export type {
   ExportOptions,
 } from './services/ffmpegExporter'
 export type { TranscribeProvider } from './services/asr/types'
+export { configureAsrAssets } from './services/asr/assets'
 export type { AsrLanguage, AsrWord } from './core/asr'
 export type { TimelineWord, WordsBySource } from './core/captionMapping'

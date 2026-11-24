@@ -1,4 +1,4 @@
-import type { EditorState } from '../editorStore'
+import type { EditorState, DraftSaveState } from '../editorStore'
 import type { StoreGet, StoreInternals, StoreSet } from '../internal'
 import { DEFAULT_FRAMECUT_THEME } from '../../core/theme'
 import { clearThemeTokenCache } from '../../services/themeTokens'
@@ -6,7 +6,7 @@ import { clampMainTrackStart } from '../internal'
 import { createRelinkCaptionsCommand } from '../../core/commands'
 
 /** ui slice：主题、提示、面板开关与其它纯界面会话态 */
-export type UiSlice = Pick<EditorState, 'theme' | 'resolvedTheme' | 'previewFullscreen' | 'timelineSettings' | 'previewPatch' | 'markerEditorId' | 'coverPreview' | 'coverPanelOpen' | 'toast' | 'asrWordsBySource' | 'captionApplyAll' | 'captionFollow' | 'captionStylePreview' | 'setPreviewFullscreen' | 'toggleTimelineSetting' | 'setPreviewPatch' | 'togglePreviewMuteSegmentedSpeed' | 'setTheme' | 'setResolvedTheme' | 'openCoverPanel' | 'closeCoverPanel' | 'setCoverPreview' | 'setAsrWordsBySource' | 'setCaptionApplyAll' | 'setCaptionFollow' | 'setCaptionStylePreview' | 'openMarkerEditor' | 'closeMarkerEditor' | 'notify' | 'clearToast'>
+export type UiSlice = Pick<EditorState, 'theme' | 'resolvedTheme' | 'previewFullscreen' | 'timelineSettings' | 'previewPatch' | 'markerEditorId' | 'coverPreview' | 'coverPanelOpen' | 'toast' | 'draftSave' | 'draftSaveLocked' | 'asrWordsBySource' | 'captionApplyAll' | 'captionFollow' | 'captionStylePreview' | 'setPreviewFullscreen' | 'toggleTimelineSetting' | 'setPreviewPatch' | 'togglePreviewMuteSegmentedSpeed' | 'setTheme' | 'setResolvedTheme' | 'openCoverPanel' | 'closeCoverPanel' | 'setCoverPreview' | 'setDraftSave' | 'setDraftSaveLocked' | 'setAsrWordsBySource' | 'setCaptionApplyAll' | 'setCaptionFollow' | 'setCaptionStylePreview' | 'openMarkerEditor' | 'closeMarkerEditor' | 'notify' | 'clearToast'>
 
 export function createUiSlice(ctx: {
   get: StoreGet
@@ -33,6 +33,8 @@ export function createUiSlice(ctx: {
     coverPreview: false,
     coverPanelOpen: false,
     toast: null,
+    draftSave: { status: 'idle', at: null },
+    draftSaveLocked: false,
     asrWordsBySource: null,
     captionApplyAll: true,
     captionFollow: true,
@@ -103,6 +105,12 @@ export function createUiSlice(ctx: {
       }
     },
     closeMarkerEditor: () => set({ markerEditorId: null }),
+    setDraftSave: (next: DraftSaveState) => {
+      set({ draftSave: next })
+    },
+    setDraftSaveLocked: (locked: boolean) => {
+      set({ draftSaveLocked: locked })
+    },
     notify: (message, kind = 'info') => {
       toastCounter += 1
       set({ toast: { id: toastCounter, kind, message } })

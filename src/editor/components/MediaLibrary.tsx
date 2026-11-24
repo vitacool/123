@@ -1,16 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ASSET_KIND_LABELS,
+  ASSET_SORT_OPTIONS,
   assetKindOf,
   countAssetKinds,
   countAssetReferences,
   matchesAssetName,
   reversedDependents,
+  sortAssets,
   unusedAssets,
   type AssetKind,
+  type AssetSortMode,
 } from '../core/assets'
 import { formatPlayhead } from '../core/format'
 import type { MediaAsset } from '../core/types'
+import { regenerateThumbnail } from '../services/assetReader'
 import { useEditorStore, useEditorStoreApi } from '../store/EditorProvider'
 import { ContextMenu } from './ContextMenu'
 import { Icon } from './Icon'
@@ -54,13 +58,19 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
   const store = useEditorStoreApi()
   const addAssetToTimeline = useEditorStore((state) => state.addAssetToTimeline)
   const removeAsset = useEditorStore((state) => state.removeAsset)
+  const updateAssetThumbnail = useEditorStore((state) => state.updateAssetThumbnail)
+  const renameAsset = useEditorStore((state) => state.renameAsset)
+  const notify = useEditorStore((state) => state.notify)
   const cleanupUnusedAssets = useEditorStore((state) => state.cleanupUnusedAssets)
 
   const counts = useMemo(() => countAssetKinds(assets), [assets])
   const [activeKind, setActiveKind] = useState<AssetKind>('video')
   const [query, setQuery] = useState('')
+  const [sortMode, setSortMode] = useState<AssetSortMode>('added')
   const [pending, setPending] = useState<PendingDelete | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; asset: MediaAsset } | null>(null)
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
   const cancelRef = useRef<HTMLButtonElement | null>(null)
   const searchRef = useRef<HTMLInputElement | null>(null)
 
@@ -109,8 +119,27 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
   const visible = searching
     ? assets.filter((asset) => matchesAssetName(asset, keyword))
     : assets.filter((asset) => assetKindOf(asset) === activeKind)
+  const sortedVisible = sortAssets(visible, sortMode)
 
   const unused = unusedAssets(project, assets)
+
+  /** 重新生成素材缩略图（导入截帧失败或草稿恢复后丢失时用）。 */
+  const regenerateAssetThumbnail = async (asset: MediaAsset) => {
+    const thumbnail = await regenerateThumbnail(asset)
+    if (!thumbnail) {
+      notify('缩略图生成失败（素材可能已失效或无法解码）', 'warning')
+      return
+    }
+    updateAssetThumbnail(asset.id, thumbnail)
+    notify('已重新生成缩略图', 'success')
+  }
+
+  /** 提交素材重命名（空名/未改名时静默取消）。 */
+  const commitAssetRename = (asset: MediaAsset) => {
+    const name = renameDraft.trim()
+    if (name && name !== asset.name) renameAsset(asset.id, name)
+    setRenamingId(null)
+  }
 
   const requestDelete = (asset: MediaAsset) => {
     const count = countAssetReferences(project, asset)
@@ -192,6 +221,28 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
             </small>
           </span>
         </button>
+        {renamingId === asset.id && (
+          <input
+            className="media-card-rename"
+            value={renameDraft}
+            autoFocus
+            maxLength={200}
+            aria-label={`重命名素材 ${asset.name}`}
+            onChange={(event) => setRenameDraft(event.target.value)}
+            onBlur={() => commitAssetRename(asset)}
+            onKeyDown={(event) => {
+              event.stopPropagation()
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                commitAssetRename(asset)
+              }
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                setRenamingId(null)
+              }
+            }}
+          />
+        )}
         <button
           type="button"
           className="media-card-delete"
@@ -287,6 +338,21 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
         )}
       </div>
 
+      <label className="media-sort">
+        <span>排序</span>
+        <select
+          value={sortMode}
+          aria-label="素材排序"
+          onChange={(event) => setSortMode(event.target.value as AssetSortMode)}
+        >
+          {ASSET_SORT_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
       {searching && (
         <p className="media-search-status">
           搜索「{keyword}」· 找到 {visible.length} 个素材（全部分类）
@@ -320,7 +386,7 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
           </div>
         )}
 
-        {visible.map(renderCard)}
+        {sortedVisible.map(renderCard)}
       </div>
 
       <p className="media-library-foot">点击添加到播放头 · 拖到任意轨道</p>
@@ -331,7 +397,24 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
           y={menu.y}
           ariaLabel="素材操作"
           onClose={() => setMenu(null)}
-          items={[{ label: '删除素材', danger: true, onSelect: () => requestDelete(menu.asset) }]}
+          items={[
+            {
+              label: '重命名素材',
+              onSelect: () => {
+                setRenamingId(menu.asset.id)
+                setRenameDraft(menu.asset.name)
+              },
+            },
+            ...(menu.asset.kind === 'audio'
+              ? []
+              : [
+                  {
+                    label: '重新生成缩略图',
+                    onSelect: () => void regenerateAssetThumbnail(menu.asset),
+                  },
+                ]),
+            { label: '删除素材', danger: true, onSelect: () => requestDelete(menu.asset) },
+          ]}
         />
       )}
 
@@ -360,8 +443,8 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
               </p>
             )}
             <p className="media-confirm-hint">
-              「仅从素材库移除」会保留时间轴片段，但显示为「素材已移除」；缓存中的素材文件会被删除，
-              撤销只恢复时间轴状态，需要重新导入文件。
+              「仅从素材库移除」会保留时间轴片段，但显示为「素材已移除」；刷新后仍然保留，
+              可用属性面板里的「重新链接素材」选回同一个文件恢复。
             </p>
             <div className="media-confirm-actions">
               <button ref={cancelRef} type="button" className="button ghost" onClick={() => setPending(null)}>

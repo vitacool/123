@@ -13,6 +13,21 @@ describe('buildAsrCacheKey', () => {
     expect(buildAsrCacheKey(key)).toBe('v2|asset-1|1.235|5.679|whisper-small-timestamped|zh')
   })
 
+  it('字形变体参与缓存键：切换繁简不会复用旧结果', () => {
+    const base: AsrCacheKey = {
+      assetId: 'asset-1',
+      start: 0,
+      end: 5,
+      providerId: 'p',
+      language: 'zh',
+    }
+    const simplified = buildAsrCacheKey({ ...base, variant: 'simplified' })
+    const traditional = buildAsrCacheKey({ ...base, variant: 'traditional' })
+    expect(simplified).not.toBe(traditional)
+    // 默认（无 variant）保持旧格式，不产生多余分隔符。
+    expect(buildAsrCacheKey(base).endsWith('|zh')).toBe(true)
+  })
+
   it('distinguishes different intervals and providers', () => {
     const base: AsrCacheKey = {
       assetId: 'asset-1',

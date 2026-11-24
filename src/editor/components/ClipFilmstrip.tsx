@@ -2,6 +2,11 @@ import { memo, useEffect, useRef, useState } from 'react'
 import type { Clip, SourceInfo } from '../core/types'
 import { clipFilmstripRange } from '../core/clipTime'
 import { getClipFrames, type ClipFrames } from '../services/filmstrip'
+import {
+  getAudioPeaks,
+  samplePeakRange,
+  type AudioPeaks,
+} from '../services/audioWaveform'
 import { useEditorStore } from '../store/EditorProvider'
 import { readThemeToken } from '../services/themeTokens'
 
@@ -23,6 +28,10 @@ const CLIP_HEIGHT = 62
 function ClipFilmstripInner({ clip, asset, width }: ClipFilmstripProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const [frames, setFrames] = useState<ClipFrames | null>(null)
+  const [peakState, setPeakState] = useState<{
+    url: string
+    peaks: AudioPeaks
+  } | null>(null)
   // 主题变化时重绘（胶片条底色是界面色，从 CSS 变量读取）。
   const resolvedTheme = useEditorStore((state) => state.resolvedTheme)
   // 定格片段取样「冻结帧」这一个点，否则会把停留时长当成播放区间。
@@ -55,6 +64,25 @@ function ClipFilmstripInner({ clip, asset, width }: ClipFilmstripProps) {
       window.clearTimeout(timer)
     }
   }, [asset.url, asset.name, sampleRange.start, sampleRange.end])
+
+  // 视频片段的原声波形：贴底叠一层，方便对白停顿处下刀/找节拍。
+  useEffect(() => {
+    if (clip.type === 'freeze' || clip.type === 'image' || asset.hasAudio === false) {
+      return
+    }
+    let cancelled = false
+    void getAudioPeaks(asset).then(
+      (result) => {
+        if (!cancelled) setPeakState({ url: asset.url, peaks: result })
+      },
+      () => undefined,
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [asset, clip.type])
+
+  const peaks = peakState?.url === asset.url ? peakState.peaks : null
 
   useEffect(() => {
     let raf = 0
@@ -123,13 +151,42 @@ function ClipFilmstripInner({ clip, asset, width }: ClipFilmstripProps) {
           pixelHeight,
         )
       }
+
+      if (peaks && peaks.duration > 0 && clip.sourceEnd > clip.sourceStart) {
+        const waveHeight = Math.max(6, Math.round(pixelHeight * 0.24))
+        const center = pixelHeight - waveHeight / 2 - 1
+        const columns = Math.max(1, Math.floor(pixelWidth / 2))
+        const values = samplePeakRange(
+          peaks,
+          clip.sourceStart,
+          clip.sourceEnd,
+          columns,
+        )
+        context.fillStyle = readThemeToken(
+          '--fc-waveform-on-dark',
+          'rgba(255, 255, 255, 0.42)',
+        )
+        const columnWidth = pixelWidth / columns
+        values.forEach((amplitude, index) => {
+          const height = amplitude * waveHeight * 0.5
+          context.fillRect(
+            index * columnWidth,
+            center - height,
+            Math.max(1, columnWidth - 1),
+            height * 2,
+          )
+        })
+      }
     }
     raf = requestAnimationFrame(paint)
     return () => cancelAnimationFrame(raf)
   }, [
     frames,
+    peaks,
     width,
     clip.type,
+    clip.sourceStart,
+    clip.sourceEnd,
     sampleRange.start,
     sampleRange.end,
     resolvedTheme,

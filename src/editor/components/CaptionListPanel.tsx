@@ -1,5 +1,5 @@
-import { useCallback, useLayoutEffect, useRef, useState } from 'react'
-import { serializeSrt } from '../core/text'
+import { useLayoutEffect, useRef, useState } from 'react'
+import { serializeSrt, serializeVtt } from '../core/text'
 import type { TextClip, TextTrack } from '../core/types'
 import { useEditorStore } from '../store/EditorProvider'
 import { Icon } from './Icon'
@@ -27,6 +27,7 @@ export function CaptionListPanel({ track, clip }: CaptionListPanelProps) {
   const splitCaption = useEditorStore((state) => state.splitCaption)
   const mergeCaptionUp = useEditorStore((state) => state.mergeCaptionUp)
   const deleteTextClip = useEditorStore((state) => state.deleteTextClip)
+  const addCaptionAtPlayhead = useEditorStore((state) => state.addCaptionAtPlayhead)
   const replaceCaptionText = useEditorStore((state) => state.replaceCaptionText)
   const replaceCaptionTextInClip = useEditorStore((state) => state.replaceCaptionTextInClip)
   const captionFollow = useEditorStore((state) => state.captionFollow)
@@ -92,16 +93,34 @@ export function CaptionListPanel({ track, clip }: CaptionListPanelProps) {
     }
   }
 
-  const exportSrt = useCallback(() => {
-    const srt = serializeSrt(clips)
-    const blob = new Blob([srt], { type: 'text/plain;charset=utf-8' })
+  /**
+   * 导出前过滤 `linkHidden`：这些字幕因为片段被裁掉/移出范围而在画面上不可见，
+   * 不应出现在 SRT/VTT 里（否则条数与画面肉眼对不上）。
+   */
+  const visibleClips = clips.filter((item) => !item.link?.linkHidden)
+
+  const downloadCues = (text: string, extension: 'srt' | 'vtt', withBom: boolean) => {
+    const payload = withBom ? `\uFEFF${text}` : text
+    const blob = new Blob([payload], {
+      type:
+        extension === 'vtt' ? 'text/vtt;charset=utf-8' : 'text/plain;charset=utf-8',
+    })
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `${track.name}.srt`
+    anchor.download = `${track.name}.${extension}`
     anchor.click()
     URL.revokeObjectURL(url)
-  }, [clips, track.name])
+  }
+
+  const exportSrt = () => {
+    // SRT 加 UTF-8 BOM：Windows 上的老播放器/记事本不加 BOM 会把中文显示成乱码。
+    downloadCues(serializeSrt(visibleClips), 'srt', true)
+  }
+
+  const exportVtt = () => {
+    downloadCues(serializeVtt(visibleClips), 'vtt', false)
+  }
 
   const doReplaceAll = () => {
     replaceCaptionText(track.id, find, replace)
@@ -151,8 +170,19 @@ export function CaptionListPanel({ track, clip }: CaptionListPanelProps) {
         <button type="button" className="button mini" onClick={doReplaceAll} disabled={!find}>
           全部替换
         </button>
+        <button
+          type="button"
+          className="button mini"
+          onClick={() => addCaptionAtPlayhead(track.id)}
+          title="在播放头新增一条字幕"
+        >
+          + 新增
+        </button>
         <button type="button" className="button mini" onClick={exportSrt}>
           导出 SRT
+        </button>
+        <button type="button" className="button mini" onClick={exportVtt}>
+          导出 VTT
         </button>
         <label className="caption-follow-check">
           <input

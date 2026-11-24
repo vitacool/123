@@ -1,6 +1,6 @@
 import { evalAnimation, normalizedTime } from './animation'
 import { clipTimelineDuration, type TimeMappable } from './clipTime'
-import type { AnimationMap } from './types'
+import type { AnimationMap, FadeCurve } from './types'
 
 /**
  * 片段级音频参数（主轨与叠加轨通用）。旧草稿没有这些字段，一律按默认值处理：
@@ -18,7 +18,29 @@ export interface VolumeAnimatable extends TimeMappable {
   volume?: number
   fadeIn?: number
   fadeOut?: number
+  fadeInCurve?: FadeCurve
+  fadeOutCurve?: FadeCurve
   anim?: AnimationMap
+}
+
+/** 曲线名 → FFmpeg `afade=curve=` 值（linear 用 tri，保持历史默认）。 */
+export function ffmpegFadeCurve(curve: FadeCurve | undefined): 'tri' | 'exp' | 'log' {
+  if (curve === 'exp') return 'exp'
+  if (curve === 'log') return 'log'
+  return 'tri'
+}
+
+/** 非默认曲线才追加参数，保证既有工程的滤镜图不变。 */
+export function fadeCurveSuffix(curve: FadeCurve | undefined): string {
+  return curve && curve !== 'linear' ? `:curve=${ffmpegFadeCurve(curve)}` : ''
+}
+
+/** 淡入淡出进度（0→1）经曲线整形；与 FFmpeg exp/log 近似。 */
+export function fadeProgress(progress: number, curve: FadeCurve | undefined): number {
+  const x = Math.max(0, Math.min(1, progress))
+  if (curve === 'exp') return (Math.exp(x) - 1) / (Math.E - 1)
+  if (curve === 'log') return Math.log10(1 + 9 * x)
+  return x
 }
 
 function finiteOr(value: unknown, fallback: number): number {
@@ -100,9 +122,14 @@ export function clipGainAt(
   const fadeIn = clipFadeIn(clip)
   const fadeOut = clipFadeOut(clip)
   let envelope = 1
-  if (fadeIn > 0 && t < fadeIn) envelope = Math.min(envelope, t / fadeIn)
+  if (fadeIn > 0 && t < fadeIn) {
+    envelope = Math.min(envelope, fadeProgress(t / fadeIn, clip.fadeInCurve))
+  }
   if (fadeOut > 0 && t > duration - fadeOut) {
-    envelope = Math.min(envelope, (duration - t) / fadeOut)
+    envelope = Math.min(
+      envelope,
+      fadeProgress((duration - t) / fadeOut, clip.fadeOutCurve),
+    )
   }
   return volume * Math.max(0, envelope)
 }

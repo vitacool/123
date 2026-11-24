@@ -62,6 +62,15 @@ export type TimelineSettingKey = keyof TimelineSettings
 
 export type ToastKind = 'info' | 'success' | 'warning' | 'error'
 
+/** 草稿自动保存状态（顶栏展示；不参与撤销历史）。 */
+export type DraftSaveStatus = 'idle' | 'pending' | 'saving' | 'saved' | 'error'
+
+export interface DraftSaveState {
+  status: DraftSaveStatus
+  /** 最近一次成功写入的时间（毫秒）；未保存过为 null。 */
+  at: number | null
+}
+
 /** 进行中的「倒放」任务（用于进度条 / 取消按钮；不写进工程与撤销历史）。 */
 export interface ReverseJob {
   clipId: string
@@ -148,7 +157,7 @@ export interface EditorState {
   /** 修改片段音频参数（一个命令）。 */
   setClipAudio: (
     clipId: string,
-    patch: Partial<Pick<Clip, 'volume' | 'fadeIn' | 'fadeOut'>>,
+    patch: Partial<Pick<Clip, 'volume' | 'fadeIn' | 'fadeOut' | 'fadeInCurve' | 'fadeOutCurve'>>,
     label: string,
   ) => void
   /** 分离音频：抽出为音频轨片段并把画面片段静音。 */
@@ -304,6 +313,15 @@ export interface EditorState {
   history: HistoryState
   lastAction: string
   toast: ToastMessage | null
+  /** 草稿自动保存状态（顶栏展示；不参与撤销历史）。 */
+  draftSave: DraftSaveState
+  setDraftSave: (state: DraftSaveState) => void
+  /**
+   * 同一项目正在另一个标签页编辑（Web Locks 未拿到）：本页停止自动保存，
+   * 避免两个窗口互相覆盖。只读锁不阻止本地编辑，但顶栏会明确提示。
+   */
+  draftSaveLocked: boolean
+  setDraftSaveLocked: (locked: boolean) => void
 
   loadSource: (source: SourceInfo) => void
   hydrateDraft: (draft: {
@@ -327,6 +345,15 @@ export interface EditorState {
    * 时才真正回收，否则撤销回来的片段会指向已经失效的源。撤销会自动把素材放回素材库。
    */
   removeAsset: (assetId: string, options: { removeClips: boolean }) => void
+  /**
+   * 重新链接缺失素材：读取用户选择的新文件，把工程里所有引用旧 URL 的位置
+   * （主轨 / 叠加 / 音频 / 字幕 / 背景）改到新素材。片段入出点与关键帧不变。
+   */
+  relinkMissingAsset: (url: string, file: File) => Promise<boolean>
+  /** 更新素材缩略图（重新生成成功后调用；主素材同步更新）。 */
+  updateAssetThumbnail: (assetId: string, thumbnail: string | undefined) => void
+  /** 重命名素材（只改显示名，不改 url/blob）。 */
+  renameAsset: (assetId: string, name: string) => void
   /** 一次性清理所有未被任何片段引用的素材（同样走延迟回收）。 */
   cleanupUnusedAssets: () => void
   /**
@@ -420,6 +447,8 @@ export interface EditorState {
   deleteAudioClip: (trackId: string, clipId: string) => void
 
   addTextAtPlayhead: () => void
+  /** 在播放头给指定字幕轨新增一条字幕（CaptionListPanel 的「新增」）。 */
+  addCaptionAtPlayhead: (trackId: string) => void
   addTextTrack: () => void
   removeTextTrack: (trackId: string) => void
   updateTextClip: (

@@ -7,13 +7,21 @@ export type ExportResolution = '480p' | '720p' | '1080p' | '4K'
 export type ExportFps = 24 | 30 | 60
 
 /** 响度标准化目标：关闭 / 短视频平台（-14 LUFS） / 广播（-23 LUFS）。 */
+/** 淡入/淡出曲线；linear 对应 FFmpeg afade 的 tri。 */
+export type FadeCurve = 'linear' | 'exp' | 'log'
+
 export type ExportLoudness = 'off' | 'platform' | 'broadcast'
+
+/** 编码质量档：同一分辨率下调整 CRF（high 更清晰/更大，small 更小/更快）。 */
+export type ExportTier = 'high' | 'standard' | 'small'
 
 export interface ExportQuality {
   resolution: ExportResolution
   fps: ExportFps
   /** 缺省 `off`（旧草稿/工程没有该字段时按 off 处理）。 */
   loudness?: ExportLoudness
+  /** 缺省 `standard`（旧草稿没有该字段）。 */
+  tier?: ExportTier
 }
 
 /** Normalised crop rectangle. Values are fractions of the source frame (0…1). */
@@ -166,6 +174,10 @@ export interface Clip {
   fadeIn?: number
   /** 淡出时长（秒），缺省 0。 */
   fadeOut?: number
+  /** 淡入曲线，缺省 linear（旧草稿无此字段）。 */
+  fadeInCurve?: FadeCurve
+  /** 淡出曲线，缺省 linear（旧草稿无此字段）。 */
+  fadeOutCurve?: FadeCurve
   /** 播放倍率 0.1–10，缺省 1（旧草稿无此字段视为 1）。 */
   speed?: number
   /** 变速时是否保持音调，缺省 true。 */
@@ -255,6 +267,10 @@ export interface AudioClip {
   volume: number
   fadeIn: number
   fadeOut: number
+  /** 淡入曲线，缺省 linear。 */
+  fadeInCurve?: FadeCurve
+  /** 淡出曲线，缺省 linear。 */
+  fadeOutCurve?: FadeCurve
   /**
    * 音量关键帧；缺省表示静态音量（旧草稿无此字段）。
    * 本期只允许 `volume`，时间基准是该音频片段的本地归一化时间 0…1。
@@ -295,6 +311,12 @@ export interface CaptionStyle {
   shadowOffsetX?: number
   /** 阴影垂直偏移，按 fontSize 的比例存储（可为负）。 */
   shadowOffsetY?: number
+  /** 行高倍数（作用在 fontSize 上）；缺省 1.26。 */
+  lineHeight?: number
+  /** 字间距（em，作用在 fontSize 上，可为负）；缺省 0。 */
+  letterSpacing?: number
+  /** 斜体；缺省 false。 */
+  italic?: boolean
   background?: string
   x?: number
   y?: number
@@ -351,6 +373,12 @@ export interface TextClip {
   align: TextAlign
   bold: boolean
   fontFamily?: string
+  /** 行高倍数（作用在 fontSize 上）；缺省 1.26（旧草稿无此字段）。 */
+  lineHeight?: number
+  /** 字间距（em，作用在 fontSize 上，可为负）；缺省 0。 */
+  letterSpacing?: number
+  /** 斜体；缺省 false。 */
+  italic?: boolean
   /** Optional outline; width is a fraction of font size. */
   strokeColor?: string
   strokeWidth?: number

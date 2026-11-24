@@ -19,6 +19,7 @@ export function TrackGutter() {
   const moveOverlayTrack = useEditorStore((state) => state.moveOverlayTrack)
   const moveTrackBy = useEditorStore((state) => state.moveTrackBy)
   const removeAudioTrack = useEditorStore((state) => state.removeAudioTrack)
+  const setAudioTrackVolume = useEditorStore((state) => state.setAudioTrackVolume)
   const removeTextTrack = useEditorStore((state) => state.removeTextTrack)
   const openCoverPanel = useEditorStore((state) => state.openCoverPanel)
 
@@ -43,6 +44,7 @@ export function TrackGutter() {
             name={track.name}
             state={overlayTrackState(track)}
             height={OVERLAY_HEIGHT}
+            suppressedBySolo={isAudioSuppressedBySolo(project, overlayTrackState(track))}
             onRemove={() => removeOverlayTrack(track.id)}
             canMoveUp={arrayIndex >= 0 && arrayIndex < overlayArray.length - 1}
             canMoveDown={arrayIndex > 0}
@@ -70,6 +72,8 @@ export function TrackGutter() {
             name={track.name}
             state={state}
             height={AUDIO_HEIGHT}
+            volume={track.volume}
+            onVolumeChange={(value) => setAudioTrackVolume(track.id, value)}
             suppressedBySolo={isAudioSuppressedBySolo(project, state)}
             onRemove={() => removeAudioTrack(track.id)}
             canMoveUp={audioTracks.findIndex((item) => item.id === track.id) > 0}

@@ -127,7 +127,11 @@ export function waitForVideoMetadata(video: HTMLVideoElement): Promise<void> {
       if (settled) return
       settled = true
       cleanup()
-      reject(new Error('读取视频信息超时。'))
+      // 用 name 区分「超时」与「解码失败」：调用方据此判断是不是「只有音轨的容器」
+      // （那种文件永远拿不到 videoWidth，但 loadedmetadata 会给时长）。
+      const error = new Error('读取视频信息超时。')
+      error.name = 'TimeoutError'
+      reject(error)
     }, 15000)
     video.addEventListener('loadedmetadata', check)
     video.addEventListener('loadeddata', check)
@@ -135,6 +139,30 @@ export function waitForVideoMetadata(video: HTMLVideoElement): Promise<void> {
     video.addEventListener('error', onError)
     video.load()
   })
+}
+
+/** 探测超时（而不是解码失败）：只有音轨的容器靠这个信号识别。 */
+function isMetadataTimeout(error: unknown): boolean {
+  return (
+    typeof error === 'object' && error !== null && (error as { name?: string }).name === 'TimeoutError'
+  )
+}
+
+/**
+ * 「有元数据、有时长、但没有画面尺寸」= 只有音轨的容器。
+ *
+ * `.m4a` 以及「下载下来的音频被存成 .mp4」在部分系统上 MIME 报成 `video/*`，
+ * 于是走 `<video>` 路径：`waitForVideoMetadata` 要求 videoWidth>0，永远不会成立，
+ * 只能白等 15s 超时，然后进一次注定失败的转码（`-map 0:v:0` 没有视频流）。
+ */
+function hasAudioOnlyMetadata(video: HTMLVideoElement): boolean {
+  return (
+    video.readyState >= 1 &&
+    video.videoWidth === 0 &&
+    video.videoHeight === 0 &&
+    Number.isFinite(video.duration) &&
+    video.duration > 0.01
+  )
 }
 
 export async function captureThumbnail(video: HTMLVideoElement, duration: number): Promise<string | null> {
@@ -197,6 +225,33 @@ export interface ReadAssetOptions {
   onTranscodeProgress?: (progress: number) => void
 }
 
+/**
+ * 重新生成素材缩略图：导入时截帧失败（慢盘/长 GOP）或草稿恢复后缩略图丢失时，
+ * 素材卡片可手动触发。只读素材 URL，不会重新转码。
+ */
+export async function regenerateThumbnail(asset: MediaAsset): Promise<string | null> {
+  try {
+    if (asset.kind === 'image') {
+      const image = await loadImageElement(asset.url)
+      return imageThumbnail(image)
+    }
+    if (asset.kind === 'audio') return null
+    const video = document.createElement('video')
+    video.preload = 'auto'
+    video.muted = true
+    video.playsInline = true
+    video.src = asset.url
+    await waitForVideoMetadata(video)
+    const thumbnail = await captureThumbnail(video, video.duration)
+    video.pause()
+    video.removeAttribute('src')
+    video.load()
+    return thumbnail
+  } catch {
+    return null
+  }
+}
+
 export async function readAssetFile(
   file: File,
   options: ReadAssetOptions = {},
@@ -239,12 +294,29 @@ export async function readAssetFile(
         height: 0,
         kind: 'audio',
         file,
+        hasAudio: true,
       }
     }
     const video = loader as HTMLVideoElement
     try {
       await waitForVideoMetadata(video)
     } catch (error) {
+      // 只有音轨的容器（音频版 .mp4 / 被报成 video/* 的 .m4a）：直接当音频素材收下，
+      // 既不白等 15s，也不去跑注定失败的转码。
+      if (isMetadataTimeout(error) && hasAudioOnlyMetadata(video)) {
+        return {
+          id: createId('asset'),
+          url,
+          name: file.name,
+          size: file.size,
+          duration: video.duration,
+          width: 0,
+          height: 0,
+          kind: 'audio',
+          file,
+          hasAudio: true,
+        }
+      }
       if (!options.allowTranscode) throw error
       options.onTranscodeStatus?.('检测到浏览器不支持的视频编码，正在转码…')
       const converted = await transcodeToH264(file, {

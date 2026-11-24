@@ -117,21 +117,47 @@ interface KeyerState {
   uniforms: Record<string, WebGLUniformLocation | null>
   canvas: HTMLCanvasElement
   texture: WebGLTexture
+  buffer: WebGLBuffer
+  vertex: WebGLShader
+  fragment: WebGLShader
 }
 
 let state: KeyerState | null = null
+/**
+ * 上下文丢失后**保留** canvas 与 gl，等 `webglcontextrestored` 到来时复用它们重建。
+ *
+ * 浏览器在 `preventDefault()` 之后会把**同一个**上下文恢复可用；如果此时把引用丢掉、
+ * 下一次 isKeyerAvailable() 新建 canvas + 新上下文，就等于每次 GPU 复位都泄漏一个
+ * 活跃上下文（浏览器上限约 8–16 个，超了会开始回收**其它**画布的上下文 → 预览黑屏）。
+ */
+let lost: { canvas: HTMLCanvasElement; gl: WebGLRenderingContext } | null = null
 /** 上下文是否丢失（丢失时禁用并等待 restored）。 */
 let contextLost = false
 /** 只提示一次「WebGL 不可用」。 */
 let warnedUnavailable = false
 /**
- * 失败原因（一旦确定不可用就**永久缓存**）。
+ * 失败原因。
  *
- * 为什么必须缓存：isKeyerAvailable() 每帧都会被调用。原来着色器编译/链接失败时
- * 直接 return false 但不记结果，于是每帧都会 createElement('canvas') + getContext('webgl')，
- * 既慢又把 WebGL 上下文用尽（浏览器上限约 8–16 个），最终连正常画面都拿不到。
+ * 确定性失败（着色器编译/链接失败、无 document）**永久缓存**——isKeyerAvailable()
+ * 每帧都会被调用，不缓存就会每帧 createElement('canvas') + getContext('webgl')，
+ * 既慢又把 WebGL 上下文用尽。
+ *
+ * 瞬时失败（拿不到上下文 / 抛异常，典型原因是页面里别的 canvas 正占着配额）
+ * 只做冷却 + 次数上限的重试：否则一次偶发失败会让抠像在**整个会话**里静默失效。
  */
 let failureReason: string | null = null
+let failedAttempts = 0
+let lastFailureAt = 0
+
+/** 冷却时间：期间的调用继续返回 false，但不会再新建上下文。 */
+const FAILURE_RETRY_MS = 3000
+/** 瞬时失败最多重试这么多次，避免每 3 秒一次的无限重建。 */
+const MAX_FAILED_ATTEMPTS = 8
+
+/** 只有「可能自己好了」的失败才允许重试。 */
+function isRetryableFailure(reason: string): boolean {
+  return reason === 'no-context' || reason === 'exception' || reason === 'restore-failed'
+}
 
 /** 已经创建出来的 GL 对象，失败/丢失时要显式删除。 */
 interface GlObjects {
@@ -166,16 +192,134 @@ function releaseContext(gl: WebGLRenderingContext, objects: GlObjects = {}): voi
   }
 }
 
+/** 在给定上下文上（重新）搭建 program / buffer / texture。 */
+function buildState(gl: WebGLRenderingContext, canvas: HTMLCanvasElement): KeyerState | null {
+  const vertex = compile(gl, gl.VERTEX_SHADER, VERTEX_SHADER)
+  const fragment = compile(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER)
+  if (!vertex || !fragment) {
+    if (vertex) gl.deleteShader(vertex)
+    if (fragment) gl.deleteShader(fragment)
+    return null
+  }
+  const program = gl.createProgram()
+  if (!program) {
+    gl.deleteShader(vertex)
+    gl.deleteShader(fragment)
+    return null
+  }
+  gl.attachShader(program, vertex)
+  gl.attachShader(program, fragment)
+  gl.linkProgram(program)
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    gl.deleteProgram(program)
+    gl.deleteShader(vertex)
+    gl.deleteShader(fragment)
+    return null
+  }
+  gl.useProgram(program)
+
+  // 全屏三角带
+  const buffer = gl.createBuffer()
+  if (!buffer) {
+    gl.deleteProgram(program)
+    gl.deleteShader(vertex)
+    gl.deleteShader(fragment)
+    return null
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer)
+  gl.bufferData(
+    gl.ARRAY_BUFFER,
+    new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+    gl.STATIC_DRAW,
+  )
+  const position = gl.getAttribLocation(program, 'a_position')
+  gl.enableVertexAttribArray(position)
+  gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0)
+
+  const uniforms: Record<string, WebGLUniformLocation | null> = {}
+  for (const name of [
+    'u_texture',
+    'u_texel',
+    'u_keyUV',
+    'u_similarity',
+    'u_blend',
+    'u_spill',
+    'u_spillType',
+    'u_mix',
+    'u_expand',
+  ]) {
+    uniforms[name] = gl.getUniformLocation(program, name)
+  }
+
+  const texture = gl.createTexture()
+  if (!texture) {
+    gl.deleteBuffer(buffer)
+    gl.deleteProgram(program)
+    gl.deleteShader(vertex)
+    gl.deleteShader(fragment)
+    return null
+  }
+  gl.bindTexture(gl.TEXTURE_2D, texture)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+
+  return { gl, canvas, program, uniforms, texture, buffer, vertex, fragment }
+}
+
+/**
+ * 挂上上下文丢失/恢复监听（每个 canvas 只挂一次）。
+ *
+ * 关键：丢失时保留 canvas + gl（`lost`），恢复时**在同一个上下文上重建** program/texture，
+ * 既不泄漏上下文，也不需要用户刷新页面。
+ */
+function attachContextListeners(canvas: HTMLCanvasElement, gl: WebGLRenderingContext): void {
+  canvas.addEventListener('webglcontextlost', (event) => {
+    event.preventDefault()
+    contextLost = true
+    const current = state
+    state = null
+    // GL 对象随上下文一起失效，无需 delete；但要留下 canvas/gl 供 restored 复用。
+    lost = { canvas: current?.canvas ?? canvas, gl: current?.gl ?? gl }
+    console.warn('[webglKeyer] WebGL 上下文丢失，等待恢复（期间退回原画面）')
+  })
+  canvas.addEventListener('webglcontextrestored', () => {
+    const target = lost
+    lost = null
+    contextLost = false
+    failureReason = null
+    failedAttempts = 0
+    if (!target) return
+    const rebuilt = buildState(target.gl, target.canvas)
+    if (rebuilt) {
+      state = rebuilt
+      console.info('[webglKeyer] WebGL 上下文已恢复，抠像继续可用')
+    } else {
+      // 恢复失败：允许下一帧重新建一个上下文（次数受 MAX_FAILED_ATTEMPTS 限制）。
+      failureReason = 'restore-failed'
+      lastFailureAt = Date.now()
+      failedAttempts += 1
+    }
+  })
+}
+
 /** 是否可用（不可用时调用方应退回 CPU / 原画面）。 */
 export function isKeyerAvailable(): boolean {
   // 已经成功创建：直接复用（上下文只创建一次）。
   if (state) return true
-  // 已知不可用（编译失败 / 上下文丢失 / 无 document）：**不再新建任何上下文**。
-  if (failureReason !== null) return false
-  if (contextLost) return false
+  // 上下文丢失/等待恢复：期间不要新建任何上下文。
+  if (contextLost || lost) return false
   if (typeof document === 'undefined') {
     failureReason = 'no-document'
     return false
+  }
+  if (failureReason !== null) {
+    // 确定性失败（着色器编译/链接）不再重试；瞬时失败按冷却 + 次数上限重试。
+    if (!isRetryableFailure(failureReason)) return false
+    if (failedAttempts >= MAX_FAILED_ATTEMPTS) return false
+    if (Date.now() - lastFailureAt < FAILURE_RETRY_MS) return false
+    failureReason = null
   }
 
   let gl: WebGLRenderingContext | null = null
@@ -183,6 +327,8 @@ export function isKeyerAvailable(): boolean {
   /** 统一失败出口：缓存原因 + 释放已创建的一切。 */
   const fail = (reason: string): false => {
     failureReason = reason
+    lastFailureAt = Date.now()
+    failedAttempts += 1
     if (gl) releaseContext(gl, objects)
     gl = null
     return false
@@ -196,70 +342,18 @@ export function isKeyerAvailable(): boolean {
     }) as WebGLRenderingContext | null
     if (!gl) return fail('no-context')
 
-    objects.vertex = compile(gl, gl.VERTEX_SHADER, VERTEX_SHADER)
-    objects.fragment = compile(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER)
-    if (!objects.vertex || !objects.fragment) return fail('shader-compile')
-
-    const program = gl.createProgram()
-    objects.program = program
-    if (!program) return fail('program-create')
-    gl.attachShader(program, objects.vertex)
-    gl.attachShader(program, objects.fragment)
-    gl.linkProgram(program)
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return fail('program-link')
-    gl.useProgram(program)
-
-    // 全屏三角带
-    const buffer = gl.createBuffer()
-    objects.buffer = buffer
-    if (!buffer) return fail('buffer-create')
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffer)
-    gl.bufferData(
-      gl.ARRAY_BUFFER,
-      new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
-      gl.STATIC_DRAW,
-    )
-    const position = gl.getAttribLocation(program, 'a_position')
-    gl.enableVertexAttribArray(position)
-    gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0)
-
-    const uniforms: Record<string, WebGLUniformLocation | null> = {}
-    for (const name of [
-      'u_texture',
-      'u_texel',
-      'u_keyUV',
-      'u_similarity',
-      'u_blend',
-      'u_spill',
-      'u_spillType',
-      'u_mix',
-      'u_expand',
-    ]) {
-      uniforms[name] = gl.getUniformLocation(program, name)
+    const built = buildState(gl, canvas)
+    if (!built) {
+      // buildState 内部已删掉编译失败/链接失败的对象；这里只需保证上下文被释放。
+      return fail('shader-compile')
     }
-    const texture = gl.createTexture()
-    objects.texture = texture
-    if (!texture) return fail('texture-create')
-    gl.bindTexture(gl.TEXTURE_2D, texture)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-
-    // 上下文丢失/恢复：只创建一次上下文，丢失期间退回原画面（降级）。
-    canvas.addEventListener('webglcontextlost', (event) => {
-      event.preventDefault()
-      contextLost = true
-      // 对象随上下文一起失效；把引用丢掉，等 restored 后重建。
-      state = null
-    })
-    canvas.addEventListener('webglcontextrestored', () => {
-      contextLost = false
-      failureReason = null
-      state = null
-    })
-
-    state = { gl, program, uniforms, canvas, texture }
+    objects.program = built.program
+    objects.buffer = built.buffer
+    objects.texture = built.texture
+    attachContextListeners(canvas, gl)
+    state = built
+    failedAttempts = 0
+    lastFailureAt = 0
     return true
   } catch (error) {
     // 抛异常（如浏览器限制上下文数量）同样缓存并释放，避免每帧重试。
@@ -296,7 +390,7 @@ export const webglKeyer: KeyFrameProcessor = {
         view.height = height
       }
       gl.viewport(0, 0, width, height)
-      gl.useProgram(program)!
+      gl.useProgram(program)
 
       gl.activeTexture(gl.TEXTURE0)
       gl.bindTexture(gl.TEXTURE_2D, texture)
@@ -342,11 +436,23 @@ function stagingCanvas(width: number, height: number): HTMLCanvasElement | null 
 
 /** 测试用：重置单例状态。 */
 export function resetKeyerForTest(): void {
-  if (state) releaseContext(state.gl, { program: state.program, texture: state.texture })
+  if (state) {
+    releaseContext(state.gl, {
+      program: state.program,
+      texture: state.texture,
+      buffer: state.buffer,
+      vertex: state.vertex,
+      fragment: state.fragment,
+    })
+  }
+  if (lost) releaseContext(lost.gl, {})
   state = null
+  lost = null
   contextLost = false
   warnedUnavailable = false
   failureReason = null
+  failedAttempts = 0
+  lastFailureAt = 0
   staging = null
 }
 

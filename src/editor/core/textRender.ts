@@ -51,6 +51,7 @@ export function drawTextClip(
   const y = overrides.position?.y ?? clip.y
   const family = clip.fontFamily ?? DEFAULT_FONT
   const weight = clip.bold ? 700 : 400
+  const italic = clip.italic === true
   const rawShadowColor = clip.shadowColor?.trim()
   const hasShadow = Boolean(
     rawShadowColor && rawShadowColor.toLowerCase() !== 'transparent',
@@ -85,13 +86,21 @@ export function drawTextClip(
   }
   // 背景框不能带阴影：先确保阴影关闭，再由文字绘制单独打开。
   if (hasShadow) clearTextShadow()
-  context.font = `${weight} ${fontSize}px ${family}`
+  context.font = `${italic ? 'italic ' : ''}${weight} ${fontSize}px ${family}`
   context.textBaseline = 'middle'
+  // 行距/字距按 fontSize 比例存储，保证不同导出分辨率观感一致。
+  const lineHeightRatio = Math.min(3, Math.max(0.8, finiteOr(clip.lineHeight, 1.26)))
+  const letterSpacingEm = Math.min(0.5, Math.max(-0.2, finiteOr(clip.letterSpacing, 0)))
+  // Canvas letterSpacing 在 Chromium 可用；不支持的环境优雅退化为 0（不影响其它排版）。
+  const spacingContext = context as CanvasRenderingContext2D & { letterSpacing?: string }
+  if ('letterSpacing' in spacingContext) {
+    spacingContext.letterSpacing = `${(letterSpacingEm * fontSize).toFixed(2)}px`
+  }
   const maxWidth = width * 0.86
   const lines = clip.text
     .split('\n')
     .flatMap((paragraph) => wrapParagraph(context, paragraph, maxWidth))
-  const lineHeight = fontSize * 1.26
+  const lineHeight = fontSize * lineHeightRatio
   const totalHeight = Math.max(lineHeight, lines.length * lineHeight)
   const measured = lines.map((line) => context.measureText(line).width)
   const widest = Math.max(1, ...measured)
@@ -152,5 +161,6 @@ export function drawTextClip(
     }
     context.fillText(line, textLeft, y, maxWidth)
   })
+  if ('letterSpacing' in spacingContext) spacingContext.letterSpacing = '0px'
   context.restore()
 }

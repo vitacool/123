@@ -19,6 +19,7 @@ import {
   canChangeClipSpeed,
   clipSpeedValue,
   createFlatSpeedCurve,
+  hasSpeedVariation,
   normalizeSpeedCurve,
   normalizeSpeedSegments,
 } from '../core/speed'
@@ -41,6 +42,10 @@ import { AnimatedValueHint } from './AnimatedValueHint'
 import { KeyframeButton } from './KeyframeButton'
 import { KeyframeCurveButton } from './KeyframeCurveButton'
 import { PanelSection } from './PanelSection'
+
+/** 缺失素材重链时可接受的文件类型（与导入入口一致）。 */
+const RELINK_ACCEPT =
+  'video/*,audio/*,image/*,.mp4,.m4v,.mov,.webm,.mkv,.mp3,.wav,.m4a,.aac,.flac,.png,.jpg,.jpeg,.webp,.gif'
 
 const round = (value: number, digits = 2): number => Number(value.toFixed(digits))
 
@@ -282,6 +287,9 @@ export function PropertiesPanel() {
   const selectedClipId = useEditorStore((state) => state.selectedClipId)
   const selectedIds = useEditorStore((state) => state.selectedIds)
   const cropSession = useEditorStore((state) => state.cropSession)
+  const relinkMissingAsset = useEditorStore((state) => state.relinkMissingAsset)
+  const relinkInputRef = useRef<HTMLInputElement | null>(null)
+  const [relinking, setRelinking] = useState(false)
   const selectClip = useEditorStore((state) => state.selectClip)
   const setRotation = useEditorStore((state) => state.setRotation)
   const setAnimatableValue = useEditorStore((state) => state.setAnimatableValue)
@@ -573,9 +581,36 @@ export function PropertiesPanel() {
               <span>素材已移除</span>
             </div>
             <p className="control-note">
-              该片段的素材已从素材库删除，预览与导出都按画布背景处理；画面属性暂不可编辑，
-              仍可移动或删除这个片段。重新导入同一文件后可恢复编辑。
+              该片段的素材不在本机。重新选择同一个文件即可恢复预览与编辑；
+              片段本身（入出点、关键帧、音量）会原样保留。
             </p>
+            <div className="inline-actions">
+              <button
+                type="button"
+                className="button mini"
+                disabled={relinking}
+                onClick={() => relinkInputRef.current?.click()}
+              >
+                {relinking ? '正在读取素材…' : '重新链接素材…'}
+              </button>
+            </div>
+            <input
+              ref={relinkInputRef}
+              type="file"
+              accept={RELINK_ACCEPT}
+              hidden
+              onChange={async (event) => {
+                const file = event.target.files?.[0]
+                event.target.value = ''
+                if (!file) return
+                setRelinking(true)
+                try {
+                  await relinkMissingAsset(clip.sourceUrl, file)
+                } finally {
+                  setRelinking(false)
+                }
+              }}
+            />
           </section>
         )}
         <div className="summary-chips">
@@ -933,8 +968,8 @@ export function PropertiesPanel() {
             <button
               type="button"
               className="button crop-entry"
-              disabled={disabled || isOverlay}
-              title={isOverlay ? '叠加片段暂不支持裁剪，可调整缩放和位置' : '进入裁剪模式'}
+              disabled={disabled}
+              title="进入裁剪模式"
               onClick={beginCrop}
             >
               <Icon name="crop" size={16} />
@@ -990,6 +1025,82 @@ export function PropertiesPanel() {
                 </div>
                 {clip.mask && (
                   <>
+                    <div className="mask-geometry">
+                      <label>
+                        <span>水平</span>
+                        <CommitNumber
+                          value={round(clip.mask.x * 100, 1)}
+                          min={0}
+                          max={100}
+                          step={1}
+                          unit="%"
+                          ariaLabel="蒙版水平位置"
+                          disabled={disabled}
+                          onPreview={(value) => previewMask({ x: value / 100 })}
+                          onCommit={(value) => commitMask({ x: value / 100 })}
+                        />
+                      </label>
+                      <label>
+                        <span>垂直</span>
+                        <CommitNumber
+                          value={round(clip.mask.y * 100, 1)}
+                          min={0}
+                          max={100}
+                          step={1}
+                          unit="%"
+                          ariaLabel="蒙版垂直位置"
+                          disabled={disabled}
+                          onPreview={(value) => previewMask({ y: value / 100 })}
+                          onCommit={(value) => commitMask({ y: value / 100 })}
+                        />
+                      </label>
+                      {clip.mask.shape !== 'linear' && (
+                        <>
+                          <label>
+                            <span>宽度</span>
+                            <CommitNumber
+                              value={round(clip.mask.width * 100, 1)}
+                              min={1}
+                              max={100}
+                              step={1}
+                              unit="%"
+                              ariaLabel="蒙版宽度"
+                              disabled={disabled}
+                              onPreview={(value) => previewMask({ width: value / 100 })}
+                              onCommit={(value) => commitMask({ width: value / 100 })}
+                            />
+                          </label>
+                          <label>
+                            <span>高度</span>
+                            <CommitNumber
+                              value={round(clip.mask.height * 100, 1)}
+                              min={1}
+                              max={100}
+                              step={1}
+                              unit="%"
+                              ariaLabel="蒙版高度"
+                              disabled={disabled}
+                              onPreview={(value) => previewMask({ height: value / 100 })}
+                              onCommit={(value) => commitMask({ height: value / 100 })}
+                            />
+                          </label>
+                        </>
+                      )}
+                      <label>
+                        <span>旋转</span>
+                        <CommitNumber
+                          value={Math.round(clip.mask.rotation)}
+                          min={0}
+                          max={360}
+                          step={1}
+                          unit="°"
+                          ariaLabel="蒙版旋转"
+                          disabled={disabled}
+                          onPreview={(value) => previewMask({ rotation: value })}
+                          onCommit={(value) => commitMask({ rotation: value })}
+                        />
+                      </label>
+                    </div>
                     <div className="control-with-field">
                       <span className="section-hint">羽化</span>
                       <CommitSlider
@@ -1293,6 +1404,12 @@ export function PropertiesPanel() {
             />
             预览时静音变速片段（导出仍保留保音高的声音）
           </label>
+          {previewMuteSegmentedSpeed && hasSpeedVariation(clip) && (
+            <p className="control-note">
+              该片段是分段/曲线变速：浏览器无法用单一播放速率正确预览，所以预览静音；
+              导出会按段变速并保持音高。取消勾选可试听（节奏可能与成片不一致）。
+            </p>
+          )}
           {speedSub === 'curve' ? (
             <>
               <PanelSection

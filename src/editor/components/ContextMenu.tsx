@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { useFloatingPosition } from './floating'
 
 export interface ContextMenuItem {
@@ -37,15 +37,28 @@ export function ContextMenu({ x, y, items, onClose, ariaLabel = '片段操作' }
     menuRef.current?.focus({ preventScroll: true })
   }, [])
 
+  /**
+   * `onClose` 只存进 ref，不参与下面三个 effect 的依赖。
+   *
+   * 调用方（Timeline / VideoEditor / MediaLibrary）传的都是内联箭头函数，每次父渲染
+   * 都是新引用；放进依赖里会让菜单打开期间**每个父渲染**都把 5 个 window 监听器
+   * （pointerdown / keydown / scroll 捕获 + resize + blur）拆掉重装 —— 播放中 10Hz，
+   * 悬停或滚动时间轴时更密。这里用「latest ref」把注册与渲染解耦。
+   */
+  const onCloseRef = useRef(onClose)
+  useEffect(() => {
+    onCloseRef.current = onClose
+  })
+
   // 点空白处关闭：pointerdown 用捕获阶段，避免被内部元素的 stopPropagation 吞掉。
   useEffect(() => {
     const handlePointerDown = (event: PointerEvent) => {
       if (menuRef.current?.contains(event.target as Node)) return
-      onClose()
+      onCloseRef.current()
     }
     window.addEventListener('pointerdown', handlePointerDown, true)
     return () => window.removeEventListener('pointerdown', handlePointerDown, true)
-  }, [onClose])
+  }, [])
 
   // Esc 关闭 + 上下键在可用项间移动。
   useEffect(() => {
@@ -53,7 +66,7 @@ export function ContextMenu({ x, y, items, onClose, ariaLabel = '片段操作' }
       if (event.key === 'Escape') {
         event.preventDefault()
         event.stopPropagation()
-        onClose()
+        onCloseRef.current()
         return
       }
       if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
@@ -76,11 +89,11 @@ export function ContextMenu({ x, y, items, onClose, ariaLabel = '片段操作' }
     }
     window.addEventListener('keydown', handleKeyDown, true)
     return () => window.removeEventListener('keydown', handleKeyDown, true)
-  }, [onClose])
+  }, [])
 
   // 滚动（时间轴横向/纵向滚动都算）与窗口尺寸变化时关闭，避免菜单跟内容错位。
   useEffect(() => {
-    const handleClose = () => onClose()
+    const handleClose = () => onCloseRef.current()
     window.addEventListener('scroll', handleClose, true)
     window.addEventListener('resize', handleClose)
     window.addEventListener('blur', handleClose)
@@ -89,7 +102,7 @@ export function ContextMenu({ x, y, items, onClose, ariaLabel = '片段操作' }
       window.removeEventListener('resize', handleClose)
       window.removeEventListener('blur', handleClose)
     }
-  }, [onClose])
+  }, [])
 
   return (
     <div

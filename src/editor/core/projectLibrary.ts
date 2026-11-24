@@ -1,4 +1,5 @@
 import type { DraftAsset, DraftSnapshot } from './draft'
+import { getProjectEnd } from './timeline'
 
 /**
  * 「最近项目」库：核心纯逻辑。
@@ -53,6 +54,31 @@ export function primarySnapshotAsset(snapshot: DraftSnapshot): DraftAsset | unde
 /** 列表缩略图：主素材的缩略图（不复制封面，避免体积翻倍）。 */
 export function projectThumbnail(snapshot: DraftSnapshot): string | undefined {
   return primarySnapshotAsset(snapshot)?.thumbnail
+}
+
+export interface ProjectSnapshotSummary {
+  /** 四类轨道的片段总数。 */
+  clipCount: number
+  /** 时间轴总时长（秒，含空隙）。 */
+  duration: number
+  assetCount: number
+  missingCount: number
+}
+
+/** 从快照算「最近项目」卡片上的派生信息（纯计算，不读 Blob）。 */
+export function summarizeProjectSnapshot(snapshot: DraftSnapshot): ProjectSnapshotSummary {
+  const project = snapshot.project
+  const clipCount =
+    (project.clips?.length ?? 0) +
+    (project.overlayTracks ?? []).reduce((total, track) => total + track.clips.length, 0) +
+    (project.audioTracks ?? []).reduce((total, track) => total + track.clips.length, 0) +
+    (project.textTracks ?? []).reduce((total, track) => total + track.clips.length, 0)
+  return {
+    clipCount,
+    duration: getProjectEnd(project),
+    assetCount: snapshot.assets?.length ?? 0,
+    missingCount: snapshot.missingAssets?.length ?? 0,
+  }
 }
 
 /**

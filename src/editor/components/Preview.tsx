@@ -227,6 +227,8 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
   const baseVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map())
   const audioRefs = useRef<Map<string, HTMLAudioElement>>(new Map())
   const paintedRef = useRef(false)
+  /** WebGL 抠像不可用时只提示一次，避免每帧刷屏。 */
+  const chromaWarnRef = useRef(false)
   /**
    * 解码失败过的源 url（`<video>` 触发 error 后记下，成功加载后移除）。
    * 用来把「暂时还没就绪」与「永久解不出来」区分开：前者保留上一帧避免黑闪，
@@ -383,7 +385,7 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
       const scale = Math.max(width / sw, height / sh)
       const dw = sw * scale
       const dh = sh * scale
-      const blur = backgroundBlurPx(background)
+      const blur = backgroundBlurPx(background, height)
       context.filter = blur > 0 ? `blur(${blur}px)` : 'none'
       context.drawImage(source, (width - dw) / 2, (height - dh) / 2, dw, dh)
       context.filter = 'none'
@@ -440,7 +442,21 @@ export function Preview({ onPickFile, loading, error, loadingLabel }: PreviewPro
         sourceHeight,
         alphaScale: alphaOverride ?? 1,
         overrides,
-        keyFrame: webglKeyer,
+        keyFrame: {
+          keyFrame: (...args: Parameters<typeof webglKeyer.keyFrame>) => {
+            const result = webglKeyer.keyFrame(...args)
+            if (!result && !chromaWarnRef.current) {
+              chromaWarnRef.current = true
+              store
+                .getState()
+                .notify(
+                  '抠像预览不可用（WebGL 不可用或上下文丢失）；导出仍会正常抠像',
+                  'warning',
+                )
+            }
+            return result
+          },
+        },
         createCanvas: (w, h) => {
           const canvas = document.createElement('canvas')
           canvas.width = Math.max(1, Math.round(w))

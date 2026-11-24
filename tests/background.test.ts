@@ -57,10 +57,9 @@ describe('背景归一化（旧草稿兼容）', () => {
     expect(normalizeBackground({ type: 'blur', blurAmount: -5 }).blurAmount).toBe(0)
   })
 
-  it('图片无 url 时保留类型但 url 为空', () => {
-    const result = normalizeBackground({ type: 'image' })
-    expect(result.type).toBe('image')
-    expect(result.imageUrl).toBeUndefined()
+  it('图片背景已下线：归一化一律回退黑场（旧草稿也不会再出现「预览有、导出黑」）', () => {
+    expect(normalizeBackground({ type: 'image' })).toEqual({ type: 'black' })
+    expect(normalizeBackground({ type: 'image', imageUrl: 'blob:x' })).toEqual({ type: 'black' })
   })
 
   it('工程级与片段级解析', () => {
@@ -76,7 +75,7 @@ describe('背景归一化（旧草稿兼容）', () => {
 
   it('中文名与默认判定', () => {
     expect(backgroundLabel('blur')).toBe('模糊填充')
-    expect(backgroundLabel('image')).toBe('图片')
+    expect(backgroundLabel('image')).toBe('黑色')
     expect(isDefaultBackground({ type: 'black' })).toBe(true)
     expect(isDefaultBackground({ type: 'color', color: '#fff' })).toBe(false)
   })
@@ -97,8 +96,11 @@ describe('背景归一化（旧草稿兼容）', () => {
     expect(needsBackgroundLayer({ type: 'color', color: '#fff' })).toBe(false)
     expect(needsBackgroundLayer({ type: 'blur' })).toBe(true)
     expect(needsBackgroundLayer({ type: 'image' })).toBe(false)
-    expect(needsBackgroundLayer({ type: 'image', imageUrl: 'blob:x' })).toBe(true)
+    expect(needsBackgroundLayer({ type: 'image', imageUrl: 'blob:x' })).toBe(false)
     expect(backgroundBlurPx({ type: 'blur', blurAmount: 30 })).toBe(30)
+    // 1080p 为参考高度：540p 减半、4K 翻倍（相对观感一致）。
+    expect(backgroundBlurPx({ type: 'blur', blurAmount: 30 }, 540)).toBe(15)
+    expect(backgroundBlurPx({ type: 'blur', blurAmount: 30 }, 2160)).toBe(60)
     expect(backgroundBlurPx({ type: 'black' })).toBe(0)
   })
 

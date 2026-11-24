@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
+import { formatClock } from '../core/format'
 import {
   DEFAULT_PROJECT_NAME,
   formatProjectUpdatedAt,
   normalizeProjectName,
   PROJECT_LIMIT,
+  summarizeProjectSnapshot,
   type DraftProjectRecord,
 } from '../core/projectLibrary'
 import { Icon } from './Icon'
@@ -68,7 +70,7 @@ export function ProjectLibrary({
 
   return (
     <section className="project-library" aria-label="最近项目">
-      <div className="project-library-card" role="dialog" aria-modal="false">
+      <div className="project-library-card" role="dialog" aria-modal="true">
         <header className="project-library-head">
           <div>
             <p className="panel-eyebrow">PROJECTS · 本地草稿</p>
@@ -132,6 +134,7 @@ export function ProjectLibrary({
           <ul className="project-library-list">
             {records.map((record) => {
               const isEditing = editing?.id === record.id
+              const summary = summarizeProjectSnapshot(record.snapshot)
               return (
                 <li
                   key={record.id}
@@ -180,6 +183,11 @@ export function ProjectLibrary({
                       </button>
                     )}
                     <small>{formatProjectUpdatedAt(record.updatedAt)}</small>
+                    <small className="project-card-meta">
+                      {formatClock(summary.duration)} · {summary.clipCount} 段 ·{' '}
+                      {summary.assetCount} 素材
+                      {summary.missingCount > 0 ? ` · 缺 ${summary.missingCount}` : ''}
+                    </small>
                   </div>
                   <span className="project-card-tools">
                     <button

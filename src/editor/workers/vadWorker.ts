@@ -13,8 +13,26 @@ const scope = self as unknown as {
   onmessage: ((event: MessageEvent) => void) | null
 }
 
-ort.env.wasm.wasmPaths = new URL('/onnxruntime/', self.location.href).href
+/** 资源根归一：默认站点根 `/`，可由主线程按部署位置覆盖。 */
+function resolveAssetBase(base?: string): string {
+  const raw = base && base.trim() ? base.trim() : '/'
+  const normalized = raw.endsWith('/') ? raw : `${raw}/`
+  try {
+    return new URL(normalized, self.location.href).href
+  } catch {
+    return normalized
+  }
+}
+
+let assetBase = resolveAssetBase()
+
 ort.env.wasm.numThreads = 1
+
+function applyWasmPaths(): void {
+  ort.env.wasm.wasmPaths = new URL('onnxruntime/', assetBase).href
+}
+
+applyWasmPaths()
 
 // Silero VAD v5 固定形状：state [2, 1, 128]；名字在运行时从模型读取。
 const STATE_DIMS = [2, 1, 128]
@@ -24,6 +42,8 @@ interface VadRequest {
   type: 'vad'
   id: number
   audio: Float32Array
+  /** 主线程传进来的 ASR 资源根（默认 '/'）。 */
+  assetBase?: string
 }
 
 interface ResultMessage {
@@ -44,7 +64,7 @@ let sessionPromise: Promise<ort.InferenceSession> | null = null
 function getSession(): Promise<ort.InferenceSession> {
   if (sessionPromise) return sessionPromise
   const created = ort.InferenceSession.create(
-    new URL('/vad/silero_vad.onnx', self.location.href).href,
+    new URL('vad/silero_vad.onnx', assetBase).href,
     { executionProviders: ['wasm'] },
   )
   sessionPromise = created
@@ -139,6 +159,11 @@ scope.onmessage = async (event: MessageEvent) => {
   const data = event.data as VadRequest
   if (!data || data.type !== 'vad') return
   try {
+    // 资源根在创建 session 之前生效（模型 URL 与 wasm 路径都依赖它）。
+    if (data.assetBase) {
+      assetBase = resolveAssetBase(data.assetBase)
+      applyWasmPaths()
+    }
     const { spans, maxProb } = await runVad(data.audio, data.id)
     const message: ResultMessage = { type: 'result', id: data.id, spans, maxProb }
     scope.postMessage(message)

@@ -6,6 +6,7 @@ import {
   isAudioTrackActive,
   isMainAudioActive,
   isMainVideoVisible,
+  isOverlayAudioActive,
   isOverlayVideoVisible,
   mainTrackState,
   overlayTrackState,
@@ -189,6 +190,23 @@ describe('track state semantics', () => {
     project = { ...project, mainTrack: { ...mainTrackState(project), enabled: false } }
     expect(isMainVideoVisible(project)).toBe(false)
     expect(isMainAudioActive(project)).toBe(false)
+  })
+
+  it('叠加轨 solo 也能压制其它音源（叠加轨参与混音）', () => {
+    const overlay = addOverlayTrackFromClip(base(), 'clip-a', 'overlay-1', 'overlay-clip')
+    expect(overlay).toBeTruthy()
+    const project: Project = {
+      ...overlay!.project,
+      overlayTracks: overlay!.project.overlayTracks!.map((track) => ({
+        ...track,
+        solo: true,
+      })),
+    }
+    expect(anySoloActive(project)).toBe(true)
+    expect(isOverlayAudioActive(project, project.overlayTracks![0])).toBe(true)
+    // 叠加轨独奏时，主轨原声必须被压制。
+    expect(isMainAudioActive(project)).toBe(false)
+    expect(isAudioSuppressedBySolo(project, mainTrackState(project))).toBe(true)
   })
 
   it('supports multiple solo tracks and restores mute state afterwards', () => {

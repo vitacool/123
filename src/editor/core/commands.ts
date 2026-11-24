@@ -84,7 +84,7 @@ import type { TrackOrderKind } from './operations'
 import type { RemoveAssetClipsOptions } from './operations'
 import type { ColorAdjustments } from './color'
 import type { AudioAttrs, SpeedAttrs, VisualAttrs } from './attributeClipboard'
-import type { AnimatableProperty, Easing, ProjectCover } from './types'
+import type { AnimatableProperty, ClipTransition, Easing, ProjectCover } from './types'
 import {
   clearPropertyKeyframesInProject,
   moveKeyframesInProject,
@@ -96,10 +96,11 @@ import {
 import type { KeyframeRef } from './keyframeEdit'
 import { normalizeTransitionType, transitionLabel } from './transition'
 import { relinkCaptions } from './captionLink'
+import { remapProjectUrls } from './draft'
 import { normalizeBackground, withClipBackground } from './background'
 import type { CanvasBackground } from './types'
 import { clipFadeIn, clipFadeOut, clipVolume } from './clipAudio'
-import { canChangeClipSpeed } from './speed'
+import { canChangeClipSpeed, clipSpeedValue, hasSpeedVariation } from './speed'
 import { speedAttrsPatch } from './attributeClipboard'
 import { contiguousRunHeads } from './selection'
 import { findClipLocation, getTimeline } from './timeline'
@@ -185,6 +186,54 @@ export function createUpdateAnyClipCommand(
  * 把同一种转场应用到主轨所有可生效的交界（1 次命令 = 1 步撤销）。
  * 没有任何交界可应用时命令返回原 project，因此不会写入历史。
  */
+/**
+ * 设置/移除一个接缝的转场；设置时若下一片段前有空隙，**同一步**把 gapBefore 归零。
+ * 这样「空隙 + 转场」不再需要用户先手动闭合再添加（一次撤销可回到空隙状态）。
+ */
+export function createSetTransitionCommand(
+  clipId: string,
+  nextClipId: string | null,
+  transition: ClipTransition | undefined,
+  label?: string,
+): EditorCommand {
+  return {
+    label: label ?? (transition ? '设置转场' : '移除转场'),
+    selectionAfter: clipId,
+    execute(project) {
+      let changed = false
+      const clips = project.clips.map((clip) => {
+        if (clip.id === clipId) {
+          if (transition === undefined) {
+            if (!clip.transitionOut) return clip
+            changed = true
+            return { ...clip, transitionOut: undefined }
+          }
+          const previous = clip.transitionOut
+          if (
+            previous &&
+            previous.type === transition.type &&
+            Math.abs(previous.duration - transition.duration) < 1e-9
+          ) {
+            return clip
+          }
+          changed = true
+          return { ...clip, transitionOut: { ...transition } }
+        }
+        if (
+          nextClipId &&
+          clip.id === nextClipId &&
+          Math.max(0, clip.gapBefore ?? 0) > 0
+        ) {
+          changed = true
+          return { ...clip, gapBefore: 0 }
+        }
+        return clip
+      })
+      return changed ? { ...project, clips } : project
+    },
+  }
+}
+
 export function createSetTransitionAllCommand(
   options: TransitionAllOptions,
 ): EditorCommand {
@@ -480,6 +529,41 @@ export function createDeleteClipCommand(
     selectionAfter,
     execute(project) {
       return removeClipFromProject(project, clipId) ?? project
+    },
+  }
+}
+
+/**
+ * 重新链接缺失素材：把工程里所有引用 `oldUrl` 的地方（主轨 / 叠加 / 音频 /
+ * 字幕 link / 画布背景）改到 `newUrl`，片段入出点、关键帧、音量都原样保留。
+ *
+ * `assetId` 用于同步字幕 link 上的稳定素材标识；不传则只改 URL。
+ */
+export function createRelinkAssetCommand(
+  oldUrl: string,
+  newUrl: string,
+  assetId?: string,
+): EditorCommand {
+  return {
+    label: '重新链接素材',
+    execute(project) {
+      if (!oldUrl || !newUrl || oldUrl === newUrl) return project
+      const remapped = remapProjectUrls(project, new Map([[oldUrl, newUrl]]))
+      if (!assetId) return remapped
+      let changed = false
+      const textTracks = (remapped.textTracks ?? []).map((track) => {
+        let trackChanged = false
+        const clips = track.clips.map((clip) => {
+          if (!clip.link || clip.link.sourceUrl !== newUrl) return clip
+          if (clip.link.assetId === assetId) return clip
+          trackChanged = true
+          return { ...clip, link: { ...clip.link, assetId } }
+        })
+        if (!trackChanged) return track
+        changed = true
+        return { ...track, clips }
+      })
+      return changed ? { ...remapped, textTracks } : remapped
     },
   }
 }
@@ -1310,6 +1394,10 @@ export function createDetachAudioCommand(options: DetachAudioOptions): EditorCom
       // 定格片段没有声音。
       if (clip.type === 'freeze') return project
       if (track ? isOverlayLocked(track) : isMainLocked(project)) return project
+      // AudioClip 没有变速字段：变速片段的源跨度 ≠ 时间轴时长，直接照抄会让
+      // 分离出的音频比画面长/短、内容速度也不对。store 入口会先提示并拦截，
+      // 这里再兜一层，避免以后新增入口绕过。
+      if (clipSpeedValue(clip) !== 1 || hasSpeedVariation(clip)) return project
 
       const volume = clipVolume(clip)
       const fadeIn = clipFadeIn(clip)
@@ -1323,10 +1411,35 @@ export function createDetachAudioCommand(options: DetachAudioOptions): EditorCom
         volume,
         fadeIn,
         fadeOut,
+        ...(clip.fadeInCurve ? { fadeInCurve: clip.fadeInCurve } : {}),
+        ...(clip.fadeOutCurve ? { fadeOutCurve: clip.fadeOutCurve } : {}),
+      }
+      // 音量关键帧要迁到音频片段：只写 volume=0 的话，有 anim.volume 的片段
+      // 在预览/导出里仍按关键帧发声（原声残留 + 双份声音），且新音频丢失自动化。
+      const volumeKeyframes = clip.anim?.volume
+      if (volumeKeyframes && volumeKeyframes.length > 0) {
+        audioClip.anim = {
+          volume: volumeKeyframes.map((keyframe) => ({ ...keyframe })),
+        }
       }
 
-      // 1) 原片段静音（淡入淡出清零，避免分离后重复应用）。
-      const silenced: Clip = { ...clip, volume: 0, fadeIn: 0, fadeOut: 0 }
+      // 1) 原片段静音（淡入淡出与音量关键帧清零，避免分离后重复应用）。
+      const silencedAnim = clip.anim ? { ...clip.anim } : undefined
+      if (silencedAnim) delete silencedAnim.volume
+      const silenced: Clip = {
+        ...clip,
+        volume: 0,
+        fadeIn: 0,
+        fadeOut: 0,
+        ...(clip.anim
+          ? {
+              anim:
+                silencedAnim && Object.keys(silencedAnim).length > 0
+                  ? silencedAnim
+                  : undefined,
+            }
+          : {}),
+      }
       let next: Project = {
         ...project,
         clips: project.clips.map((item) => (item.id === clip.id ? silenced : item)),
@@ -1398,16 +1511,16 @@ export function createReplaceAutoCaptionsCommand(
 export function createImportSubtitlesCommand(
   trackId: string,
   clips: TextClip[],
+  trackName = '导入字幕',
 ): EditorCommand {
   return {
     label: `导入字幕（${clips.length} 条）`,
     selectionAfter: clips[0]?.id ?? null,
     execute(project) {
-      let next = project
-      for (const clip of clips) {
-        next = addTextClipToProject(next, trackId, clip) ?? next
-      }
-      return next
+      // 必须建成 caption 轨：属性面板的字幕列表（含「导出 SRT」）只对
+      // `kind === 'caption'` 的轨道可见。以前用 addTextClipToProject 会建出
+      // 一条普通文本轨，导入后既看不到列表，也无法导出 SRT。
+      return addCaptionTrackWithClips(project, trackId, clips, trackName)
     },
   }
 }

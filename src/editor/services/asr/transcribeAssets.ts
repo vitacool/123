@@ -1,10 +1,11 @@
 import {
   buildAsrCacheKey,
   type AsrLanguage,
+  type AsrScript,
   type AsrWord,
 } from '../../core/asr'
 import { cleanAsrWords } from '../../core/asrFilters'
-import { buildSpeechBlocks } from '../../core/asrVad'
+import { buildSpeechBlocks, snapSpeechBlockBoundaries } from '../../core/asrVad'
 import { audioRms, hasAudibleSignal } from '../../core/captions'
 import { mergeSourceIntervals } from '../../core/asrIntervals'
 import {
@@ -38,6 +39,8 @@ export interface AssetProgress {
 
 export interface RecognizeAssetsOptions {
   language: AsrLanguage
+  /** 输出字形；缺省 simplified（保持历史行为）。 */
+  script?: AsrScript
   modelId: string
   provider: TranscribeProvider
   /** Overlay-track audio recognition; defaults to off. */
@@ -152,6 +155,63 @@ function progressPercent(assetIndex: number, assetCount: number, within: number)
   return ((assetIndex + within) / assetCount) * 100
 }
 
+/** 人声检测结果；不可用时退化为「没有 spans」，由下面的固定 28s 切块兜底。 */
+interface SpeechDetection {
+  spans: { start: number; end: number }[]
+  maxProb: number
+}
+
+/** 只提示一次「VAD 不可用」，避免每个素材刷一条。 */
+let vadFallbackNoticed = false
+
+/**
+ * 跑 Silero VAD，失败时**降级**而不是整轮失败。
+ *
+ * 真实场景：`public/vad/silero_vad.onnx` 没有被部署（该目录是 .gitignore 的生成物，
+ * 但仓库里并没有生成它的脚本）、或宿主 CSP 禁了 worker。此时若直接抛错，用户
+ * 点「开始识别」只会得到一句 ONNX 内部错误、字幕功能完全不可用。
+ * 降级后仍能按有声信号做 28s 切块识别，只是少了「按人声切块」的精度。
+ */
+async function detectSpeech(
+  pcm: Float32Array,
+  context: {
+    signal?: AbortSignal
+    assetIndex: number
+    assetCount: number
+    within: number
+    onProgress?: (progress: AssetProgress) => void
+  },
+): Promise<SpeechDetection> {
+  try {
+    return await runSileroVad(pcm, context.signal)
+  } catch (error) {
+    /**
+     * 取消必须上抛成 AbortError：既不能让「用户取消」变成「降级继续跑」，
+     * 也不能把与取消无关的底层错误（如 ONNX 模型 404）抛给用户 ——
+     * 用户按下取消后应该看到「已取消」，而不是「识别失败：silero_vad.onnx 404」。
+     *
+     * VAD 失败与 abort 可能同时发生（404 先于取消到达），这里以 abort 为准：
+     * 只有 abort 时把「不是 AbortError 的底层错误」换成 AbortError。
+     */
+    if (context.signal?.aborted) {
+      if (error instanceof DOMException && error.name === 'AbortError') throw error
+      throw new DOMException('已取消', 'AbortError')
+    }
+    if (!vadFallbackNoticed) {
+      vadFallbackNoticed = true
+      console.warn('[asr] 人声检测不可用，改用固定 28s 切块识别：', error)
+    }
+    context.onProgress?.({
+      assetIndex: context.assetIndex,
+      assetCount: context.assetCount,
+      stage: 'vad',
+      percent: progressPercent(context.assetIndex - 1, context.assetCount, context.within),
+      detail: '人声检测不可用，改为按固定 28s 切块识别',
+    })
+    return { spans: [], maxProb: 0 }
+  }
+}
+
 /**
  * Recognises speech per source asset (not per clip): overlapping/nearby source
  * ranges are merged into one interval, transcribed once, and cached to
@@ -233,6 +293,7 @@ async function runRecognition(
         end: interval.end,
         providerId: options.provider.id,
         language: options.language,
+        variant: options.script ?? 'simplified',
       })
 
       const cached = await loadAsrWords(cacheKey)
@@ -281,7 +342,13 @@ async function runRecognition(
         percent: progressPercent(assetIndex, assetCount, within + 0.4 / Math.max(1, merged.length)),
         detail: `素材 ${assetIndex + 1}/${assetCount} 检测人声`,
       })
-      const vad = await runSileroVad(pcm)
+      const vad = await detectSpeech(pcm, {
+        signal,
+        assetIndex: assetIndex + 1,
+        assetCount,
+        within,
+        onProgress: options.onProgress,
+      })
       if (vad.maxProb > vadMaxProb) vadMaxProb = vad.maxProb
 
       const spanWords: AsrWord[] = []
@@ -307,6 +374,7 @@ async function runRecognition(
         })
         const words = await options.provider.transcribe(chunk, {
           language: options.language,
+          script: options.script ?? 'simplified',
           signal,
         })
         for (const word of words) {
@@ -321,11 +389,15 @@ async function runRecognition(
       // 按 VAD 人声块分别转录：以每块起点为时间基准，避免把包含长静音的整段
       // 一次性送 Whisper 导致词级时间戳被压缩到开头（字幕堆在 0 秒）。
       const intervalDuration = pcm.length / 16000
-      const blocks = buildSpeechBlocks(vad.spans, intervalDuration, {
-        padSeconds: 0.2,
-        mergeGapSeconds: 2,
-        maxBlockSeconds: 28,
-      })
+      // 算术切分（maxBlock=28s）常把词切两半：把切点挪到最近的低能量（停顿）处。
+      const blocks = snapSpeechBlockBoundaries(
+        buildSpeechBlocks(vad.spans, intervalDuration, {
+          padSeconds: 0.2,
+          mergeGapSeconds: 2,
+          maxBlockSeconds: 28,
+        }),
+        pcm,
+      )
       if (blocks.length > 0) {
         for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
           const block = blocks[blockIndex]
@@ -353,7 +425,12 @@ async function runRecognition(
         (left, right) => left.start - right.start || left.end - right.end,
       )
       if (cleaned.length > 0) {
-        await saveAsrWords(cacheKey, cleaned)
+        try {
+          await saveAsrWords(cacheKey, cleaned)
+        } catch (error) {
+          // 配额满 / 隐私模式禁 IndexedDB：缓存写失败不该让已经算完的结果作废。
+          console.warn('[asr] 写入识别缓存失败，本次结果照常使用：', error)
+        }
       }
       transcribedIntervalCount += 1
       wordsForSource.push(...cleaned)

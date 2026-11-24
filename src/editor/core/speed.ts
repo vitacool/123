@@ -52,13 +52,20 @@ export function atempoChain(speed: number): string[] {
 }
 
 /**
- * keepPitch=false 时的音频变速：asetrate 改变采样率实现「改变音调」的变速，
- * 后面用 aresample 回到 48k。
+ * keepPitch=false 时的音频变速：asetrate 改变采样率实现「改变音调」的变速。
+ *
+ * 必须先把输入统一到 `sampleRate` 再改采样率：素材可能是 44.1k，而
+ * FFmpeg 滤镜图里的 `asetrate` 用的是**绝对**采样率。直接写 48000×倍率，
+ * 44.1k 源的实际倍率会变成 48000×倍率/44100（2x → 约 2.18x，时长/音高都错）。
  */
 export function asetrateChain(speed: number, sampleRate = 48000): string[] {
   const target = clampSpeed(speed)
   if (Math.abs(target - 1) < 1e-6) return []
-  return [`asetrate=${Math.round(sampleRate * target)}`, `aresample=${sampleRate}`]
+  return [
+    `aresample=${sampleRate}`,
+    `asetrate=${Math.round(sampleRate * target)}`,
+    `aresample=${sampleRate}`,
+  ]
 }
 
 /** 按 keepPitch 选择音频变速滤镜链。 */

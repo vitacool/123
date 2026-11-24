@@ -65,8 +65,33 @@ async function loadStore(): Promise<StoreModule> {
   return import('../src/editor/services/draftStore')
 }
 
+/** node 环境没有 localStorage：装一个同步的内存实现（与 draftEmergency.test.ts 一致）。 */
+function installLocalStorage(): void {
+  const map = new Map<string, string>()
+  const storage = {
+    get length() {
+      return map.size
+    },
+    key: (index: number) => [...map.keys()][index] ?? null,
+    getItem: (key: string) => map.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      map.set(key, value)
+    },
+    removeItem: (key: string) => {
+      map.delete(key)
+    },
+    clear: () => map.clear(),
+  }
+  Object.defineProperty(globalThis, 'localStorage', {
+    value: storage,
+    configurable: true,
+    writable: true,
+  })
+}
+
 beforeEach(() => {
   ;(globalThis as { indexedDB: IDBFactory }).indexedDB = new IDBFactory()
+  installLocalStorage()
 })
 
 describe('deleteDraftProject：保护当前会话未落盘的 blob', () => {
@@ -102,5 +127,52 @@ describe('deleteDraftProject：保护当前会话未落盘的 blob', () => {
     const removed = await store.deleteDraftProject('B')
     expect(removed).toEqual(['b-old'])
     expect(await store.loadMediaBlob('a-old')).toBeTruthy()
+  })
+})
+
+/**
+ * 删除是「不可逆」动作：删完之后，任何还在路上或残留在 localStorage 的旧写入
+ * 都不能把这条记录写回来（否则用户会看到「删了又出现」，同时它的素材永远不回收）。
+ */
+describe('deleteDraftProject：删除后不能被紧急快照/在途保存写回来', () => {
+  it('只剩紧急快照的项目被删掉后不再复活，素材 blob 也会回收', async () => {
+    const store = await loadStore()
+    await store.saveProjectRecord(record('A', [asset('a-old')]))
+    await store.saveMediaBlob('a-old', new Blob(['old']))
+    await store.saveMediaBlob('b-asset', new Blob(['b']))
+    // 上一次页面隐藏时写下的紧急快照：B 的这条记录只存在于 localStorage
+    expect(store.writeEmergencyDraft(record('B', [asset('b-asset')]))).toBe(true)
+    expect((await store.loadProjectRecords()).map((item) => item.id).sort()).toEqual(['A', 'B'])
+
+    const removed = await store.deleteDraftProject('B')
+
+    // blob 必须回收（以前紧急快照里的引用会让它永远留下）
+    expect(removed).toEqual(['b-asset'])
+    expect(await store.loadMediaBlob('b-asset')).toBeUndefined()
+    // 刷新后也不能再看到它（浏览器重启等价于重新 import 模块 + 同一个 localStorage）
+    expect((await store.loadProjectRecords()).map((item) => item.id)).toEqual(['A'])
+    expect(await store.loadProjectRecord('B')).toBeNull()
+    // 清的是「这一条」，其它项目的紧急快照不受影响
+    expect(store.writeEmergencyDraft(record('A', [asset('a-old')]))).toBe(true)
+  })
+
+  it('删除后迟到的保存请求被丢弃，不会把记录写回来', async () => {
+    const store = await loadStore()
+    await store.saveProjectRecord(record('A', []))
+    await store.deleteDraftProject('B')
+
+    // 防抖保存/页面隐藏时 flush 的那次写入，可能在删除之后才跑到队列头部
+    const late = await store.saveProjectRecordSerialized(record('B', [asset('b-asset')]))
+
+    expect(late).toEqual({ written: false })
+    expect((await store.loadProjectRecords()).map((item) => item.id)).toEqual(['A'])
+  })
+
+  it('删除后迟到的紧急快照写入被拒绝（页面卸载路径也堵住）', async () => {
+    const store = await loadStore()
+    await store.deleteDraftProject('B')
+
+    expect(store.writeEmergencyDraft(record('B', []))).toBe(false)
+    expect((await store.loadProjectRecords()).map((item) => item.id)).toEqual([])
   })
 })

@@ -640,6 +640,15 @@ Ctrl+Z ×2 → 片段 1 / 素材 0 / 片段文字「素材已移除」/ 预览�
 - 结果：**chrome 与 edge 上各 22 条全过**
 - **仍未覆盖**：Firefox（`pointerId=0`、module worker 这些正是项目历史上踩过的坑）、Safari。这两个是当前最大的验证盲区，需要能下载 Playwright 浏览器的环境补齐
 
+### N15（2026-11-24，第三轮）｜删除的项目会被「紧急快照」复活，且它的素材 blob 永不回收
+
+- 位置：`services/draftStore.ts#deleteDraftProject`（配合 `loadProjectRecords` 的紧急快照合并、`collectReferencedMediaIds` 的引用判定）
+- 场景：编辑到一半切走标签页/最小化（`visibilitychange → hidden` 往 localStorage 写「紧急快照」）→ 之后在「最近项目」删掉这个项目 → 刷新：**项目又回到列表里**，且它的素材 blob 一直占着配额
+- 根因：删除只删了 IndexedDB 记录，而 `loadProjectRecords()` 会按 `updatedAt` 把 localStorage 的紧急快照合并回列表（这是「防抖窗口内关页面不丢编辑」的既有机制），于是删掉的项目从快照里复活。更糟的是引用集也是从**合并后**的记录算的：被删项目的素材永远被判定「仍被引用」→ 永不回收。配额满之后，「删旧项目腾空间」这个自救动作恰好失效，形成「删了又回来、空间还不释放」的自锁
+- 同一处收口的关联缺口：删完之后**仍在途的保存**（700ms 防抖保存、页面隐藏时的 flush）跑完会把记录写回来；页面卸载路径的 `writeEmergencyDraft` 也能把它写回来
+- 修法：删除成功后 ① 打「本次会话已删除」标记（`deletedProjectIds`），串行保存队列 / 直接写记录（改名）/ 紧急快照写入三处一律丢弃；② 同步 `clearEmergencyDraft(id)`；③ 再算引用集 → blob 正常回收。顺序上**先删记录、成功后才清快照**：IDB 删除失败时紧急快照可能是唯一副本，不能提前丢
+- 验证：新增 3 条单测（只剩紧急快照的项目删除后不复活 + blob 回收；删除后迟到的 `saveProjectRecordSerialized` 返回 `{written:false}` 且不建记录；删除后 `writeEmergencyDraft` 返回 `false`）。**负向对照**：把 `draftStore.ts` 还原成修复前，这 3 条全红、原有用例仍绿；修复后 5/5 绿。全量单测 **1113 passed / 2 skipped**（+3），`tsc` / `eslint` 0 错误
+
 ---
 
 ## 附录：证据文件

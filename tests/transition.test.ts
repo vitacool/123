@@ -12,10 +12,12 @@ import {
   TRANSITION_MAX_DURATION,
   TRANSITION_MIN_DURATION,
   TRANSITION_TYPES,
+  transitionDurationFromDrag,
 } from '../src/editor/core/transition'
 import { getProjectDuration, getTimeline, segmentsAt } from '../src/editor/core/timeline'
 import { buildExportPlan } from '../src/editor/core/exportPlan'
 import { createClip, createInitialProject } from '../src/editor/core/operations'
+import { createSetTransitionCommand } from '../src/editor/core/commands'
 import type { Clip, Project, SourceInfo } from '../src/editor/core/types'
 
 const SOURCE: SourceInfo = {
@@ -37,6 +39,37 @@ function twoClips(transition?: Clip['transitionOut'], gap = 0): Project {
     ],
   }
 }
+
+describe('时间轴拖转场时长', () => {
+  it('像素位移按 pps 换算并夹到上下限', () => {
+    expect(transitionDurationFromDrag(0.4, 20, 100, 2)).toBeCloseTo(0.6)
+    expect(transitionDurationFromDrag(0.4, -100, 100, 2)).toBe(TRANSITION_MIN_DURATION)
+    expect(transitionDurationFromDrag(0.4, 10_000, 100, 1)).toBe(1)
+  })
+
+  it('非法 pps/位移/上限不产生 NaN', () => {
+    expect(transitionDurationFromDrag(0.4, 0, 0, 2)).toBeCloseTo(0.4)
+    expect(transitionDurationFromDrag(0.4, Number.NaN, 100, 2)).toBeCloseTo(0.4)
+    expect(transitionDurationFromDrag(0.4, 0, 100, Number.NaN)).toBeCloseTo(0.4)
+  })
+})
+
+describe('空隙 + 转场：同一步原子完成', () => {
+  it('设置转场时自动闭合空隙，且重复执行是 no-op', () => {
+    const before = twoClips(undefined, 0.5)
+    const command = createSetTransitionCommand('c1', 'c2', {
+      type: 'fade',
+      duration: 0.4,
+    })
+    const after = command.execute(before)
+    expect(clipTransitionOut(after.clips[0])).toMatchObject({ type: 'fade', duration: 0.4 })
+    expect(after.clips[1].gapBefore).toBe(0)
+    // 片段自身时长/源区间不变（只是把空隙收掉）
+    expect(after.clips[0].sourceEnd).toBe(before.clips[0].sourceEnd)
+    expect(after.clips[1].sourceEnd).toBe(before.clips[1].sourceEnd)
+    expect(command.execute(after)).toBe(after)
+  })
+})
 
 describe('转场类型与时长夹取', () => {
   it('历史五种类型仍然存在且中文名不变', () => {

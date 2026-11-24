@@ -216,3 +216,74 @@ export function buildSpeechBlocks(
   }
   return blocks
 }
+
+/**
+ * 把「相邻块之间的切点」挪到能量最低的位置（通常是词间停顿）。
+ *
+ * `buildSpeechBlocks` 对超过 `maxBlockSeconds` 的连续人声是**纯算术**切分
+ * （`cursor + maxBlock`），切点经常正落在词中间：同一个词被拆进前后两块
+ * 分别识别，字幕于是出现「重复半句 / 残词」，每 28 秒一次。
+ *
+ * 这里只在原来切点 ±`maxShiftSeconds` 内搜索（默认 250ms），用滑动窗能量找最小值，
+ * 并保证两块各自还剩至少 `minBlockSeconds`，因此：
+ * - 原本切在静音上的情形**不变**（窗口内最小值就在原处）；
+ * - 找不到更低能量的位置时保持原样，不会引入新的错位。
+ */
+export function snapSpeechBlockBoundaries(
+  blocks: readonly SpeechBlock[],
+  pcm: Float32Array,
+  sampleRate: number = VAD_SAMPLE_RATE,
+  options: { maxShiftSeconds?: number; minBlockSeconds?: number } = {},
+): SpeechBlock[] {
+  const EPS = 1e-6
+  const maxShift = Math.max(0, options.maxShiftSeconds ?? 0.25)
+  const minBlock = Math.max(EPS, options.minBlockSeconds ?? 0.2)
+  if (blocks.length < 2 || pcm.length === 0 || sampleRate <= 0 || maxShift <= 0) {
+    return blocks.map((block) => ({ ...block }))
+  }
+
+  const snapped = blocks.map((block) => ({ ...block }))
+  const windowSamples = Math.max(1, Math.round(sampleRate * 0.02))
+  const stepSamples = Math.max(1, Math.round(sampleRate * 0.01))
+  const shiftSamples = Math.round(maxShift * sampleRate)
+  /** 候选点两侧各 windowSamples 的绝对值均值（越小越接近静音）。 */
+  const energyAt = (sample: number): number => {
+    const from = Math.max(0, sample - windowSamples)
+    const to = Math.min(pcm.length, sample + windowSamples)
+    if (to <= from) return 0
+    let sum = 0
+    for (let index = from; index < to; index += 1) sum += Math.abs(pcm[index] ?? 0)
+    return sum / (to - from)
+  }
+
+  for (let index = 0; index + 1 < snapped.length; index += 1) {
+    const left = snapped[index]
+    const right = snapped[index + 1]
+    // 只处理「紧邻」的切点：arithmetic 切分出来的边界 end === next.start。
+    if (Math.abs(left.end - right.start) > EPS) continue
+    const original = left.end
+    const central = Math.round(original * sampleRate)
+    const lowest = Math.max(0, Math.floor((left.start + minBlock) * sampleRate))
+    const highest = Math.min(pcm.length, Math.ceil((right.end - minBlock) * sampleRate))
+    const from = Math.max(lowest, central - shiftSamples)
+    const to = Math.min(highest, central + shiftSamples)
+    if (to <= from) continue
+
+    let bestSample = central
+    let bestEnergy = Number.POSITIVE_INFINITY
+    for (let sample = from; sample <= to; sample += stepSamples) {
+      const energy = energyAt(sample)
+      if (energy < bestEnergy) {
+        bestEnergy = energy
+        bestSample = sample
+      }
+    }
+    // 只有确实找到「更安静」的位置才移动：避免平坦/噪声段被随机挪动。
+    if (!Number.isFinite(bestEnergy) || bestEnergy >= energyAt(central) - EPS) continue
+    const cut = bestSample / sampleRate
+    left.end = cut
+    right.start = cut
+  }
+
+  return snapped
+}

@@ -340,7 +340,7 @@ describe('store：removeAsset / cleanupUnusedAssets', () => {
     expect(store.getState().pendingReclaim).toEqual({})
   })
 
-  it('removeClips=false：片段保留（引用一个已不在 assets 里的 url）', () => {
+  it('removeClips=false：片段保留（引用一个已不在 assets 里的 url），并写入 missingAssets', () => {
     const store = makeStore()
     const assetId = store.getState().assets[0].id
     store.getState().removeAsset(assetId, { removeClips: false })
@@ -348,6 +348,40 @@ describe('store：removeAsset / cleanupUnusedAssets', () => {
     expect(store.getState().assets).toHaveLength(0)
     // 片段引用的 url 已无对应素材 → 缺失
     expect(isClipAssetMissing(assetUrlSet(store.getState().assets), store.getState().project.clips[0])).toBe(true)
+    // 必须写进 missingAssets：否则刷新后 pruneProjectUrls 会把片段剔掉，
+    // 「片段变空白」变成「片段直接消失」。
+    expect(store.getState().missingAssets).toEqual([
+      expect.objectContaining({ url: 'u1', kind: 'video' }),
+    ])
+  })
+
+  it('removeClips=true：不留下占位记录', () => {
+    const store = makeStore()
+    const assetId = store.getState().assets[0].id
+    store.getState().removeAsset(assetId, { removeClips: false })
+    expect(store.getState().missingAssets).toHaveLength(1)
+    // 撤销回片段后，再次连带删除素材：占位记录应被清掉
+    store.getState().addAssets([{ ...asset('again', 'u1'), name: 'again.mp4' }])
+    store.getState().removeAsset('again', { removeClips: true })
+    expect(store.getState().missingAssets).toHaveLength(0)
+  })
+
+  it('renameAsset：素材与主素材显示名一起更新，空名/同名不改', () => {
+    const store = makeStore()
+    const assetId = store.getState().assets[0].id
+    store.getState().renameAsset(assetId, '  新名字  ')
+    expect(store.getState().assets[0].name).toBe('新名字')
+    expect(store.getState().source?.name).toBe('新名字')
+    store.getState().renameAsset(assetId, '   ')
+    expect(store.getState().assets[0].name).toBe('新名字')
+  })
+
+  it('updateAssetThumbnail：素材与主素材缩略图一起更新', () => {
+    const store = makeStore()
+    const assetId = store.getState().assets[0].id
+    store.getState().updateAssetThumbnail(assetId, 'data:image/jpeg;base64,AAA')
+    expect(store.getState().assets[0].thumbnail).toBe('data:image/jpeg;base64,AAA')
+    expect(store.getState().source?.thumbnail).toBe('data:image/jpeg;base64,AAA')
   })
 
   it('cleanupUnusedAssets 删除闲置素材并报告数量', () => {

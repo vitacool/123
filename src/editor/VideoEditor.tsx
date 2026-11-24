@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import type {
   ChangeEvent, DragEvent as ReactDragEvent, PointerEvent as ReactPointerEvent, } from 'react'
 import { MAX_RECOMMENDED_FILE_BYTES } from './core/constants'
@@ -26,7 +26,9 @@ import { MissingAssetsDialog, type MissingAssetRow } from './components/MissingA
 import {
   captureThumbnail, isSupportedMedia, readAssetFile, remoteName, waitForVideoMetadata, } from './services/assetReader'
 import { configureFFmpegAssets } from './services/ffmpegExporter'
-import { parseSubtitleText } from './core/text'
+import { decodeSubtitleBytes, parseSubtitleText } from './core/text'
+import { isSameProjectOpenMessage } from './core/draftConflict'
+import { findDuplicateAsset } from './core/assets'
 import type { TranscribeProvider } from './services/asr/types'
 import {
   countProjectRecords, deleteDraftProject, hasProjectRecord, loadProjectRecords, persistImportedAssets, reportDraftSaveFailure, restoreDraft, saveMediaBlob, toDraftAsset, buildDraftRecord, saveProjectRecordSerialized, saveProjectRecord, writeEmergencyDraft } from './services/draftStore'
@@ -51,6 +53,7 @@ import { AutoCaptionDialog } from './components/AutoCaptionDialog'
 import { Toast } from './components/Toast'
 import { ReverseJobBanner } from './components/ReverseJobBanner'
 import { Icon } from './components/Icon'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { isEditableTarget } from './components/keyboardScope'
 import './styles/editor.css'
 
@@ -94,6 +97,11 @@ export interface VideoEditorProps {
   theme?: FrameCutTheme
   /** 受控模式下，用户点击主题按钮时回调（由宿主决定是否改变 theme）。 */
   onThemeChange?: (theme: FrameCutTheme) => void
+  /**
+   * 本地草稿持久化：`auto`（默认）自动保存/恢复最近项目；`off` 完全不读写草稿库，
+   * 由宿主自己管理工程。适合在同一页嵌入多个实例、或宿主已有项目存储的场景。
+   */
+  persistence?: 'auto' | 'off'
 }
 
 /** 导入工程时的「缺失素材」选择状态。 */
@@ -373,6 +381,16 @@ function EditorShell({
     if (!hiddenFileInput && (inField || isEditableTarget(target))) return
     const state = store.getState()
     if (state.exportDialogOpen) return
+    /**
+     * 任何编辑器内的模态框打开时，时间轴快捷键必须停用。
+     *
+     * 原来只挡了 exportDialogOpen / cropSession —— 于是「删除素材」确认框、
+     * 「最近项目」全屏遮罩、画布背景、智能字幕弹窗开着时，Delete / Q / W / Ctrl+Z
+     * 仍然作用在遮罩背后的时间轴上：用户以为被弹窗拦住了，其实片段已经被删掉。
+     * 这些对话框的状态大多在各自组件内部（不在 store 里），所以用 DOM 判据统一兜住：
+     * 只看编辑器根节点内是否存在 aria-modal 的对话框，避免被宿主页面自己的弹窗误伤。
+     */
+    if (root?.querySelector('[aria-modal="true"]')) return
     if (event.repeat) return
     const key = event.key.toLowerCase()
     const modifier = event.ctrlKey || event.metaKey
@@ -496,6 +514,15 @@ function EditorShell({
     if (!modifier && key === 'end') {
       event.preventDefault()
       state.setPlayhead(getProjectEnd(state.project))
+      return
+    }
+    // [ / ]：选中片段逐帧微调；{ / }：逐秒（避开浏览器 Alt+方向键的后退/前进）。
+    if (!modifier && (key === '[' || key === ']' || key === '{' || key === '}')) {
+      event.preventDefault()
+      const direction = key === '[' || key === '{' ? -1 : 1
+      const fps = state.project.exportQuality.fps || 30
+      const step = key === '{' || key === '}' ? 1 : 1 / fps
+      state.moveSelectionBy(direction * step)
       return
     }
     // 时间轴适应窗口：Ctrl+Shift+= / Ctrl+Shift+- / Shift+Z
@@ -712,14 +739,21 @@ export function VideoEditor({
   onReady,
   onProjectChange,
   projects = true,
+  persistence = 'auto',
   theme: themeProp,
   onThemeChange,
 }: VideoEditorProps) {
   // 宿主可注入 store（多实例/外部订阅）；未注入时编辑器自建一个。
   const [internalStore] = useState(() => createEditorStore())
   const store = injectedStore ?? internalStore
+  /** 只订阅 projectId（其它状态变化不重渲染）；多标签页锁按项目 id 申请。 */
+  const draftProjectId = useSyncExternalStore(
+    store.subscribe,
+    () => store.getState().projectId,
+  )
+  const persistenceEnabled = persistence !== 'off'
   // 宿主模式（注入 store 或指定初始视频）不弹项目列表，保持原有自动恢复行为。
-  const libraryEnabled = projects && !injectedStore && !initialVideo
+  const libraryEnabled = projects && !injectedStore && !initialVideo && persistenceEnabled
   /** 受控/非受控主题：传了 prop 就完全听宿主的（不读不写 localStorage）。 */
   const themeControlled = themeProp !== undefined
   const [storedTheme, setStoredTheme] = useState<FrameCutTheme>(() => {
@@ -848,8 +882,20 @@ export function VideoEditor({
   }, [ffmpegBaseUrl])
 
   useEffect(() => {
+    if (!persistenceEnabled) return
     if (initialVideo) {
       restoringRef.current = false
+      // 宿主直接注入了视频：这次会话一定会创建新项目。达上限时提前说明
+      // （不阻断播放），否则用户剪完才会发现每次都保存失败。
+      void countProjectRecords()
+        .then((total) => {
+          if (!projectLimitReached(total)) return
+          store.getState().notify(
+            `项目数已达上限（${PROJECT_LIMIT}）：本次会话的编辑不会被保存，请先在「最近项目」删除一个旧项目`,
+            'warning',
+          )
+        })
+        .catch(() => {})
       return
     }
     let cancelled = false
@@ -875,6 +921,7 @@ export function VideoEditor({
           if (asset.url.startsWith('blob:')) importedUrlsRef.current.push(asset.url)
         }
         store.getState().notify(`已恢复项目「${latest.name}」`, 'info')
+        store.getState().setDraftSave({ status: 'saved', at: latest.updatedAt })
       } catch {
         // 损坏的草稿不应阻塞编辑器。
       } finally {
@@ -884,7 +931,7 @@ export function VideoEditor({
     return () => {
       cancelled = true
     }
-  }, [initialVideo, store, libraryEnabled])
+  }, [initialVideo, store, libraryEnabled, persistenceEnabled])
 
   /** 重新读取「最近项目」列表。 */
   const refreshLibrary = async (): Promise<void> => {
@@ -978,6 +1025,8 @@ export function VideoEditor({
      * 每 0.7 秒弹一次同样的警告，而**内容其实一直没落盘**，刷新就全丢。
      */
     let limitNotified = false
+    /** 紧急快照写入失败只提示一次。 */
+    let emergencyWarned = false
     const unsubscribe = store.subscribe((state, previous) => {
       // 宿主回调：project 变化时防抖 500ms（与草稿保存共用同一个订阅）。
       if (state.project !== previous.project) {
@@ -990,6 +1039,10 @@ export function VideoEditor({
         }
       }
       if (restoringRef.current) return
+      // persistence='off'：不自动保存（仍保留上面的 onProjectChange 宿主回调）。
+      if (!persistenceEnabled) return
+      // 同一项目在另一个标签页编辑：本页停止自动保存，避免互相覆盖。
+      if (store.getState().draftSaveLocked) return
       // 改名是一次明确的离散操作，不能等 700ms 的防抖保存：
       // 「最近项目」列表用的是 libraryRecords 快照、打开列表时又会重新读库，
       // 所以这里立刻把内存列表里的名字同步好并马上落盘，避免看到旧名字。
@@ -1022,6 +1075,9 @@ export function VideoEditor({
       ) {
         return
       }
+      if (state.projectId) {
+        store.getState().setDraftSave({ status: 'pending', at: null })
+      }
       window.clearTimeout(draftTimer)
       draftTimer = window.setTimeout(() => {
         const current = store.getState()
@@ -1031,8 +1087,12 @@ export function VideoEditor({
         if (!id) return
         // 记录组装与 store 的 flushProjectSave 共用 buildDraftRecord。
         const record = buildDraftRecord(current)
-        if (!record) return
+        if (!record) {
+          current.setDraftSave({ status: 'idle', at: null })
+          return
+        }
         void (async () => {
+          current.setDraftSave({ status: 'saving', at: null })
           try {
             // 串行保存：同一项目 id 不会并发写；旧快照会被更新的一次取代。
             // 数量上限检查放在 beforeSave 里 —— 它在队列内部执行，不会与
@@ -1053,8 +1113,13 @@ export function VideoEditor({
                 return false
               },
             })
-            void written
+            current.setDraftSave(
+              written
+                ? { status: 'saved', at: Date.now() }
+                : { status: 'error', at: null },
+            )
           } catch {
+            current.setDraftSave({ status: 'error', at: null })
             reportDraftSaveFailure(current.notify)
           }
         })()
@@ -1068,10 +1133,22 @@ export function VideoEditor({
       const flushDraftNow = (): void => {
         window.clearTimeout(draftTimer)
         if (restoringRef.current) return
+        if (!persistenceEnabled) return
+        if (store.getState().draftSaveLocked) return
         const current = store.getState()
         // 先同步写一份 localStorage 紧急快照：IDB 事务在页面卸载时会被中止，
         // 只有同步写入才能保证「改完立刻刷新」不丢最后一次编辑（下次启动会回放它）。
-        writeEmergencyDraft(buildDraftRecord(current))
+        const wrote = writeEmergencyDraft(buildDraftRecord(current))
+        if (!wrote && !emergencyWarned) {
+          emergencyWarned = true
+          console.warn(
+            '[FrameCut] 紧急快照未写入：若页面立即关闭，最后一次编辑可能丢失（存储空间不足或 localStorage 不可用）',
+          )
+          current.notify(
+            '紧急快照写入失败：若立刻关闭页面，最后一次编辑可能丢失（请检查存储空间）',
+            'warning',
+          )
+        }
         store.getState().flushProjectSave()
       }
       const onPageHide = (): void => flushDraftNow()
@@ -1089,7 +1166,86 @@ export function VideoEditor({
         flushDraftNow()
         window.clearTimeout(projectTimer)
       }
-    }, [store])
+    }, [store, persistenceEnabled])
+
+  /**
+   * 多标签页冲突提示：两个标签页同时打开同一项目时，自动保存会互相覆盖。
+   * 用 BroadcastChannel 互相通报「我打开了哪个项目」，命中同 id 时提示一次。
+   * （完整编辑锁/只读模式仍未实现；persistence="off" 供宿主自行隔离。）
+   */
+  useEffect(() => {
+    if (!persistenceEnabled || typeof BroadcastChannel !== 'function') return
+    let warned = false
+    const channel = new BroadcastChannel('framecut-open-projects')
+    let lastId = store.getState().projectId
+    const announce = (): void => {
+      const id = store.getState().projectId
+      if (id) channel.postMessage({ type: 'open', projectId: id, at: Date.now() })
+    }
+    channel.onmessage = (event: MessageEvent) => {
+      if (warned) return
+      if (isSameProjectOpenMessage(event.data, store.getState().projectId)) {
+        warned = true
+        store
+          .getState()
+          .notify(
+            '该项目已在另一个标签页打开：两个窗口的自动保存可能互相覆盖，建议只保留一个。',
+            'warning',
+          )
+      }
+    }
+    announce()
+    const unsubscribe = store.subscribe(() => {
+      const id = store.getState().projectId
+      if (id === lastId) return
+      lastId = id
+      announce()
+    })
+    return () => {
+      unsubscribe()
+      channel.close()
+    }
+  }, [persistenceEnabled, store])
+
+  /**
+   * 同一项目多标签页编辑锁：用 Web Locks 的 `ifAvailable` 试着独占；
+   * 拿不到锁的标签页停止自动保存并在顶栏提示，避免两个窗口互相覆盖。
+   * 不阻止本地编辑（完整只读模式暂未实现）。
+   */
+  useEffect(() => {
+    const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined
+    if (!persistenceEnabled || !locks || !draftProjectId) {
+      store.getState().setDraftSaveLocked(false)
+      return
+    }
+    let release: (() => void) | null = null
+    let cancelled = false
+    const hold = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    void locks
+      .request(`framecut-project-${draftProjectId}`, { ifAvailable: true }, async (lock) => {
+        if (cancelled) return
+        if (!lock) {
+          store.getState().setDraftSaveLocked(true)
+          store
+            .getState()
+            .notify(
+              '该项目正在另一个标签页编辑：本页改动不会被自动保存（避免互相覆盖）',
+              'warning',
+            )
+          return
+        }
+        store.getState().setDraftSaveLocked(false)
+        await hold
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+      release?.()
+      store.getState().setDraftSaveLocked(false)
+    }
+  }, [draftProjectId, persistenceEnabled, store])
 
   useEffect(() => {
     setActiveVideo(initialVideo ?? null)
@@ -1103,6 +1259,27 @@ export function VideoEditor({
     fileInputRef.current.click()
   }
 
+  /**
+   * 新会话要创建项目时先检查上限。以前只在「新建项目」和保存时检查：
+   * 导入素材/导入工程会照常进入编辑，剪完才发现每次保存都被丢弃。
+   */
+  const ensureProjectSlot = async (action: string): Promise<boolean> => {
+    if (store.getState().projectId) return true
+    let total: number
+    try {
+      total = await countProjectRecords()
+    } catch {
+      // 读不到记录（IDB 不可用）时不阻断编辑；保存流程会再提示。
+      return true
+    }
+    if (!projectLimitReached(total)) return true
+    store.getState().notify(
+      `已有 ${total} 个项目（上限 ${PROJECT_LIMIT}）：请先在「最近项目」删除一个，再${action}`,
+      'warning',
+    )
+    return false
+  }
+
   const importFiles = async (files: File[]) => {
     const media = files.filter(isSupportedMedia)
     if (media.length === 0) {
@@ -1110,13 +1287,21 @@ export function VideoEditor({
       store.getState().notify('请选择视频或音频文件', 'warning')
       return
     }
+    if (!(await ensureProjectSlot('导入素材'))) return
     setError(null)
     setLoading(true)
     setLoadingLabel(null)
     const imported: MediaAsset[] = []
     const failures: string[] = []
+    const duplicateNames: string[] = []
+    // 已有素材 + 本次已读入的素材：同一批里重复的文件也要跳过。
+    const knownAssets: MediaAsset[] = [...store.getState().assets]
     let failed = 0
     for (const file of media) {
+      if (findDuplicateAsset(file, knownAssets)) {
+        duplicateNames.push(file.name)
+        continue
+      }
       try {
         let notified = false
         const asset = await readAssetFile(file, {
@@ -1134,6 +1319,7 @@ export function VideoEditor({
         })
         importedUrlsRef.current.push(asset.url)
         imported.push(asset)
+        knownAssets.push(asset)
       } catch (error) {
         failed += 1
         const message = error instanceof Error ? error.message : String(error)
@@ -1150,6 +1336,14 @@ export function VideoEditor({
     }
     setLoading(false)
     setLoadingLabel(null)
+    if (duplicateNames.length > 0) {
+      store
+        .getState()
+        .notify(
+          `已跳过 ${duplicateNames.length} 个重复素材（同名同大小，避免重复占用存储）`,
+          'info',
+        )
+    }
     if (failed > 0) {
       const detail = failures[0] ? `：${failures[0]}` : ''
       setError(`${failed} 个文件无法读取${detail}。HEVC 会自动转 H.264；其他格式请先转为 H.264 MP4 / WebM。`)
@@ -1178,7 +1372,7 @@ export function VideoEditor({
     event.target.blur()
     if (!file) return
     try {
-      const cues = parseSubtitleText(await file.text())
+      const cues = parseSubtitleText(decodeSubtitleBytes(await file.arrayBuffer()))
       if (cues.length === 0) {
         setError('没有解析到字幕条目，请确认是 SRT 或 VTT 文件。')
         store.getState().notify('字幕文件为空或格式不支持', 'warning')
@@ -1270,7 +1464,8 @@ export function VideoEditor({
     }
   }
 
-  const pickProjectFile = () => {
+  const pickProjectFile = async () => {
+    if (!(await ensureProjectSlot('导入工程'))) return
     const input = projectFileInputRef.current
     if (!input) return
     input.value = ''
@@ -1499,7 +1694,8 @@ export function VideoEditor({
 
   return (
     <EditorStoreProvider store={store}>
-      <div className={className ? `framecut-host ${className}` : 'framecut-host'}>
+      <ErrorBoundary>
+        <div className={className ? `framecut-host ${className}` : 'framecut-host'}>
         <EditorShell
           loading={loading}
           error={error}
@@ -1592,6 +1788,7 @@ export function VideoEditor({
           tabIndex={-1}
         />
       </div>
+      </ErrorBoundary>
     </EditorStoreProvider>
   )
 }

@@ -11,7 +11,7 @@ import {
   sortProjectRecords,
   type DraftProjectRecord,
 } from '../core/projectLibrary'
-import { migrateDraftSnapshot } from '../core/draft'
+import { DRAFT_SCHEMA_VERSION, migrateDraftSnapshot } from '../core/draft'
 import { normalizeProject } from '../core/normalizeProject'
 import {
   normalizeDraftExportRange,
@@ -198,6 +198,19 @@ export function buildDraftRecord(
 const saveSequences = new Map<string, number>()
 const saveQueues = new Map<string, Promise<void>>()
 
+/**
+ * 本次会话里**已经删除**的项目 id。
+ *
+ * 删除是不可逆动作，删完之后任何「还在路上」的旧写入都不能把它写回来：
+ * 1. 串行保存队列里排着的那次保存（防抖保存正好触发、或页面隐藏时的 flush）；
+ * 2. 直接写记录（改名的 `saveProjectRecord`）；
+ * 3. 页面隐藏时写进 localStorage 的紧急快照。
+ *
+ * 只在内存里记就够了：跨会话不需要它 —— 删除时会**同步**清掉 localStorage 里的
+ * 紧急快照，刷新后不会再有残留把这行记录带回来。
+ */
+const deletedProjectIds = new Set<string>()
+
 export interface SerializedSaveOptions {
   /**
    * 落盘前的最后校验（例如数量上限检查）。返回 false 表示放弃这次保存。
@@ -214,6 +227,8 @@ export async function saveProjectRecordSerialized(
   record: DraftProjectRecord,
   options: SerializedSaveOptions = {},
 ): Promise<{ written: boolean }> {
+  // 项目已经删了：迟到的保存请求直接丢弃（否则队列跑完会把记录写回来）。
+  if (deletedProjectIds.has(record.id)) return { written: false }
   const sequence = (saveSequences.get(record.id) ?? 0) + 1
   saveSequences.set(record.id, sequence)
 
@@ -246,6 +261,9 @@ export async function saveProjectRecordSerialized(
 }
 
 export async function saveProjectRecord(record: DraftProjectRecord): Promise<void> {
+  // 删除与写入可能交错（保存已经在途，用户此时删了项目）：删除标记优先。
+  // 这里必须再挡一次 —— 队列检查发生在写入之前，那一瞬间的竞态只能在这里收口。
+  if (deletedProjectIds.has(record.id)) return
   await withStore(DRAFT_STORE, 'readwrite', (store) => store.put(record))
   // 正常落盘成功 → 清掉可能残留的「紧急快照」，避免下次又用旧快照覆盖。
   clearEmergencyDraft(record.id)
@@ -280,6 +298,8 @@ function safeStorage(): Storage | null {
 export function writeEmergencyDraft(record: DraftProjectRecord | null): boolean {
   const storage = safeStorage()
   if (!record || !storage) return false
+  // 已删除的项目不再留快照：否则下次启动 `loadProjectRecords` 会把它合并回来。
+  if (deletedProjectIds.has(record.id)) return false
   try {
     const json = JSON.stringify(record)
     if (json.length > EMERGENCY_MAX_CHARS) return false
@@ -411,12 +431,27 @@ export async function listMediaIds(): Promise<string[]> {
  * 于是「在 A 里刚导入素材 → 去最近项目里删掉 B」会把 A 的新 blob 当孤儿删掉：
  * 当前会话看起来一切正常，刷新后素材全丢（片段变占位）。
  * `deleteMediaBlobIfUnreferenced` 一直有这个保护，这里补齐。
+ *
+ * 删除成功之后还要做三件事，否则「删掉的项目会回来」：
+ * - 打删除标记：在途/迟到的保存（含队列里排着的那次 flush）一律丢弃；
+ * - 同步清掉 localStorage 的紧急快照：`loadProjectRecords()` 会按 `updatedAt`
+ *   把它合并回列表，删除看起来完全没生效（刷新后又出现）；
+ * - 再算引用集：紧急快照里的素材引用会参与 `collectReferencedMediaIds`，
+ *   不清掉的话这个项目的 blob 永远不会被回收（白占配额，把用户逼到项目上限）。
  */
 export async function deleteDraftProject(
   id: string,
   options: { stillReferenced?: Iterable<string> } = {},
 ): Promise<string[]> {
   await withStore(DRAFT_STORE, 'readwrite', (store) => store.delete(id))
+  /**
+   * 先删记录、成功之后才清快照与打标记。
+   *
+   * 顺序不能反：IDB 删除失败时（配额/连接异常），紧急快照可能是这份内容唯一的副本，
+   * 提前清掉就等于把用户还没落盘的编辑一起丢了。
+   */
+  deletedProjectIds.add(id)
+  clearEmergencyDraft(id)
   const records = await loadProjectRecords()
   const referenced = collectReferencedMediaIds(records)
   for (const keep of options.stillReferenced ?? []) referenced.add(keep)
@@ -690,7 +725,7 @@ export function toDraftSnapshot(state: {
   playhead: number
 }): DraftSnapshot {
   return {
-    version: 1,
+    version: DRAFT_SCHEMA_VERSION,
     project: state.project,
     assets: state.assets.map(toDraftAsset),
     // 缺失素材（占位片段）随草稿保存，刷新后片段不会消失。

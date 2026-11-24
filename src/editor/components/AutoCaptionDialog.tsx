@@ -7,7 +7,7 @@ import {
   type RecognitionStats,
 } from '../services/asr'
 import type { TranscribeProvider } from '../services/asr/types'
-import type { AsrLanguage } from '../core/asr'
+import type { AsrLanguage, AsrScript } from '../core/asr'
 import {
   CAPTION_MODELS,
   DEFAULT_CAPTION_MODEL_ID,
@@ -58,6 +58,7 @@ export function AutoCaptionDialog({ open, onClose, provider }: AutoCaptionDialog
   const realignCaptions = useEditorStore((state) => state.realignCaptions)
 
   const [language, setLanguage] = useState<AsrLanguage>('zh')
+  const [script, setScript] = useState<AsrScript>('simplified')
   const [modelId, setModelId] = useState(DEFAULT_CAPTION_MODEL_ID)
   const [clearExisting, setClearExisting] = useState(true)
   const [includeAudio, setIncludeAudio] = useState(true)
@@ -113,6 +114,7 @@ export function AutoCaptionDialog({ open, onClose, provider }: AutoCaptionDialog
       const engine = provider ?? createWhisperProvider(modelId)
       const output = await recognizeAssets(project, assets, source, {
         language,
+        script,
         modelId,
         provider: engine,
         includeAudio,
@@ -228,6 +230,18 @@ export function AutoCaptionDialog({ open, onClose, provider }: AutoCaptionDialog
                   <option value="auto">自动检测</option>
                   <option value="zh">中文</option>
                   <option value="en">英文</option>
+                </select>
+              </label>
+              <label>
+                <span>输出字形</span>
+                <select
+                  value={script}
+                  disabled={running}
+                  onChange={(event) => setScript(event.target.value as AsrScript)}
+                >
+                  <option value="simplified">简体（默认）</option>
+                  <option value="traditional">繁体</option>
+                  <option value="original">保持识别原文</option>
                 </select>
               </label>
               {!provider && (

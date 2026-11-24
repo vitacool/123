@@ -104,6 +104,8 @@ export const ANIMATED_CLIP_FIELD_HANDLING = {
   volume: 'kept',
   fadeIn: 'kept',
   fadeOut: 'kept',
+  fadeInCurve: 'kept',
+  fadeOutCurve: 'kept',
   speed: 'baked',
   keepPitch: 'baked',
   opacity: 'baked',

@@ -18,6 +18,15 @@ export function formatClock(seconds: number): string {
   return `${minutes}:${secs.toString().padStart(2, '0')}`
 }
 
+/** 顶栏「已保存 HH:MM」用的本地时钟；非法/空值返回空串。 */
+export function formatSavedAt(at: number): string {
+  if (!Number.isFinite(at) || at <= 0) return ''
+  const date = new Date(at)
+  const hh = date.getHours().toString().padStart(2, '0')
+  const mm = date.getMinutes().toString().padStart(2, '0')
+  return `${hh}:${mm}`
+}
+
 export function formatRulerTime(seconds: number, step: number): string {
   const total = Math.max(0, seconds)
   if (step < 1) {

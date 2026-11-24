@@ -13,7 +13,7 @@ import {
 } from '../core/exportEta'
 import { textAnimationPerformanceHint } from '../core/textAnimation'
 import { formatFileSize, formatPlayhead } from '../core/format'
-import type { ExportFps, ExportLoudness, ExportResolution, SourceInfo } from '../core/types'
+import type { ExportFps, ExportLoudness, ExportResolution, ExportTier, SourceInfo } from '../core/types'
 import { useEditorStore } from '../store/EditorProvider'
 import {
   exportProject,
@@ -70,6 +70,12 @@ const RESOLUTIONS: { id: ExportResolution; label: string; hint: string }[] = [
 ]
 
 const FRAME_RATES: ExportFps[] = [24, 30, 60]
+
+const QUALITY_TIERS: { id: ExportTier; label: string; hint: string }[] = [
+  { id: 'high', label: '高画质', hint: '文件更大' },
+  { id: 'standard', label: '标准', hint: '推荐' },
+  { id: 'small', label: '小体积', hint: '更快上传' },
+]
 
 const LOUDNESS_OPTIONS: { id: ExportLoudness; label: string; hint: string }[] = [
   { id: 'off', label: '关闭', hint: '原音量' },
@@ -640,6 +646,25 @@ export function ExportDialog({ onExport, onCoverExport }: ExportDialogProps) {
                         {dimensions ? `${dimensions.width} × ${dimensions.height}` : '—'}
                       </span>
                       <span className="quality-hint">{resolution.hint}</span>
+                    </button>
+                  )
+                })}
+              </div>
+              <div className="fps-row" role="group" aria-label="编码质量">
+                {QUALITY_TIERS.map((tier) => {
+                  const active = (project.exportQuality.tier ?? 'standard') === tier.id
+                  return (
+                    <button
+                      key={tier.id}
+                      type="button"
+                      className={`fps-option${active ? ' is-active' : ''}`}
+                      onClick={() =>
+                        setExportQuality({ ...project.exportQuality, tier: tier.id })
+                      }
+                      aria-pressed={active}
+                      title={`${tier.label}：${tier.hint}`}
+                    >
+                      {tier.label} <span>{tier.hint}</span>
                     </button>
                   )
                 })}

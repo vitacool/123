@@ -803,6 +803,60 @@
   gap: 12px;
 }
 
+/* 编辑器级错误边界：不依赖 .framecut-root 的主题变量（它可能没渲染出来）。 */
+.framecut-error-boundary {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: #f5f0e6;
+  color: #211f1c;
+  font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+}
+
+.framecut-error-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 440px;
+  padding: 24px;
+  border: 1px solid #d8cfbd;
+  border-radius: 12px;
+  background: #fffaf0;
+  box-shadow: 0 18px 50px rgb(60 40 20 / 0.18);
+}
+
+.framecut-error-card strong {
+  font-size: 18px;
+}
+
+.framecut-error-card p {
+  margin: 0;
+  color: #5a5147;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.framecut-error-card pre {
+  max-height: 160px;
+  margin: 6px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: #7a2e1f;
+}
+
+.framecut-error-card details summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #5a5147;
+}
+
 .local-badge {
   display: inline-flex;
   align-items: center;
@@ -813,6 +867,51 @@
   font-weight: 600;
   letter-spacing: 0.12em;
   text-transform: uppercase;
+}
+
+/* 顶栏保存状态：未保存 / 保存中 / 已保存 HH:MM / 保存失败。 */
+.save-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--fc-ink-soft);
+  font-size: var(--fc-text-xs);
+  white-space: nowrap;
+}
+
+.save-badge::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.55;
+}
+
+.save-badge.is-saving::before {
+  background: var(--fc-accent);
+  opacity: 1;
+}
+
+.save-badge.is-saved::before {
+  background: #4f9d6b;
+  opacity: 1;
+}
+
+.save-badge.is-error {
+  color: var(--fc-danger);
+}
+
+.save-badge.is-locked {
+  color: var(--fc-danger);
+}
+
+.save-badge.is-locked::before {
+  opacity: 1;
+}
+
+.save-badge.is-error::before {
+  opacity: 1;
 }
 
 .export-button {
@@ -957,6 +1056,43 @@
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.media-card-rename {
+  position: absolute;
+  right: 32px;
+  bottom: 12px;
+  left: 10px;
+  z-index: 3;
+  width: auto;
+  min-width: 0;
+  padding: 1px 4px;
+  border: 1px solid var(--fc-accent);
+  border-radius: var(--fc-radius-sm);
+  background: var(--fc-surface);
+  color: var(--fc-ink);
+  font-size: var(--fc-text-xs);
+  font-weight: 600;
+}
+
+.framecut-root .media-sort {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px 6px;
+  color: var(--fc-muted);
+  font-size: var(--fc-text-xs);
+}
+
+.framecut-root .media-sort select {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  border: 1px solid var(--fc-line);
+  border-radius: var(--fc-radius-sm);
+  background: var(--fc-surface);
+  color: var(--fc-ink);
+  font-size: var(--fc-text-xs);
 }
 
 .media-card-copy small {
@@ -1604,6 +1740,7 @@
 
 .caption-list-toolbar {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--fc-line);
@@ -1972,6 +2109,26 @@
   border-color: var(--fc-highlight);
   background: var(--fc-highlight);
   color: #1a1712;
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+/* 拖动转场标记时跟手的时长气泡。 */
+.transition-drag-badge {
+  position: absolute;
+  top: 16px;
+  transform: translateX(-50%);
+  padding: 1px 5px;
+  border-radius: var(--fc-radius-sm);
+  background: var(--fc-highlight);
+  color: #1a1712;
+  font-family: var(--fc-mono);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 7;
 }
 
 /* 下拉选择行 */
@@ -2658,6 +2815,53 @@
   white-space: nowrap;
 }
 
+/* 轨道名 + 轨道音量（音频轨）：竖向叠放，避免和右侧 6 个按钮抢横向空间。 */
+.track-controls-main {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+}
+
+.track-controls-main .track-controls-name {
+  flex: none;
+  width: 100%;
+}
+
+.track-volume {
+  width: 100%;
+  height: 10px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  accent-color: var(--fc-accent);
+  cursor: pointer;
+}
+
+/* 蒙版几何参数：两列紧凑排布（X/Y/宽/高/旋转）。 */
+.mask-geometry {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+}
+
+.mask-geometry > label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  color: var(--fc-ink-soft);
+  font-size: var(--fc-text-xs);
+}
+
+.mask-geometry > label > span {
+  flex: none;
+}
+
 .track-controls-buttons {
   display: flex;
   flex: none;
@@ -3282,6 +3486,10 @@
   height: 62px;
   min-width: 4px;
   overflow: hidden;
+  /* 触摸拖动片段必须独占手势：否则浏览器会把水平滑动判成 .timeline-scroll 的
+     横向 pan，随后发出 pointercancel，片段拖动被静默取消（裁剪手柄 / 播放头手柄 /
+     时间轴高度手柄都已声明 touch-action: none，只有片段本体漏了）。 */
+  touch-action: none;
   border: 1px solid rgb(var(--fc-warm-deep-rgb) / 0.18);
   border-radius: var(--fc-radius-md);
   cursor: grab;
@@ -6606,6 +6814,15 @@
 .framecut-root .project-card-copy small {
   color: var(--fc-muted);
   font-size: var(--fc-text-xs);
+}
+
+.framecut-root .project-card-meta {
+  display: block;
+  margin-top: 1px;
+  color: var(--fc-muted);
+  font-size: var(--fc-text-xs);
+  letter-spacing: 0.02em;
+  opacity: 0.85;
 }
 
 .framecut-root .project-card-input {

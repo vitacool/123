@@ -1,14 +1,23 @@
 import { isDragging, matchesPointer } from './pointerDrag'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { setBodyStyles, type BodyStyleOverrides } from './bodyStyles'
 import { subscribePlayheadTime } from './playheadClock'
-import { hasTransitionPair, normalizeTransitionType, transitionLabel } from '../core/transition'
+import {
+  hasTransitionPair,
+  maxTransitionDuration,
+  normalizeTransitionType,
+  transitionDurationFromDrag,
+  transitionLabel,
+  TRANSITION_MAX_DURATION,
+  TRANSITION_MIN_DURATION,
+} from '../core/transition'
 import { keyframeAt, type KeyframeRef } from '../core/keyframeEdit'
 import { findAnimationTarget } from '../core/animationTargets'
 import { ClipKeyframeBand } from './ClipKeyframeBand'
 import { EasingPopover } from './EasingPopover'
-import type { Easing } from '../core/types'
+import type { Easing, TransitionType } from '../core/types'
 import { clipSpeedValue } from '../core/speed'
+import { clipTimelineDuration } from '../core/clipTime'
 import { idsInRect, type SelectableSpan } from '../core/selection'
 import type {
   DragEvent as ReactDragEvent,
@@ -114,6 +123,16 @@ interface ClipDrag {
   clientY: number
 }
 
+interface TransitionDragState {
+  clipId: string
+  pointerId: number
+  startX: number
+  initial: number
+  duration: number
+  max: number
+  type: TransitionType
+}
+
 export function Timeline({ onPickFile }: TimelineProps) {
   const store = useEditorStoreApi()
   const project = useEditorStore((state) => state.project)
@@ -129,6 +148,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
   const toggleSelectClip = useEditorStore((state) => state.toggleSelectClip)
   const rangeSelectClip = useEditorStore((state) => state.rangeSelectClip)
   const setPlayhead = useEditorStore((state) => state.setPlayhead)
+  const setTransition = useEditorStore((state) => state.setTransition)
   const moveKeyframes = useEditorStore((state) => state.moveKeyframes)
   const setKeyframeEasing = useEditorStore((state) => state.setKeyframeEasing)
   const deleteKeyframes = useEditorStore((state) => state.deleteKeyframes)
@@ -227,6 +247,10 @@ export function Timeline({ onPickFile }: TimelineProps) {
   const [scrub, setScrub] = useState<{ pointerId: number } | null>(null)
   const [edgeDrag, setEdgeDrag] = useState<EdgeDrag | null>(null)
   const [clipDrag, setClipDrag] = useState<ClipDrag | null>(null)
+  const [transitionDrag, setTransitionDrag] = useState<TransitionDragState | null>(null)
+  const transitionDragRef = useRef<TransitionDragState | null>(null)
+  const suppressTransitionClick = useRef(false)
+  const transitionDragging = transitionDrag !== null
   const [popover, setPopover] = useState<MarkerPopoverState | null>(null)
   const [clipMenu, setClipMenu] = useState<ClipMenuState | null>(null)
   /** 关键帧选中态：属于哪个片段 + 选中的 {prop,t} 列表（不进草稿、不进撤销栈）。 */
@@ -541,7 +565,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
       const state = store.getState()
       let snappedDelta = delta
       let snapTime: number | null = null
-      if (state.timelineSettings.autoSnap) {
+      if (state.timelineSettings.autoSnap && !event.altKey) {
         const location = findClipLocation(state.project, current.clipId)
         if (location) {
           const edgeTime =
@@ -708,7 +732,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
       let targetTime = 0
       let snapKind: 'auto' | 'magnet' | null = null
       let snapLabel: string | null = null
-      if (settings.mainTrackMagnet && targetTrackId === null) {
+      if (settings.mainTrackMagnet && targetTrackId === null && !event.altKey) {
         targetIndex = clamp(
           others.filter((segment) => (segment.start + segment.end) / 2 < rawTime - 0.0001).length,
           0,
@@ -720,7 +744,7 @@ export function Timeline({ onPickFile }: TimelineProps) {
         snapKind = 'magnet'
         snapLabel = '主轨贴合'
       } else {
-        const snap = settings.autoSnap ? evaluateSnap(autoPoints, 12 / pps) : null
+        const snap = settings.autoSnap && !event.altKey ? evaluateSnap(autoPoints, 12 / pps) : null
         const snappedTime = Math.max(0, rawTime + (snap?.delta ?? 0))
         targetIndex = clamp(
           others.filter(
@@ -771,6 +795,46 @@ export function Timeline({ onPickFile }: TimelineProps) {
       window.removeEventListener('pointercancel', cancel)
     }
   }, [isDragging(clipDrag), pps, segments, total, moveClipToTrackAtTime, store])
+
+  /** 拖转场标记改时长：3px 以上算拖动，否则保留原点击（选中片段/打开设置）。 */
+  useEffect(() => {
+    if (!transitionDragging) return
+    const handleMove = (event: PointerEvent) => {
+      const current = transitionDragRef.current
+      if (!matchesPointer(current, event)) return
+      const duration = transitionDurationFromDrag(
+        current.initial,
+        event.clientX - current.startX,
+        pps,
+        current.max,
+      )
+      const next = { ...current, duration }
+      transitionDragRef.current = next
+      setTransitionDrag(next)
+    }
+    const finish = (event: PointerEvent) => {
+      const current = transitionDragRef.current
+      if (!matchesPointer(current, event)) return
+      if (Math.abs(event.clientX - current.startX) >= 3) {
+        suppressTransitionClick.current = true
+        setTransition(current.clipId, current.type, current.duration)
+      }
+      transitionDragRef.current = null
+      setTransitionDrag(null)
+    }
+    const cancel = () => {
+      transitionDragRef.current = null
+      setTransitionDrag(null)
+    }
+    window.addEventListener('pointermove', handleMove)
+    window.addEventListener('pointerup', finish)
+    window.addEventListener('pointercancel', cancel)
+    return () => {
+      window.removeEventListener('pointermove', handleMove)
+      window.removeEventListener('pointerup', finish)
+      window.removeEventListener('pointercancel', cancel)
+    }
+  }, [transitionDragging, pps, setTransition])
 
   useEffect(() => {
     const element = scrollRef.current
@@ -1069,6 +1133,22 @@ export function Timeline({ onPickFile }: TimelineProps) {
       }
       for (const segment of getTimeline(project.clips)) {
         spans.push({ id: segment.clip.id, trackId: 'base', start: segment.start, end: segment.end })
+      }
+      // 音频/字幕也纳入框选：Ctrl+A 能选到它们，框选不应漏（两套口径曾经不一致）。
+      for (const track of project.audioTracks ?? []) {
+        for (const clip of track.clips) {
+          spans.push({
+            id: clip.id,
+            trackId: track.id,
+            start: clip.start,
+            end: clip.start + clipTimelineDuration(clip),
+          })
+        }
+      }
+      for (const track of project.textTracks ?? []) {
+        for (const clip of track.clips) {
+          spans.push({ id: clip.id, trackId: track.id, start: clip.start, end: clip.end })
+        }
       }
       const hit = idsInRect(spans, { start, end })
       if (boxSelect.additive) {
@@ -2058,30 +2138,69 @@ export function Timeline({ onPickFile }: TimelineProps) {
               const gap = Math.max(0, nextClip.gapBefore ?? 0)
               if (!hasTransitionPair(segment.clip, nextClip, gap)) return null
               const active = Boolean(segment.clip.transitionOut)
+              const transition = segment.clip.transitionOut
+              const draggingThis = transitionDrag?.clipId === segment.clip.id
               const x = pad + (active ? next.start + (next.duration - 0) * 0 : next.start) * pps
               return (
-                <button
-                  key={`transition-${segment.clip.id}`}
-                  type="button"
-                  className={`transition-marker${active ? ' is-active' : ''}`}
-                  style={{ left: x - 7 }}
-                  aria-label={
-                    active
-                      ? `转场：${transitionLabel(normalizeTransitionType(segment.clip.transitionOut?.type))}，点击编辑`
-                      : '添加转场'
-                  }
-                  title={
-                    active
-                      ? `转场 ${segment.clip.transitionOut?.duration.toFixed(1)}s（点击编辑）`
-                      : '点击添加转场'
-                  }
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    selectClip(segment.clip.id)
-                  }}
-                >
-                  <Icon name="split" size={12} />
-                </button>
+                <Fragment key={`transition-${segment.clip.id}`}>
+                  <button
+                    type="button"
+                    className={`transition-marker${active ? ' is-active' : ''}`}
+                    style={{ left: x - 7 }}
+                    aria-label={
+                      active
+                        ? `转场：${transitionLabel(normalizeTransitionType(transition?.type))}，拖动改时长，点击编辑`
+                        : '添加转场'
+                    }
+                    title={
+                      active
+                        ? `转场 ${transition?.duration.toFixed(1)}s（拖动改时长，点击编辑）`
+                        : '点击添加转场'
+                    }
+                    onPointerDown={(event) => {
+                      if (!active || !transition) return
+                      event.preventDefault()
+                      event.stopPropagation()
+                      const cap = Math.max(
+                        TRANSITION_MIN_DURATION,
+                        Math.min(
+                          TRANSITION_MAX_DURATION,
+                          maxTransitionDuration(segment.clip, nextClip),
+                        ),
+                      )
+                      const state: TransitionDragState = {
+                        clipId: segment.clip.id,
+                        pointerId: event.pointerId,
+                        startX: event.clientX,
+                        initial: transition.duration,
+                        duration: transition.duration,
+                        max: cap,
+                        type: normalizeTransitionType(transition.type),
+                      }
+                      transitionDragRef.current = state
+                      setTransitionDrag(state)
+                    }}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      if (suppressTransitionClick.current) {
+                        suppressTransitionClick.current = false
+                        return
+                      }
+                      selectClip(segment.clip.id)
+                    }}
+                  >
+                    <Icon name="split" size={12} />
+                  </button>
+                  {draggingThis && transitionDrag && (
+                    <span
+                      className="transition-drag-badge"
+                      style={{ left: x + 10 }}
+                      aria-hidden="true"
+                    >
+                      {transitionDrag.duration.toFixed(1)}s
+                    </span>
+                  )}
+                </Fragment>
               )
             })}
 

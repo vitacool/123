@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { TrackFlag, TrackKind } from '../core/tracks'
 import type { TrackState } from '../core/types'
 import { useEditorStore } from '../store/EditorProvider'
@@ -21,6 +21,10 @@ interface TrackControlsProps {
   onMoveDown?: () => void
   /** 主轨行的封面入口。 */
   onOpenCover?: () => void
+  /** 音频轨轨道级增益（0…2）；仅 kind==='audio' 时渲染。 */
+  volume?: number
+  /** 增益提交（松手 / 键盘结束 / 失焦时触发一次）。 */
+  onVolumeChange?: (volume: number) => void
 }
 
 const titles: Record<TrackFlag, string> = {
@@ -29,6 +33,64 @@ const titles: Record<TrackFlag, string> = {
   hidden: '隐藏本轨画面；声音不受影响',
   muted: '静音本轨声音；画面不受影响',
   solo: '独奏本轨声音；其他未独奏轨道自动静音',
+}
+
+/**
+ * 轨道级音量。拖动时只改本地草稿，松手 / 键盘结束 / 失焦才提交一次，
+ * 这样一次拖动只产生一步撤销（轨道音量此前没有常驻入口）。
+ */
+function TrackVolume({
+  value,
+  ariaLabel,
+  onChange,
+}: {
+  value: number
+  ariaLabel: string
+  onChange: (value: number) => void
+}) {
+  const [draft, setDraft] = useState(value)
+  const dirty = useRef(false)
+  const interacting = useRef(false)
+  useEffect(() => {
+    if (!interacting.current) setDraft(value)
+  }, [value])
+  const commit = () => {
+    if (!dirty.current) return
+    dirty.current = false
+    onChange(draft)
+  }
+  const percent = Math.round(draft * 100)
+  return (
+    <input
+      type="range"
+      className="track-volume"
+      min={0}
+      max={200}
+      step={1}
+      value={percent}
+      aria-label={ariaLabel}
+      title={`音量 ${percent}%`}
+      onPointerDown={() => {
+        interacting.current = true
+      }}
+      onChange={(event) => {
+        dirty.current = true
+        setDraft(Number(event.target.value) / 100)
+      }}
+      onPointerUp={() => {
+        interacting.current = false
+        commit()
+      }}
+      onKeyUp={() => {
+        interacting.current = false
+        commit()
+      }}
+      onBlur={() => {
+        interacting.current = false
+        commit()
+      }}
+    />
+  )
 }
 
 export function TrackControls({
@@ -44,6 +106,8 @@ export function TrackControls({
   onMoveUp,
   onMoveDown,
   onOpenCover,
+  volume,
+  onVolumeChange,
 }: TrackControlsProps) {
   const toggleTrackFlag = useEditorStore((store) => store.toggleTrackFlag)
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
@@ -77,9 +141,18 @@ export function TrackControls({
           : undefined
       }
     >
-      <span className="track-controls-name" title={name}>
-        {name}
-      </span>
+      <div className="track-controls-main">
+        <span className="track-controls-name" title={name}>
+          {name}
+        </span>
+        {audioOnly && onVolumeChange && (
+          <TrackVolume
+            value={volume ?? 1}
+            ariaLabel={`${name}音量`}
+            onChange={onVolumeChange}
+          />
+        )}
+      </div>
       <div className="track-controls-buttons" role="group" aria-label={`${name}控制`}>
         {reorderable && (
           <span className="track-move-stack" role="group" aria-label={`${name}层级`}>

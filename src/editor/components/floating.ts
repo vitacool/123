@@ -35,7 +35,9 @@ export function useFloatingPosition(
     left = Math.max(margin, Math.min(left, viewportWidth - width - margin))
     top = Math.max(margin, Math.min(top, viewportHeight - height - margin))
     setPos((current) => (current.left === left && current.top === top ? current : { left, top }))
-  })
+    // 只在锚点或边距变化时重新测量：无依赖数组会让每次父渲染都 measure 一次并
+    // （首帧后）再触发一轮 setState 重渲染，菜单打开期间等于双倍渲染。
+  }, [x, y, margin])
 
   return { ref, style: pos }
 }

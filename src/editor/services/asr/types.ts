@@ -1,6 +1,6 @@
-import type { AsrLanguage, AsrWord } from '../../core/asr'
+import type { AsrLanguage, AsrScript, AsrWord } from '../../core/asr'
 
-export type { AsrLanguage, AsrWord }
+export type { AsrLanguage, AsrScript, AsrWord }
 
 /**
  * A pluggable speech-recognition engine. `VideoEditor` exposes an optional
@@ -21,6 +21,8 @@ export interface TranscribeProvider {
     pcm16k: Float32Array,
     opts: {
       language: AsrLanguage
+      /** 输出字形；缺省 simplified（保持历史行为）。 */
+      script?: AsrScript
       signal?: AbortSignal
       onProgress?: (stage: 'model' | 'transcribe', pct: number, detail: string) => void
     },

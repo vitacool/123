@@ -10,9 +10,9 @@ import type { MediaAsset, Project } from './core/types'
 import type { ExportRange } from './core/exportRange'
 import type { FrameCutTheme } from './core/theme'
 import { createId } from './core/ids'
-import { projectNameFromSource } from './core/projectLibrary'
+import { projectNameFromSource, projectLimitReached, PROJECT_LIMIT } from './core/projectLibrary'
 import { remoteName, readAssetFile } from './services/assetReader'
-import { persistImportedAssets } from './services/draftStore'
+import { countProjectRecords, persistImportedAssets } from './services/draftStore'
 import { captureFrameBlob, frameCaptureWarning } from './services/frameCapture'
 import { exportProject, terminateFFmpegRuntime } from './services/ffmpegExporter'
 import type { ExportFormat } from './services/ffmpegExporter'
@@ -228,6 +228,14 @@ export function createFrameCutApi({
     getProject: () => store.getState().project,
 
     loadProject: async (project, files = []) => {
+      // 载入工程 = 新建一条草稿（新的 projectId）。达到上限时必须先拦住，
+      // 否则宿主会拿到一个「能编辑、但每次保存都被丢弃」的会话。
+      const total = await countProjectRecords()
+      if (projectLimitReached(total)) {
+        const message = `项目数已达上限（${total}/${PROJECT_LIMIT}）：请先在「最近项目」删除一个旧项目，再载入新工程`
+        store.getState().notify(message, 'warning')
+        throw new Error(message)
+      }
       const pairs = matchFilesToProjectUrls(project, files)
       const urlMap = new Map<string, string>()
       const extraAssets: MediaAsset[] = []

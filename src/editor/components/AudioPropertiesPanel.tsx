@@ -2,7 +2,7 @@ import { FREEZE_MAX_DURATION } from '../core/constants'
 import { hasVolumeAnimation } from '../core/animation'
 import { audioClipDuration, getAudioActionAvailability } from '../core/audio'
 import { formatClock } from '../core/format'
-import type { AudioClip, AudioTrack } from '../core/types'
+import type { AudioClip, AudioTrack, FadeCurve } from '../core/types'
 import { useEditorStore } from '../store/EditorProvider'
 import { CommitNumber } from './Toast'
 import { CommitSlider } from './CommitSlider'
@@ -18,6 +18,7 @@ export function AudioPropertiesPanel({ track, clip }: AudioPropertiesPanelProps)
   const assets = useEditorStore((state) => state.assets)
   const project = useEditorStore((state) => state.project)
   const playhead = useEditorStore((state) => state.playhead)
+  const moveAudioClip = useEditorStore((state) => state.moveAudioClip)
   const splitAtPlayhead = useEditorStore((state) => state.splitAtPlayhead)
   const trimLeftAtPlayhead = useEditorStore((state) => state.trimLeftAtPlayhead)
   const trimRightAtPlayhead = useEditorStore((state) => state.trimRightAtPlayhead)
@@ -66,6 +67,25 @@ export function AudioPropertiesPanel({ track, clip }: AudioPropertiesPanelProps)
           <span className="summary-dot" />
           <span className="summary-meta">从 {formatClock(clip.start)} 开始</span>
         </div>
+
+        <section className="panel-section">
+          <div className="section-title">
+            <span>位置</span>
+            <span className="section-hint">秒</span>
+          </div>
+          <div className="control-with-field">
+            <span className="section-hint">开始</span>
+            <CommitNumber
+              value={Number(clip.start.toFixed(2))}
+              min={0}
+              max={86400}
+              step={0.1}
+              unit="s"
+              ariaLabel="音频开始时间"
+              onCommit={(value) => moveAudioClip(track.id, clip.id, value)}
+            />
+          </div>
+        </section>
 
         <section className="panel-section">
           <div className="section-title">
@@ -193,6 +213,36 @@ export function AudioPropertiesPanel({ track, clip }: AudioPropertiesPanelProps)
                 ariaLabel="音频淡出"
                 onCommit={(value) => commit({ fadeOut: value }, '调整音频淡出')}
               />
+            </label>
+          </div>
+          <div className="position-grid">
+            <label>
+              <span>淡入曲线</span>
+              <select
+                value={clip.fadeInCurve ?? 'linear'}
+                aria-label="音频淡入曲线"
+                onChange={(event) =>
+                  commit({ fadeInCurve: event.target.value as FadeCurve }, '调整音频淡入曲线')
+                }
+              >
+                <option value="linear">线性</option>
+                <option value="exp">指数</option>
+                <option value="log">对数</option>
+              </select>
+            </label>
+            <label>
+              <span>淡出曲线</span>
+              <select
+                value={clip.fadeOutCurve ?? 'linear'}
+                aria-label="音频淡出曲线"
+                onChange={(event) =>
+                  commit({ fadeOutCurve: event.target.value as FadeCurve }, '调整音频淡出曲线')
+                }
+              >
+                <option value="linear">线性</option>
+                <option value="exp">指数</option>
+                <option value="log">对数</option>
+              </select>
             </label>
           </div>
         </section>

@@ -544,12 +544,30 @@ export interface ReplaceClipSourceInput {
 function swapClipFades<T extends Clip>(clip: T): T {
   const fadeIn = clip.fadeOut ?? 0
   const fadeOut = clip.fadeIn ?? 0
-  if (fadeIn === (clip.fadeIn ?? 0) && fadeOut === (clip.fadeOut ?? 0)) return clip
-  const next = { ...clip } as T & { fadeIn?: number; fadeOut?: number }
+  const fadeInCurve = clip.fadeOutCurve
+  const fadeOutCurve = clip.fadeInCurve
+  if (
+    fadeIn === (clip.fadeIn ?? 0) &&
+    fadeOut === (clip.fadeOut ?? 0) &&
+    fadeInCurve === clip.fadeInCurve &&
+    fadeOutCurve === clip.fadeOutCurve
+  ) {
+    return clip
+  }
+  const next = { ...clip } as T & {
+    fadeIn?: number
+    fadeOut?: number
+    fadeInCurve?: Clip['fadeInCurve']
+    fadeOutCurve?: Clip['fadeOutCurve']
+  }
   if (fadeIn === 0) delete next.fadeIn
   else next.fadeIn = fadeIn
   if (fadeOut === 0) delete next.fadeOut
   else next.fadeOut = fadeOut
+  if (fadeInCurve === undefined) delete next.fadeInCurve
+  else next.fadeInCurve = fadeInCurve
+  if (fadeOutCurve === undefined) delete next.fadeOutCurve
+  else next.fadeOutCurve = fadeOutCurve
   return next as T
 }
 

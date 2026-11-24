@@ -58,6 +58,20 @@ describe('resolveCaptionStyle', () => {
     // 未覆盖的字段继续从 group / 默认值取
     expect(resolveCaptionStyle(base, { fontSize: 0.06 }).fontSize).toBe(0.06)
   })
+
+  it('行距/字距/斜体同样按 override > group > clip 取值', () => {
+    const base = clip({ lineHeight: 1.4, letterSpacing: 0.05, italic: true })
+    expect(resolveCaptionStyle(base, undefined).lineHeight).toBe(1.4)
+    expect(resolveCaptionStyle(base, undefined).letterSpacing).toBe(0.05)
+    expect(resolveCaptionStyle(base, undefined).italic).toBe(true)
+    // group 覆盖 clip
+    expect(resolveCaptionStyle(base, { lineHeight: 1.8 }).lineHeight).toBe(1.8)
+    // override 覆盖 group
+    const override = clip({ styleOverride: { letterSpacing: 0.2, italic: false } })
+    const resolved = resolveCaptionStyle(override, { letterSpacing: 0.1, italic: true })
+    expect(resolved.letterSpacing).toBe(0.2)
+    expect(resolved.italic).toBe(false)
+  })
 })
 
 describe('caption track group style mutations', () => {

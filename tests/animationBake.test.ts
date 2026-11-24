@@ -36,6 +36,8 @@ function richClip(): Clip {
       volume: 1.5,
       fadeIn: 0.5,
       fadeOut: 0.4,
+      fadeInCurve: 'exp',
+      fadeOutCurve: 'log',
       speed: 2,
       keepPitch: false,
       opacity: 0.5,

@@ -88,6 +88,26 @@ export function clampTransitionDuration(value: unknown): number {
   return Math.max(TRANSITION_MIN_DURATION, Math.min(TRANSITION_MAX_DURATION, value))
 }
 
+/**
+ * 时间轴上拖动转场标记时，把像素位移换算成新时长（夹到 [MIN, max]）。
+ * 纯函数，便于单测；`pps` 是当前时间轴缩放（像素/秒）。
+ */
+export function transitionDurationFromDrag(
+  initial: number,
+  deltaPixels: number,
+  pps: number,
+  maxDuration: number,
+): number {
+  const start = clampTransitionDuration(initial)
+  const pixelsPerSecond = Number.isFinite(pps) && pps > 0 ? pps : 1
+  const delta = Number.isFinite(deltaPixels) ? deltaPixels / pixelsPerSecond : 0
+  const cap = Math.max(
+    TRANSITION_MIN_DURATION,
+    Math.min(TRANSITION_MAX_DURATION, Number.isFinite(maxDuration) ? maxDuration : TRANSITION_MAX_DURATION),
+  )
+  return Math.max(TRANSITION_MIN_DURATION, Math.min(cap, start + delta))
+}
+
 /** 片段是否设置了转场。 */
 export function clipTransitionOut(clip: Clip): { type: TransitionType; duration: number } | null {
   const value = clip.transitionOut

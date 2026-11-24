@@ -1,11 +1,15 @@
 import type { CanvasBackground, Clip, Project } from './types'
 
-/** 背景类型的中文名与顺序。 */
+/**
+ * 背景类型的中文名与顺序。
+ *
+ * 「图片」背景尚未实现：预览与导出都没有读取 `imageUrl`，选了只会得到黑场。
+ * 因此不在这里暴露入口；旧工程里的 image 由 `normalizeBackground` 回退成黑场。
+ */
 export const BACKGROUND_TYPES: readonly { value: CanvasBackground['type']; label: string }[] = [
   { value: 'black', label: '黑色' },
   { value: 'color', label: '纯色' },
   { value: 'blur', label: '模糊填充' },
-  { value: 'image', label: '图片' },
 ]
 
 /** 默认背景：与既有预览底色一致的黑场。 */
@@ -36,13 +40,8 @@ export function normalizeBackground(value: unknown): CanvasBackground {
       : DEFAULT_BACKGROUND_COLOR
   if (type === 'color') return { type, color }
   if (type === 'blur') return { type, blurAmount: clampBlur(raw.blurAmount) }
-  if (type === 'image') {
-    return {
-      type,
-      imageUrl: typeof raw.imageUrl === 'string' && raw.imageUrl ? raw.imageUrl : undefined,
-      blurAmount: clampBlur(raw.blurAmount),
-    }
-  }
+  // 图片背景未实现（预览/导出都不读 imageUrl）：旧草稿统一按黑场读取，
+  // 避免「预览显示模糊画面、导出却是黑场」这种静默分歧。
   return { type: 'black' }
 }
 
@@ -71,11 +70,22 @@ export function backgroundCssColor(background: CanvasBackground): string {
   return BACKGROUND_FALLBACK
 }
 
-/** 预览 Canvas filter 中的模糊半径（px）。 */
-export function backgroundBlurPx(background: CanvasBackground): number {
-  return background.type === 'blur' || background.type === 'image'
-    ? clampBlur(background.blurAmount)
-    : 0
+/** 预览 Canvas filter 中的模糊半径（px），按 1080p 参考高度归一。 */
+export function backgroundBlurPx(
+  background: CanvasBackground,
+  referenceHeight = 1080,
+): number {
+  if (background.type !== 'blur') return 0
+  const height =
+    Number.isFinite(referenceHeight) && referenceHeight > 0 ? referenceHeight : 1080
+  // blurAmount 的含义固定为「1080p 画布上的像素」：预览/导出/截帧按各自高度换算，
+  // 否则同一个 24px 在 450px 预览里糊得刚好、在 1080p 成片里几乎看不出来，4K 更弱。
+  return clampBlur(background.blurAmount) * (height / 1080)
+}
+
+/** 界面滑块显示的原始强度（不按画布高度缩放）。 */
+export function backgroundBlurAmount(background: CanvasBackground): number {
+  return background.type === 'blur' ? clampBlur(background.blurAmount) : 0
 }
 
 /** FFmpeg pad 用的颜色值（0xRRGGBB）。 */
@@ -100,13 +110,11 @@ export function compositeBackgroundFfmpegColor(background: CanvasBackground): st
 }
 
 /**
- * 该片段是否需要独立的背景层（模糊/图片）。
+ * 该片段是否需要独立的背景层（模糊）。
  * 黑场与纯色可以直接用 pad 颜色实现，无需额外滤镜分支。
  */
 export function needsBackgroundLayer(background: CanvasBackground): boolean {
-  if (background.type === 'blur') return true
-  if (background.type === 'image') return Boolean(background.imageUrl)
-  return false
+  return background.type === 'blur'
 }
 
 /** 是否把背景应用到所有片段（用于「应用到全部」按钮的提示）。 */

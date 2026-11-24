@@ -189,6 +189,10 @@ describe('buildExportPlan', () => {
     expect(() => buildExportPlan(empty, SOURCE, true)).toThrow()
     expect(getExportCrf('480p')).toBe(23)
     expect(getExportCrf('4K')).toBe(20)
+    // 质量档只调 CRF：high 更清晰、small 更小；不改分辨率。
+    expect(getExportCrf('1080p', 'high')).toBe(18)
+    expect(getExportCrf('1080p', 'small')).toBe(26)
+    expect(getExportCrf('4K', 'high')).toBe(17)
   })
 
   it('builds an overlay graph with a second source input', () => {
@@ -346,6 +350,39 @@ describe('multi-source export plan', () => {
     expect(plan.graph).toContain('concat=n=3:v=1:a=0[outv]')
     expect(plan.graph).toContain('[0:a]atrim=start=0:end=6')
     expect(plan.graph).toContain('concat=n=3:v=0:a=1[outa]')
+  })
+
+  it('淡入/淡出曲线写进 afade 参数', () => {
+    const project = createInitialProject({ url: SOURCE.url, duration: 10 }, 'clip-a')
+    project.clips[0] = {
+      ...project.clips[0],
+      fadeIn: 1,
+      fadeOut: 1,
+      fadeInCurve: 'exp',
+      fadeOutCurve: 'log',
+    }
+    const plan = buildExportPlan(project, SOURCE, true)
+    expect(plan.graph).toContain('afade=t=in:st=0:d=1:curve=exp')
+    expect(plan.graph).toContain(':curve=log')
+  })
+
+  it('有间隙时仍保留纯色画布背景（不再退回黑场）', () => {
+    const project = createInitialProject({ url: SOURCE.url, duration: 10 }, 'clip-a')
+    project.clips[0] = { ...project.clips[0], gapBefore: 2 }
+    project.canvasBackground = { type: 'color', color: '#336699' }
+    const plan = buildExportPlan(project, SOURCE, true)
+    // 空隙单元仍是黑场（README 的既有约定），但片段本身必须用配置的背景色。
+    expect(plan.graph).toContain('color=c=black')
+    expect(plan.graph).toContain('0x336699')
+  })
+
+  it('有间隙时模糊背景仍会生成模糊底（不再只剩透明/黑场）', () => {
+    const project = createInitialProject({ url: SOURCE.url, duration: 10 }, 'clip-a')
+    project.clips[0] = { ...project.clips[0], gapBefore: 2 }
+    project.canvasBackground = { type: 'blur', blurAmount: 24 }
+    const plan = buildExportPlan(project, SOURCE, true)
+    expect(plan.graph).toContain('gblur=sigma=')
+    expect(plan.graph).toContain('overlay=0:0')
   })
 
   it('reads an overlay from its own asset input', () => {

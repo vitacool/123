@@ -40,6 +40,15 @@ describe('normalizeAssetName / 文件名匹配', () => {
     expect(normalizeAssetName(' Clip.MP4 ')).toBe('clip')
   })
 
+  it('剥掉 HEVC 代理后缀：原文件名可以匹配回代理素材', () => {
+    expect(normalizeAssetName('旅行-h264.mp4')).toBe('旅行')
+    expect(normalizeAssetName('旅行-H265.MOV')).toBe('旅行')
+    const pending = [item('a', '旅行-h264.mp4')]
+    const { assignments, unmatched } = matchPickedFiles(pending, [fileOf('旅行.mov')])
+    expect(assignments.get('a')?.name).toBe('旅行.mov')
+    expect(unmatched).toEqual([])
+  })
+
   it('按文件名自动匹配（可一次多选）', () => {
     const pending = [item('a', 'a.mp4'), item('b', 'b.mp4')]
     const { assignments, unmatched } = matchPickedFiles(pending, [

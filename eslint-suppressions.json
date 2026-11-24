@@ -130,11 +130,6 @@
       "count": 1
     }
   },
-  "src/editor/components/floating.ts": {
-    "react-hooks/exhaustive-deps": {
-      "count": 1
-    }
-  },
   "src/editor/core/frameCompose.ts": {
     "no-control-regex": {
       "count": 1
