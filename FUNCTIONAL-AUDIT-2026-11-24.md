@@ -84,7 +84,7 @@
 | P3-7 缩略图失败无重试 | ✅ 已修 | 素材右键菜单新增「重新生成缩略图」；成功写回素材与主素材 | `tests/assetRemoval.test.ts` 新增 store 更新用例 |
 | P3-1 导出画质只有分辨率 | ✅ 已修 | 新增 `tier`（高画质/标准/小体积），按 ±CRF 映射；导出弹窗增加质量档 | `tests/exportPlan.test.ts` 新增 CRF 档位断言 |
 | P3-2 片段无键盘微调 | ✅ 已修（微调） | `[`/`]` 逐帧、`{`/`}` 逐秒移动选中片段（可多选批量）；连续按不再弹 toast | 新增 `tests/selection.test.ts` 的 `moveSelectionBy` 用例 |
-| P3-5 素材库缺能力 | ✅ 部分 | 右键可**重命名素材**（卡片内联输入，主素材同步）；导入时同名同大小**自动跳过**；新增**排序**（导入顺序/名称/时长/大小） | 新增 `tests/assetsDedupe.test.ts` + `tests/assetSort.test.ts` + 重命名用例 |
+| P3-5 素材库缺能力 | ✅ 已修 | 右键**重命名**；重复导入**跳过**；**排序**（导入顺序/名称/时长/大小）；**使用情况筛选**（全部/已使用/未使用） | `tests/assetsDedupe.test.ts` + `assetSort.test.ts` + `assetFilter.test.ts` + 重命名用例 |
 | P3-3 吸附规则不一致 | ✅ 部分 | 拖动片段/裁剪边缘/音频片段时按住 **Alt 临时关闭吸附与主轨磁吸**；磁吸与自动吸附组合仍是设计边界（磁吸负责顺排，自动吸附负责自由定位） | 纯函数吸附测试既有；Alt 行为属手势层 |
 | P3-10 文字缺行距/字距/斜体 | ✅ 已修 | `CaptionStyle`/`TextClip` 增加 `lineHeight`/`letterSpacing`/`italic`；预览与导出共用 `drawTextClip`（行距倍数、em 字距、斜体字体）；排版面板可调 | `tests/captionStyle.test.ts` 新增优先级用例 |
 | P3-13 波形长素材精度差 | ✅ 已修 | 峰值桶数从固定 600 改为「约 40 桶/秒、上限 12 万」，1 小时素材每桶约 0.09s，短片段不再是一条平线 | `tests/audioWaveform.test.ts` 新增桶数用例 |
@@ -97,7 +97,7 @@
 
 **P3 其余待做**：slip/slide/roll、素材库文件夹/筛选、完整文案注入（i18n）。
 
-**P3 + 音频能力 + 长片虚拟化验证**：`tsc` 0 错误；全量 `vitest` **1226 passed / 2 skipped**；完整 e2e（Edge）**22 passed**；全仓 `eslint` 0 error（22 条存量 warning）。
+**P3 + 音频能力 + 长片虚拟化 + 素材筛选验证**：`tsc` 0 错误；全量 `vitest` **1229 passed / 2 skipped**；完整 e2e（Edge）**22 passed**；全仓 `eslint` 0 error（22 条存量 warning）。
 
 **当前验证（Round 3 收尾，Batch C 完成）**：`tsc` 0 错误；全量 `vitest` **1189 passed / 2 skipped**；完整 e2e（Edge）**22 passed**；本批改动 `eslint` 0 error（仅存量警告）。
 

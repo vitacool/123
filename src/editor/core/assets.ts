@@ -62,6 +62,28 @@ export function sortAssets(
   return copy.sort((left, right) => value(right) - value(left))
 }
 
+/** 素材库使用情况筛选。 */
+export type AssetUsageFilter = 'all' | 'used' | 'unused'
+
+export const ASSET_USAGE_OPTIONS: readonly { value: AssetUsageFilter; label: string }[] = [
+  { value: 'all', label: '全部' },
+  { value: 'used', label: '已使用' },
+  { value: 'unused', label: '未使用' },
+]
+
+/** 按「是否被工程引用」筛选；未使用判定复用 unusedAssets（含倒放原素材链）。 */
+export function filterAssetsByUsage(
+  assets: readonly MediaAsset[],
+  project: Project,
+  usage: AssetUsageFilter,
+): MediaAsset[] {
+  if (usage === 'all') return [...assets]
+  const unusedIds = new Set(unusedAssets(project, assets).map((asset) => asset.id))
+  return assets.filter((asset) =>
+    usage === 'unused' ? unusedIds.has(asset.id) : !unusedIds.has(asset.id),
+  )
+}
+
 /** 当前素材库里的 url 集合。 */
 export function assetUrlSet(assets: readonly MediaAsset[]): Set<string> {
   return new Set(assets.map((asset) => asset.url))

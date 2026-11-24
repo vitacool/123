@@ -1084,6 +1084,10 @@
   font-size: var(--fc-text-xs);
 }
 
+.framecut-root .media-sort span {
+  white-space: nowrap;
+}
+
 .framecut-root .media-sort select {
   flex: 1;
   min-width: 0;

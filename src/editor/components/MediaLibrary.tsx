@@ -2,15 +2,18 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ASSET_KIND_LABELS,
   ASSET_SORT_OPTIONS,
+  ASSET_USAGE_OPTIONS,
   assetKindOf,
   countAssetKinds,
   countAssetReferences,
   matchesAssetName,
+  filterAssetsByUsage,
   reversedDependents,
   sortAssets,
   unusedAssets,
   type AssetKind,
   type AssetSortMode,
+  type AssetUsageFilter,
 } from '../core/assets'
 import { formatPlayhead } from '../core/format'
 import type { MediaAsset } from '../core/types'
@@ -67,6 +70,7 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
   const [activeKind, setActiveKind] = useState<AssetKind>('video')
   const [query, setQuery] = useState('')
   const [sortMode, setSortMode] = useState<AssetSortMode>('added')
+  const [usageFilter, setUsageFilter] = useState<AssetUsageFilter>('all')
   const [pending, setPending] = useState<PendingDelete | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; asset: MediaAsset } | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
@@ -119,7 +123,7 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
   const visible = searching
     ? assets.filter((asset) => matchesAssetName(asset, keyword))
     : assets.filter((asset) => assetKindOf(asset) === activeKind)
-  const sortedVisible = sortAssets(visible, sortMode)
+  const sortedVisible = sortAssets(filterAssetsByUsage(visible, project, usageFilter), sortMode)
 
   const unused = unusedAssets(project, assets)
 
@@ -338,7 +342,7 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
         )}
       </div>
 
-      <label className="media-sort">
+      <div className="media-sort">
         <span>排序</span>
         <select
           value={sortMode}
@@ -351,7 +355,19 @@ export function MediaLibrary({ onImport }: MediaLibraryProps) {
             </option>
           ))}
         </select>
-      </label>
+        <span>使用</span>
+        <select
+          value={usageFilter}
+          aria-label="素材使用情况筛选"
+          onChange={(event) => setUsageFilter(event.target.value as AssetUsageFilter)}
+        >
+          {ASSET_USAGE_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </div>
 
       {searching && (
         <p className="media-search-status">
